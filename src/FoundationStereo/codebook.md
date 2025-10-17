@@ -1,0 +1,1 @@
+python scripts/run_demo.py --left_file left.png --right_file right.png --intrinsic_file assets/K_ZED.txt
