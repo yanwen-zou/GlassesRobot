@@ -1,0 +1,3 @@
+source;share/SAM-2/hook/pythonpath.ps1
+source;share/SAM-2/hook/pythonpath.dsv
+source;share/SAM-2/hook/pythonpath.sh

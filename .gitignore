@@ -1,0 +1,66 @@
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Project data and generated assets
+data/
+data_*/
+data-*/
+datasets/
+dataset/
+data_lion/
+outputs/
+output/
+log/
+logs/
+result/
+results/
+MBA/ckpt/
+MBA/ckpt_*/
+
+# Model checkpoints and weights
+*.ckpt
+*.ckpt.*
+*.pth
+*.pth.tar
+*.pt
+*.onnx
+*.tflite
+*.weights
+
+# Serialized data artifacts
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.joblib
+
+# Large media and archives typically produced during experiments
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.gif
