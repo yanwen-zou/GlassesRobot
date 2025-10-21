@@ -39,6 +39,7 @@ default_args = edict({
     "seed": 233,
     "enable_mba": True,
     "obj_dim": 10,
+    "obj_pose_mode": "abs",
 })
 
 
@@ -107,6 +108,7 @@ def train(args_override):
         dropout = args.dropout,
         enable_mba = args.enable_mba,
         obj_dim = args.obj_dim,
+        obj_pose_mode = args.obj_pose_mode,
     ).to(device)
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -226,5 +228,6 @@ if __name__ == '__main__':
 
     parser.add_argument('--enable_mba', action = 'store_true', help = 'mba enabled / disabled')
     parser.add_argument('--obj_dim', action = 'store', type = int, help = 'hidden dimension', required = False, default = 10)
+    parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='abs', help='object pose prediction target type')
 
     train(vars(parser.parse_args()))

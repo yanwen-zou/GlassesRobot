@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import reduce
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 
 from policy.diffusion_modules.conditional_unet1d import ConditionalUnet1D
 from policy.diffusion_modules.mask_generator import LowdimMaskGenerator
@@ -27,6 +28,7 @@ class DiffusionUNetPolicy(nn.Module):
             obj_dim=10,
             rot_smooth_lambda=0.0,
             cond_extra_dim=0,
+            obj_pose_mode="abs",
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -100,6 +102,9 @@ class DiffusionUNetPolicy(nn.Module):
         self.base_global_cond_dim = global_cond_dim
         self.cond_extra_dim = cond_extra_dim
         self.rot_smooth_lambda = rot_smooth_lambda
+        self.obj_pose_mode = obj_pose_mode
+        self.pose_dims = 3 + ROT_DIM
+        self.returns_absolute_pose = obj_pose_mode == "abs"
         if cond_extra_dim > 0:
             self.global_cond_proj = nn.Sequential(
                 nn.Linear(global_cond_dim + cond_extra_dim, global_cond_dim),
@@ -113,6 +118,49 @@ class DiffusionUNetPolicy(nn.Module):
         if num_inference_steps is None:
             num_inference_steps = self.noise_scheduler.config.num_train_timesteps
         self.num_inference_steps = num_inference_steps
+
+    def _expand_base_pose(self, base_pose: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Expand the base pose tensor to match the temporal dimension of the target tensor.
+        """
+        if base_pose.dim() == target.dim():
+            return base_pose
+        return base_pose.unsqueeze(1).expand(-1, target.shape[1], -1)
+
+    def _absolute_to_delta(self, pose: torch.Tensor, base_pose: torch.Tensor) -> torch.Tensor:
+        """
+        Convert absolute pose sequence to delta representation relative to base_pose.
+        """
+        expanded_base = self._expand_base_pose(base_pose, pose)
+        result = pose.clone()
+        result[..., :3] = pose[..., :3] - expanded_base[..., :3]
+
+        target_rot6 = pose[..., 3:3 + ROT_DIM].contiguous()
+        base_rot6 = expanded_base[..., 3:3 + ROT_DIM].contiguous()
+        target_rot_mat = rotation_6d_to_matrix(target_rot6.reshape(-1, ROT_DIM))
+        base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, ROT_DIM))
+        delta_rot_mat = target_rot_mat @ base_rot_mat.transpose(-1, -2)
+        delta_rot6 = matrix_to_rotation_6d(delta_rot_mat).reshape_as(target_rot6)
+        result[..., 3:3 + ROT_DIM] = delta_rot6
+        return result
+
+    def _delta_to_absolute(self, delta_pose: torch.Tensor, base_pose: torch.Tensor) -> torch.Tensor:
+        """
+        Convert delta pose sequence back to absolute representation using base_pose.
+        """
+        expanded_base = self._expand_base_pose(base_pose, delta_pose)
+        result = delta_pose.clone()
+        result[..., :3] = delta_pose[..., :3] + expanded_base[..., :3]
+
+        delta_rot6 = delta_pose[..., 3:3 + ROT_DIM].contiguous()
+        base_rot6 = expanded_base[..., 3:3 + ROT_DIM].contiguous()
+        delta_rot_mat = rotation_6d_to_matrix(delta_rot6.reshape(-1, ROT_DIM))
+        base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, ROT_DIM))
+        abs_rot_mat = delta_rot_mat @ base_rot_mat
+        abs_rot6 = matrix_to_rotation_6d(abs_rot_mat).reshape_as(delta_rot6)
+        result[..., 3:3 + ROT_DIM] = abs_rot6
+        self.returns_absolute_pose = True
+        return result
 
     def _prepare_global_cond(self, readout: torch.Tensor, extra_cond: torch.Tensor = None) -> torch.Tensor:
         batch_size = readout.shape[0]
@@ -216,6 +264,11 @@ class DiffusionUNetPolicy(nn.Module):
                 **self.kwargs)
             
             obj_pred = sample[...,:Da]
+            if self.obj_pose_mode == "delta":
+                if extra_cond is None:
+                    raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
+                base_pose = extra_cond[:, :self.pose_dims]
+                obj_pred = self._delta_to_absolute(obj_pred, base_pose)
 
             Da = self.action_dim
 
@@ -266,6 +319,11 @@ class DiffusionUNetPolicy(nn.Module):
             sample_obj=True,
             **self.kwargs
         )
+        if self.obj_pose_mode == "delta":
+            if extra_cond is None:
+                raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
+            base_pose = extra_cond[:, :self.pose_dims]
+            sample = self._delta_to_absolute(sample, base_pose)
         return sample
 
     # ========= training  ============
@@ -274,6 +332,11 @@ class DiffusionUNetPolicy(nn.Module):
         # handle different ways of passing observation
         local_cond = None
         trajectory = actions_obj
+        if self.obj_pose_mode == "delta":
+            if extra_cond is None:
+                raise ValueError("extra_cond (current object pose) is required for delta obj pose training.")
+            base_pose = extra_cond[:, :self.pose_dims]
+            trajectory = self._absolute_to_delta(actions_obj, base_pose)
         cond_data = trajectory
         assert readout.shape[0] == batch_size * self.n_obs_steps
         # reshape back to B, Do
@@ -366,6 +429,11 @@ class DiffusionUNetPolicy(nn.Module):
                     sample_obj=1,
                     **self.kwargs)
             obj_pred = sample[..., :Da]  # B, T, Da
+            if self.obj_pose_mode == "delta":
+                if extra_cond is None:
+                    raise ValueError("extra_cond (current object pose) is required for delta obj pose training.")
+                base_pose = extra_cond[:, :self.pose_dims]
+                obj_pred = self._delta_to_absolute(obj_pred, base_pose)
         else:
             B = readout.shape[0]
             obj_pred = None

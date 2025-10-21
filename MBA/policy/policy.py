@@ -23,6 +23,7 @@ class RISE(nn.Module):
         dropout = 0.1,
         enable_mba = False,
         obj_dim = 10,
+        obj_pose_mode = "abs",
     ):
         super().__init__()
         num_obs = 1
@@ -36,7 +37,8 @@ class RISE(nn.Module):
                                                   enable_mba=enable_mba,
                                                   obj_dim=obj_dim,
                                                   rot_smooth_lambda=0.05,
-                                                  cond_extra_dim=obj_dim)
+                                                  cond_extra_dim=obj_dim,
+                                                  obj_pose_mode=obj_pose_mode)
         self.readout_embed = nn.Embedding(1, hidden_dim)
 
     def forward(self, cloud, actions = None, batch_size = 24, actions_obj = None, sample_mba = False, current_obj = None):

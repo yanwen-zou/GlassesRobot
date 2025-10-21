@@ -48,13 +48,21 @@ def ensure_consistent_lengths(frame_dirs: Iterable[Tuple[Path, List[Path]]]) -> 
 
 
 def delete_frames(files: List[Path], indices_to_drop: set[int], dry_run: bool) -> None:
+    missing: List[Path] = []
     for idx, file_path in enumerate(files):
         if idx not in indices_to_drop:
             continue
         if dry_run:
             print(f"  DRY-RUN delete {file_path}")
         else:
-            file_path.unlink()
+            try:
+                file_path.unlink()
+            except FileNotFoundError:
+                missing.append(file_path)
+    if missing:
+        sample = ", ".join(p.name for p in missing[:5])
+        more = "" if len(missing) <= 5 else f" (+{len(missing) - 5} more)"
+        print(f"  WARNING missing frame files: {sample}{more}")
 
 
 def rename_frames(frame_dir: Path, dry_run: bool) -> None:
@@ -85,7 +93,11 @@ def process_sequence(seq_dir: Path, front: int, back: int, dry_run: bool) -> Non
     if not frame_dirs:
         return
 
-    frame_count = ensure_consistent_lengths(frame_dirs)
+    try:
+        frame_count = ensure_consistent_lengths(frame_dirs)
+    except ValueError as exc:
+        print(f"Skipping {seq_dir.name}: {exc}")
+        return
     if frame_count == 0:
         return
 
