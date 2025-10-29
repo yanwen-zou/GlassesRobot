@@ -40,6 +40,8 @@ Additional arguments:
   --blas_library_dirs=<comma_separated_values> : additional library dirs. Only
       activated when --blas=<value> is set.
 """
+extra_cuda_cflags = ['-Wno-deprecated-declarations']
+
 import sys
 
 if sys.version_info < (3, 6):
@@ -198,22 +200,23 @@ if not (BLAS is False):  # False only when not set, str otherwise
         extra_link_args += [f"-Wl,-rpath,{BLAS_LIBRARY_DIRS}"]
 else:
     # find the default BLAS library
-    import numpy.distutils.system_info as sysinfo
+#     import setuptools._distutils.system_info as sysinfo
 
-    # Search blas in this order
-    for blas in BLAS_LIST:
-        if "libraries" in sysinfo.get_info(blas):
-            BLAS = blas
-            libraries += sysinfo.get_info(blas)["libraries"]
-            break
-    else:
-        # BLAS not found
-        raise ImportError(
-            ' \
-\nBLAS not found from numpy.distutils.system_info.get_info. \
-\nPlease specify BLAS with: python setup.py install --blas=openblas" \
-\nfor more information, please visit https://github.com/NVIDIA/MinkowskiEngine/wiki/Installation'
-        )
+#     # Search blas in this order
+#     for blas in BLAS_LIST:
+#         if "libraries" in sysinfo.get_info(blas):
+#             BLAS = blas
+#             libraries += sysinfo.get_info(blas)["libraries"]
+#             break
+#     else:
+#         # BLAS not found
+#         raise ImportError(
+#             ' \
+# \nBLAS not found from numpy.distutils.system_info.get_info. \
+# \nPlease specify BLAS with: python setup.py install --blas=openblas" \
+# \nfor more information, please visit https://github.com/NVIDIA/MinkowskiEngine/wiki/Installation' )
+    pass
+       
 
 print(f"\nUsing BLAS={BLAS}")
 

@@ -1,0 +1,5 @@
+CAM_SERIAL = ["135122075425", "135122070361"]
+# Annotation macros
+HUMAN = 0
+ROBOT = 1
+INTV = 3

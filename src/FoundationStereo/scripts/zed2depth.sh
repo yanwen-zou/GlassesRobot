@@ -8,7 +8,7 @@ video_name=$1
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FS_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 PROJECT_ROOT=$(cd "${FS_ROOT}/../.." && pwd)
-DATA_DIR="${PROJECT_ROOT}/data"
+DATA_DIR="${PROJECT_ROOT}/data/train"
 
 if [ -z "$video_name" ]; then
     echo "Usage: $(basename "$0") <timestamp_dir>"

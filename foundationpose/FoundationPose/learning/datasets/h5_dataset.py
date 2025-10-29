@@ -8,10 +8,18 @@
 
 
 
-import os,sys,h5py,bisect,io,json
+import os,sys,h5py,bisect,io,json,kornia
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(f'{code_dir}/../../../../')
 from Utils import *
+# Ensure we reference the local Utils explicitly to avoid name collisions
+import importlib.util as _il
+_UTILS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../Utils.py")
+_UTILS_FILE = os.path.normpath(_UTILS_FILE)
+_spec = _il.spec_from_file_location("foundationpose_utils_local", _UTILS_FILE)
+FPUtils = _il.module_from_spec(_spec)
+assert _spec and _spec.loader
+_spec.loader.exec_module(FPUtils)  # type: ignore
 from learning.datasets.pose_dataset import *
 
 
@@ -87,7 +95,7 @@ class PairH5Dataset(torch.utils.data.Dataset):
 
     if batch.xyz_mapAs is None:
       depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+      batch.xyz_mapAs = FPUtils.depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
       batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
     if self.cfg['normalize_xyz']:
@@ -100,7 +108,7 @@ class PairH5Dataset(torch.utils.data.Dataset):
 
     if batch.xyz_mapBs is None:
       depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+      batch.xyz_mapBs = FPUtils.depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
       batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
     if self.cfg['normalize_xyz']:
@@ -145,7 +153,7 @@ class TripletH5Dataset(PairH5Dataset):
 
     if batch.xyz_mapAs is None:
       depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+      batch.xyz_mapAs = FPUtils.depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
       batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
     invalid = batch.xyz_mapAs[:,2:3]<0.1
@@ -157,7 +165,7 @@ class TripletH5Dataset(PairH5Dataset):
 
     if batch.xyz_mapBs is None:
       depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
+      batch.xyz_mapBs = FPUtils.depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
       batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
     invalid = batch.xyz_mapBs[:,2:3]<0.1
@@ -217,4 +225,3 @@ class PoseRefinePairH5Dataset(PairH5Dataset):
 
     batch = self.transform_depth_to_xyzmap(batch, H_ori, W_ori, bound=bound)
     return batch
-

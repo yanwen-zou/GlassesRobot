@@ -7,12 +7,30 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 
+import sys, os
+import uuid
+import nvdiffrast.torch as dr
+# Ensure we import Utils.py from this directory (not similarly named modules elsewhere)
+sys.path.insert(0, os.path.dirname(__file__))
+
 from Utils import *
+# Avoid name collision with other 'Utils' modules by loading via path
+import importlib.util as _il
+_UTILS_FILE = os.path.join(os.path.dirname(__file__), "Utils.py")
+_spec = _il.spec_from_file_location("foundationpose_utils_local", _UTILS_FILE)
+FPUtils = _il.module_from_spec(_spec)
+assert _spec and _spec.loader
+_spec.loader.exec_module(FPUtils)  # type: ignore
 from datareader import *
 import itertools
 from learning.training.predict_score import *
 from learning.training.predict_pose_refine import *
+
 import yaml
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "mycpp/build"))
+
+import mycpp
+print("✅ Loaded mycpp from", mycpp.__file__)
 
 
 class FoundationPose:
@@ -51,7 +69,7 @@ class FoundationPose:
       mesh.vertices = mesh.vertices - self.model_center.reshape(1,3)
 
     model_pts = mesh.vertices
-    self.diameter = compute_mesh_diameter(model_pts=mesh.vertices, n_sample=10000)
+    self.diameter = FPUtils.compute_mesh_diameter(model_pts=mesh.vertices, n_sample=10000)
     self.vox_size = max(self.diameter/20.0, 0.003)
     logging.info(f'self.diameter:{self.diameter}, vox_size:{self.vox_size}')
     self.dist_bin = self.vox_size/2
@@ -68,7 +86,7 @@ class FoundationPose:
     if self.mesh is not None:
       self.mesh_path = f'/tmp/{uuid.uuid4()}.obj'
       self.mesh.export(self.mesh_path)
-    self.mesh_tensors = make_mesh_tensors(self.mesh)
+    self.mesh_tensors = FPUtils.make_mesh_tensors(self.mesh)
 
     if symmetry_tfs is None:
       self.symmetry_tfs = torch.eye(4).float().cuda()[None]
@@ -104,7 +122,7 @@ class FoundationPose:
 
 
   def make_rotation_grid(self, min_n_views=40, inplane_step=60):
-    cam_in_obs = sample_views_icosphere(n_views=min_n_views)
+    cam_in_obs = FPUtils.sample_views_icosphere(n_views=min_n_views)
     logging.info(f'cam_in_obs:{cam_in_obs.shape}')
     rot_grid = []
     for i in range(len(cam_in_obs)):
@@ -170,8 +188,8 @@ class FoundationPose:
       else:
         self.glctx = glctx
 
-    depth = erode_depth(depth, radius=2, device='cuda')
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+    depth = FPUtils.erode_depth(depth, radius=2, device='cuda')
+    depth = FPUtils.bilateral_filter_depth(depth, radius=2, device='cuda')
 
     if self.debug>=2:
       xyz_map = depth2xyzmap(depth, K)
@@ -192,10 +210,11 @@ class FoundationPose:
       imageio.imwrite(f'{self.debug_dir}/color.png', rgb)
       cv2.imwrite(f'{self.debug_dir}/depth.png', (depth*1000).astype(np.uint16))
       valid = xyz_map[...,2]>=0.001
-      pcd = toOpen3dCloud(xyz_map[valid], rgb[valid])
+      pcd = FPUtils.toOpen3dCloud(xyz_map[valid], rgb[valid])
       o3d.io.write_point_cloud(f'{self.debug_dir}/scene_complete.ply',pcd)
 
     self.H, self.W = depth.shape[:2]
+
     self.K = K
     self.ob_id = ob_id
     self.ob_mask = ob_mask
@@ -211,7 +230,7 @@ class FoundationPose:
     add_errs = self.compute_add_err_to_gt_pose(poses)
     logging.info(f"after viewpoint, add_errs min:{add_errs.min()}")
 
-    xyz_map = depth2xyzmap(depth, K)
+    xyz_map = FPUtils.depth2xyzmap(depth, K)
     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
     if vis is not None:
       imageio.imwrite(f'{self.debug_dir}/vis_refiner.png', vis)
@@ -254,11 +273,11 @@ class FoundationPose:
     logging.info("Welcome")
 
     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
-    depth = erode_depth(depth, radius=2, device='cuda')
-    depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+    depth = FPUtils.erode_depth(depth, radius=2, device='cuda')
+    depth = FPUtils.bilateral_filter_depth(depth, radius=2, device='cuda')
     logging.info("depth processing done")
 
-    xyz_map = depth2xyzmap_batch(depth[None], torch.as_tensor(K, dtype=torch.float, device='cuda')[None], zfar=np.inf)[0]
+    xyz_map = FPUtils.depth2xyzmap_batch(depth[None], torch.as_tensor(K, dtype=torch.float, device='cuda')[None], zfar=np.inf)[0]
 
     pose, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=self.pose_last.reshape(1,4,4).data.cpu().numpy(), normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter, glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2)
     logging.info("pose done")
@@ -266,5 +285,3 @@ class FoundationPose:
       extra['vis'] = vis
     self.pose_last = pose
     return (pose@self.get_tf_to_centered_mesh()).data.cpu().numpy().reshape(4,4)
-
-

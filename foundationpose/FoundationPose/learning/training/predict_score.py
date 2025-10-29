@@ -21,6 +21,14 @@ from learning.datasets.h5_dataset import *
 from learning.models.score_network import *
 from learning.datasets.pose_dataset import *
 from Utils import *
+# Ensure we reference the local Utils explicitly to avoid name collisions
+import importlib.util as _il
+_UTILS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../Utils.py")
+_UTILS_FILE = os.path.normpath(_UTILS_FILE)
+_spec = _il.spec_from_file_location("foundationpose_utils_local", _UTILS_FILE)
+FPUtils = _il.module_from_spec(_spec)
+assert _spec and _spec.loader
+_spec.loader.exec_module(FPUtils)  # type: ignore
 from datareader import *
 
 
@@ -60,7 +68,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
   args = []
   method = 'box_3d'
-  tf_to_crops = compute_crop_window_tf_batch(pts=mesh.vertices, H=H, W=W, poses=ob_in_cams, K=K, crop_ratio=crop_ratio, out_size=(render_size[1], render_size[0]), method=method, mesh_diameter=mesh_diameter)
+  tf_to_crops = FPUtils.compute_crop_window_tf_batch(pts=mesh.vertices, H=H, W=W, poses=ob_in_cams, K=K, crop_ratio=crop_ratio, out_size=(render_size[1], render_size[0]), method=method, mesh_diameter=mesh_diameter)
   logging.info("make tf_to_crops done")
 
   B = len(ob_in_cams)
@@ -72,11 +80,11 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   xyz_map_rs = []
 
   bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
-  bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()[:,None]).reshape(-1,4)
+  bbox2d_ori = FPUtils.transform_pts(bbox2d_crop, tf_to_crops.inverse()[:,None]).reshape(-1,4)
 
   for b in range(0,len(ob_in_cams),bs):
     extra = {}
-    rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+    rgb_r, depth_r, normal_r = FPUtils.nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseAs[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
     rgb_rs.append(rgb_r)
     depth_rs.append(depth_r[...,None])
     xyz_map_rs.append(extra['xyz_map'])
@@ -172,7 +180,7 @@ class ScorePredictor:
     logging.info("making cropped data")
 
     if mesh_tensors is None:
-      mesh_tensors = make_mesh_tensors(mesh)
+      mesh_tensors = FPUtils.make_mesh_tensors(mesh)
 
     rgb = torch.as_tensor(rgb, device='cuda', dtype=torch.float)
     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
@@ -224,4 +232,3 @@ class ScorePredictor:
       return scores, canvas
 
     return scores, None
-

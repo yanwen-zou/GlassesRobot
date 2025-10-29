@@ -33,6 +33,11 @@ result/
 results/
 MBA/ckpt/
 MBA/ckpt_*/
+bundle_sdf_data/
+src/FoundationStereo/test_outputs/
+src/egodata_eval/eval_output/
+*.ipynb_checkpoints/
+.TimeRecord
 
 # Model checkpoints and weights
 *.ckpt
@@ -43,6 +48,9 @@ MBA/ckpt_*/
 *.onnx
 *.tflite
 *.weights
+src/FoundationStereo/pretrained_models/
+src/FoundationStereo/sam2_root/checkpoints/
+foundationpose/FoundationPose/demo_data/
 
 # Serialized data artifacts
 *.npz
@@ -62,3 +70,17 @@ MBA/ckpt_*/
 *.avi
 *.mkv
 *.gif
+*.bag
+*.pcd
+*.ply
+*.jpg
+
+# Vendor SDKs / binaries
+glasses_hardware/anygrasp_sdk/
+glasses_hardware/piper_sdk/
+glasses_hardware/hardware/my_device/flexiv_rdk/
+glasses_hardware/anygrasp_debug*
+
+# ZED stereo raw dumps
+**/zed_left/
+**/zed_right/

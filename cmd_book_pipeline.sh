@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT="$SCRIPT_DIR"
 FOUNDATION_STEREO_DIR="${PROJECT_ROOT}/src/FoundationStereo"
-DATA_ROOT="${PROJECT_ROOT}/data"
+DATA_ROOT="${PROJECT_ROOT}/data/train"
 INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
 
 if [ ! -f "$INTRINSICS_SRC" ]; then

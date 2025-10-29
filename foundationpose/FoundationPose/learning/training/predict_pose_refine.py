@@ -18,6 +18,25 @@ from omegaconf import OmegaConf
 from learning.models.refine_network import RefineNet
 from learning.datasets.h5_dataset import *
 from Utils import *
+# Rotations: ensure required conversions are available
+try:
+  from pytorch3d.transforms.so3 import so3_exp_map  # type: ignore
+except Exception:  # pragma: no cover
+  # Fallback for older/newer PyTorch3D layouts
+  from pytorch3d.transforms import so3_exp_map  # type: ignore
+
+try:
+  from pytorch3d.transforms import rotation_6d_to_matrix  # type: ignore
+except Exception:  # pragma: no cover
+  from pytorch3d.transforms.rotation_conversions import rotation_6d_to_matrix  # type: ignore
+# Ensure we reference the local Utils explicitly to avoid name collisions
+import importlib.util as _il
+_UTILS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../Utils.py")
+_UTILS_FILE = os.path.normpath(_UTILS_FILE)
+_spec = _il.spec_from_file_location("foundationpose_utils_local", _UTILS_FILE)
+FPUtils = _il.module_from_spec(_spec)
+assert _spec and _spec.loader
+_spec.loader.exec_module(FPUtils)  # type: ignore
 from datareader import *
 
 
@@ -28,7 +47,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   H,W = depth.shape[:2]
   args = []
   method = 'box_3d'
-  tf_to_crops = compute_crop_window_tf_batch(pts=mesh.vertices, H=H, W=W, poses=ob_in_cams, K=K, crop_ratio=crop_ratio, out_size=(render_size[1], render_size[0]), method=method, mesh_diameter=mesh_diameter)
+  tf_to_crops = FPUtils.compute_crop_window_tf_batch(pts=mesh.vertices, H=H, W=W, poses=ob_in_cams, K=K, crop_ratio=crop_ratio, out_size=(render_size[1], render_size[0]), method=method, mesh_diameter=mesh_diameter)
 
   logging.info("make tf_to_crops done")
 
@@ -42,11 +61,11 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
   xyz_map_rs = []
 
   bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
-  bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
+  bbox2d_ori = FPUtils.transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
 
   for b in range(0,len(poseA),bs):
     extra = {}
-    rgb_r, depth_r, normal_r = nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+    rgb_r, depth_r, normal_r = FPUtils.nvdiffrast_render(K=K, H=H, W=W, ob_in_cams=poseA[b:b+bs], context='cuda', get_normal=cfg['use_normal'], glctx=glctx, mesh_tensors=mesh_tensors, output_size=cfg['input_resize'], bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
     rgb_rs.append(rgb_r)
     depth_rs.append(depth_r[...,None])
     normal_rs.append(normal_r)
@@ -228,7 +247,7 @@ class PoseRefinePredictor:
         if self.cfg['normalize_xyz']:
           trans_delta *= (mesh_diameter/2)
 
-        B_in_cam = egocentric_delta_pose_to_pose(pose_data.poseA[b:b+bs], trans_delta=trans_delta, rot_mat_delta=rot_mat_delta)
+        B_in_cam = FPUtils.egocentric_delta_pose_to_pose(pose_data.poseA[b:b+bs], trans_delta=trans_delta, rot_mat_delta=rot_mat_delta)
         B_in_cams.append(B_in_cam)
 
       B_in_cams = torch.cat(B_in_cams, dim=0).reshape(len(ob_in_cams),4,4)
@@ -261,10 +280,10 @@ class PoseRefinePredictor:
         row += [depthA_vis, depthB_vis]
         if pose_data.normalAs is not None:
           pass
-        row = make_grid_image(row, nrow=len(row), padding=padding, pad_value=255)
+        row = FPUtils.make_grid_image(row, nrow=len(row), padding=padding, pad_value=255)
         row = cv_draw_text(row, text=f'id:{id}', uv_top_left=(10,10), color=(0,255,0), fontScale=0.5)
         canvas.append(row)
-      canvas = make_grid_image(canvas, nrow=1, padding=padding, pad_value=255)
+      canvas = FPUtils.make_grid_image(canvas, nrow=1, padding=padding, pad_value=255)
 
       pose_data = make_crop_data_batch(self.cfg.input_resize, B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
       canvas_refined = []
@@ -281,16 +300,15 @@ class PoseRefinePredictor:
           depthB = pose_data.xyz_mapBs[id][2].data.cpu().numpy().reshape(H,W)
         zmin = min(depthA.min(), depthB.min())
         zmax = max(depthA.max(), depthB.max())
-        depthA_vis = depth_to_vis(depthA, zmin=zmin, zmax=zmax, inverse=False)
-        depthB_vis = depth_to_vis(depthB, zmin=zmin, zmax=zmax, inverse=False)
+        depthA_vis = FPUtils.depth_to_vis(depthA, zmin=zmin, zmax=zmax, inverse=False)
+        depthB_vis = FPUtils.depth_to_vis(depthB, zmin=zmin, zmax=zmax, inverse=False)
         row += [depthA_vis, depthB_vis]
-        row = make_grid_image(row, nrow=len(row), padding=padding, pad_value=255)
+        row = FPUtils.make_grid_image(row, nrow=len(row), padding=padding, pad_value=255)
         canvas_refined.append(row)
 
-      canvas_refined = make_grid_image(canvas_refined, nrow=1, padding=padding, pad_value=255)
-      canvas = make_grid_image([canvas, canvas_refined], nrow=2, padding=padding, pad_value=255)
+      canvas_refined = FPUtils.make_grid_image(canvas_refined, nrow=1, padding=padding, pad_value=255)
+      canvas = FPUtils.make_grid_image([canvas, canvas_refined], nrow=2, padding=padding, pad_value=255)
       torch.cuda.empty_cache()
       return B_in_cams_out, canvas
 
     return B_in_cams_out, None
-

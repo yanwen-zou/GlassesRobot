@@ -295,7 +295,7 @@ def main():
     ap.add_argument("--split", type=str, default="train", choices=["train", "val", "all"],
                     help="Dataset split to load")
     ap.add_argument("--full_episode", action="store_true", help="Use entire episode length for prediction")
-    ap.add_argument("--fps", type=int, default=5, help="Frames per second for the rendered video")
+    ap.add_argument("--fps", type=int, default=15, help="Frames per second for the rendered video")
     ap.add_argument("--compare_mode", type=str, default="trajectory",
                     choices=["trajectory", "pose"],
                     help="Comparison mode: full trajectory versus single-pose")

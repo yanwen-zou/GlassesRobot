@@ -29,5 +29,12 @@ python MBA/train_obj.py \
   # Eval Preview
 python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt/policy_last.ckpt     --output_video outputs/vis_pose_1014.mp4 --demo_index 0 --full_episode --fps 20 --compare_mode trajectory
 
-python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt_delta/policy_epoch_1000_seed_233.ckpt     --output_video outputs/delta_eval.mp4 --demo_index 0 --full_episod
-e --fps 20 --compare_mode trajectory --obj_pose_mode delta --data_path data
+python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt_delta/policy_epoch_1000_seed_233.ckpt     --output_video outputs/delta_eval.mp4 --demo_index 0 --full_episode --fps 20 --compare_mode trajectory --obj_pose_mode delta --data_path data
+
+# -------------AnyGrasp------------------
+# This is amazing. It can literally grasp anything I want.
+python glasses_hardware/hardware/anygrasp_debug.py --real_robot
+
+# -------------6D Pose prediction ----------------
+
+python src/egodata_eval/vis.py
