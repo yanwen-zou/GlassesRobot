@@ -73,7 +73,6 @@ def write_K(path, K):
         for r in range(3):
             f.write("{:.8f} {:.8f} {:.8f}\n".format(K[r, 0], K[r, 1], K[r, 2]))
 
-
 def main():
     parser = argparse.ArgumentParser(description="Record from the second RealSense camera and save RGB+Depth frames.")
     parser.add_argument("--device-index", type=int, default=1, help="Index of the RealSense device to use (0-based). Default: 1 (second camera)")

@@ -178,59 +178,59 @@ def main():
     if not frame_names:
         raise FileNotFoundError(f"未在 {frame_dir} 找到图像帧")
 
-    # Prompt on the first frame
+    # Prompt on the first frame (single time; then track continuously)
     from PIL import Image  # lazy import
     import numpy as np
     import matplotlib.pyplot as plt
 
-    def prompt_points(frame_path: Path):
+    def prompt_box(frame_path: Path):
         image = Image.open(frame_path)
         plt.figure(figsize=(9, 6))
-        plt.title(f"{frame_path}")
+        plt.title(f"框选目标：依次点击左上与右下角\n{frame_path}")
         plt.imshow(image)
-        clicks = plt.ginput(n=-1, timeout=0)
+        clicks = plt.ginput(n=2, timeout=0)
         plt.close()
-        if not clicks:
+        if clicks is None or len(clicks) < 2:
             return None
-        pts = np.array([[pt[0], pt[1]] for pt in clicks], dtype=np.float32)
-        lbs = np.ones(len(pts), dtype=np.int32)
-        return pts, lbs
+        (x0, y0), (x1, y1) = clicks[0], clicks[1]
+        # normalize ordering to xyxy with top-left and bottom-right
+        x_min, x_max = (x0, x1) if x0 <= x1 else (x1, x0)
+        y_min, y_max = (y0, y1) if y0 <= y1 else (y1, y0)
+        return float(x_min), float(y_min), float(x_max), float(y_max)
 
     first_path = frame_dir / frame_names[0]
-    prompt = prompt_points(first_path)
-    if prompt is None:
-        print("⚠️ 未记录任何点，退出。")
+    box_xyxy = prompt_box(first_path)
+    if box_xyxy is None:
+        print("⚠️ 未记录到框，退出。")
         return
-
-    points, labels = prompt
-
-    RECLICK_INTERVAL = 50  # 每隔多少帧重新点击提示
 
     # Use SAM2 image predictor to process frames one-by-one
     sys.path.append(str((repo_root / "src" / "FoundationStereo" / "sam2_root").resolve()))
-    from notebooks.get_mask import click_mask  # type: ignore
+    from notebooks.get_mask import box_mask  # type: ignore
 
     masks_dir = ts_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
 
     import torch  # type: ignore
 
+    REBOX_INTERVAL = 50  # 每隔多少帧重新框选
+
     for idx, name in enumerate(frame_names):
         path = frame_dir / name
-        # 每隔 RECLICK_INTERVAL 帧重新进行交互点击（0, 50, 100, ...）
-        if idx != 0 and (idx % RECLICK_INTERVAL == 0):
-            refreshed = prompt_points(path)
+        # 每隔固定帧数，允许用户在当前帧重新框选
+        if idx != 0 and (idx % REBOX_INTERVAL == 0):
+            refreshed = prompt_box(path)
             if refreshed is not None:
-                points, labels = refreshed
-                print(f"在第 {idx} 帧重新记录了 {len(points)} 个点作为提示。")
+                box_xyxy = refreshed
+                print(f"在第 {idx} 帧重新框选: {box_xyxy}")
             else:
-                print(f"未记录新点，继续沿用之前的提示点（第 {idx} 帧）。")
+                print(f"未重新框选，继续使用之前的框（第 {idx} 帧）。")
         # Read as RGB np.uint8 without keeping reference
         img = Image.open(path).convert("RGB")
         arr = np.array(img, copy=True)
         del img
 
-        mask = click_mask(arr, points_xy=[(float(x), float(y)) for x, y in points], labels=labels.tolist(), multimask=True)
+        mask = box_mask(arr, box_xyxy=box_xyxy, multimask=True)
 
         out_name = f"masks_{Path(name).stem}.png"
         out_path = masks_dir / out_name
@@ -242,7 +242,8 @@ def main():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
-        if idx % RECLICK_INTERVAL == 0:
+        # Progress log every 50 frames
+        if (idx + 1) % 50 == 0 or (idx + 1) == len(frame_names):
             print(f"已处理 {idx+1}/{len(frame_names)} 帧 -> {out_path}")
 
     print(f"✅ 完成，mask 输出目录: {masks_dir}")

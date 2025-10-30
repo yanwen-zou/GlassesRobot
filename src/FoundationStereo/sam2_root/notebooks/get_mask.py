@@ -111,3 +111,37 @@ def click_mask(
 
     mask_uint8 = (mask_bool.astype(np.uint8)) * 255
     return mask_uint8
+
+
+def box_mask(
+    image_rgb: np.ndarray,
+    box_xyxy: Tuple[float, float, float, float],
+    multimask: bool = True,
+) -> np.ndarray:
+    """Run SAM2 image predictor on a single RGB frame with a box prompt.
+
+    - image_rgb: HxWx3 uint8 RGB image
+    - box_xyxy: (x0, y0, x1, y1) in pixel coords wrt original image size
+    - returns a binary mask HxW (uint8 values 0 or 255)
+    """
+    assert isinstance(image_rgb, np.ndarray) and image_rgb.ndim == 3, "image must be HxWx3"
+    predictor = _init_predictor()
+    predictor.set_image(image_rgb)
+
+    box = np.array(box_xyxy, dtype=np.float32)
+
+    masks, ious, _ = predictor.predict(
+        box=box,
+        multimask_output=multimask,
+        normalize_coords=True,
+    )
+
+    # Choose best mask by IoU; fallback to largest area
+    idx = int(np.argmax(ious)) if ious.size > 0 else 0
+    mask_bool = masks[idx].astype(bool)
+    if ious.size == 0 and masks.shape[0] > 1:
+        areas = masks.reshape(masks.shape[0], -1).sum(axis=1)
+        idx = int(np.argmax(areas))
+        mask_bool = masks[idx].astype(bool)
+
+    return (mask_bool.astype(np.uint8)) * 255
