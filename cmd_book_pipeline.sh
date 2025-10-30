@@ -11,7 +11,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT="$SCRIPT_DIR"
 FOUNDATION_STEREO_DIR="${PROJECT_ROOT}/src/FoundationStereo"
-DATA_ROOT="${PROJECT_ROOT}/data/train"
+DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data/train"
+DATA_ROOT="$DEFAULT_DATA_ROOT"
 INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
 
 if [ ! -f "$INTRINSICS_SRC" ]; then
@@ -19,24 +20,62 @@ if [ ! -f "$INTRINSICS_SRC" ]; then
   exit 1
 fi
 
-if [ ! -d "$DATA_ROOT" ]; then
-  echo "❌ Data directory not found: $DATA_ROOT" >&2
-  exit 1
-fi
-
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [episode_name ...]
+Usage: $(basename "$0") [--data-root PATH] [episode_name ...]
 
-Without arguments, all directories under data/ are processed.
-Specify one or more episode names (matching subdirectories of data/) to
+Without episode arguments, all directories under the selected data root are processed.
+Specify one or more episode names (matching subdirectories of the data root) to
 limit processing to those recordings.
 EOF
 }
 
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  usage
-  exit 0
+POSITIONAL_ARGS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data-root|--data_root)
+      if [ "${2:-}" = "" ]; then
+        echo "❌ Missing path argument for --data-root" >&2
+        exit 1
+      fi
+      DATA_ROOT="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      POSITIONAL_ARGS+=("$@")
+      break
+      ;;
+    -*)
+      echo "❌ Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL_ARGS[@]}"
+
+if [[ "$DATA_ROOT" != /* ]]; then
+  DATA_ROOT="${PROJECT_ROOT}/${DATA_ROOT}"
+fi
+
+if ! DATA_ROOT=$(realpath "$DATA_ROOT"); then
+  echo "❌ Failed to resolve data root path." >&2
+  exit 1
+fi
+
+if [ ! -d "$DATA_ROOT" ]; then
+  echo "❌ Data directory not found: $DATA_ROOT" >&2
+  exit 1
 fi
 
 declare -a EPISODES=()
@@ -195,20 +234,26 @@ prepare_frames() {
   fi
 
   if [ -L "$rgb_dir" ]; then
-    local target
-    target=$(readlink -f "$rgb_dir")
-    if [ "$target" != "$(realpath "$left_dir")" ]; then
-      rm -f "$rgb_dir"
-      ln -s "$(realpath "$left_dir")" "$rgb_dir"
-      echo "🔗 Updated rgb symlink -> $(realpath "$left_dir")"
-    else
-      echo "✅ rgb symlink already points to $(realpath "$left_dir")"
+    rm -f "$rgb_dir"
+  fi
+
+  mkdir -p "$rgb_dir"
+  shopt -s nullglob
+  local src_file
+  local copied=0
+  for src_file in "${left_dir}"/*; do
+    if [ -f "$src_file" ]; then
+      cp -f "$src_file" "${rgb_dir}/"
+      copied=1
     fi
-  elif [ -d "$rgb_dir" ]; then
-    echo "ℹ️ rgb directory already exists at ${rgb_dir}"
+  done
+  shopt -u nullglob
+
+  if [ "$copied" -eq 1 ]; then
+    echo "📁 Copied left camera frames into ${rgb_dir}"
   else
-    ln -s "$(realpath "$left_dir")" "$rgb_dir"
-    echo "🔗 Created rgb symlink to $(realpath "$left_dir")"
+    echo "⚠️  No files copied into ${rgb_dir}; check ${left_dir}" >&2
+    return
   fi
 
   if [ ! -d "$jpg_dir" ] || ! find "$jpg_dir" -maxdepth 1 -name '*.jpg' -print -quit >/dev/null; then
@@ -262,7 +307,7 @@ for episode in "${READY_EPISODES[@]}"; do
 
   echo "🔄 Generating depth with FoundationStereo for $episode..."
   pushd "$FOUNDATION_STEREO_DIR" >/dev/null
-  ./scripts/zed2depth.sh "$episode"
+  ./scripts/zed2depth.sh --data-root "$DATA_ROOT" "$episode"
   popd >/dev/null
 
   intrinsics_out="${episode_dir}/cam_K.txt"
@@ -287,10 +332,24 @@ for episode in "${READY_EPISODES[@]}"; do
 
   echo "🤖 Running FoundationPose for $episode..."
 
-  conda run --no-capture-output -n foundationpose python -u \
-   foundationpose/FoundationPose/run_1010_only.py \
+  set +e
+  fp_output=$(conda run --no-capture-output -n foundationpose python -u \
+    foundationpose/FoundationPose/run_1010_only.py \
     --demo_name "$episode" \
-    --data_root "$DATA_ROOT"
+    --data_root "$DATA_ROOT" 2>&1)
+  fp_status=$?
+  set -e
+
+  if [ "$fp_status" -ne 0 ]; then
+    if echo "$fp_output" | grep -qiE 'No such file or directory|FileNotFoundError' && echo "$fp_output" | grep -qiE '\.obj'; then
+      echo "⚠️  FoundationPose mesh missing for $episode, skipping."
+      continue
+    fi
+    echo "$fp_output" >&2
+    exit "$fp_status"
+  fi
+
+  printf "%s\n" "$fp_output"
 done
 
 echo "✅ Pipeline finished."

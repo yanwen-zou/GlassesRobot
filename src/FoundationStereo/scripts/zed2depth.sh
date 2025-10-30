@@ -1,14 +1,65 @@
 #!/bin/bash
 set -e
 
-# Run at FoundationStereo dir
-# 需要参数：指定单个时间戳目录
-video_name=$1
-
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FS_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 PROJECT_ROOT=$(cd "${FS_ROOT}/../.." && pwd)
-DATA_DIR="${PROJECT_ROOT}/data/train"
+DEFAULT_DATA_DIR="${PROJECT_ROOT}/data/train"
+DATA_DIR="$DEFAULT_DATA_DIR"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [--data-root PATH] <timestamp_dir>
+EOF
+}
+
+POSITIONAL_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --data-root|--data_root)
+            if [ "${2:-}" = "" ]; then
+                echo "❌ Missing path argument for --data-root" >&2
+                exit 1
+            fi
+            DATA_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            POSITIONAL_ARGS+=("$@")
+            break
+            ;;
+        -*)
+            echo "❌ Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+if [ "${#POSITIONAL_ARGS[@]}" -ne 1 ]; then
+    usage
+    exit 1
+fi
+
+video_name="${POSITIONAL_ARGS[0]}"
+
+if [[ "$DATA_DIR" != /* ]]; then
+    DATA_DIR="${PROJECT_ROOT}/${DATA_DIR}"
+fi
+
+if ! DATA_DIR=$(realpath "$DATA_DIR"); then
+    echo "❌ Failed to resolve data root path." >&2
+    exit 1
+fi
 
 if [ -z "$video_name" ]; then
     echo "Usage: $(basename "$0") <timestamp_dir>"

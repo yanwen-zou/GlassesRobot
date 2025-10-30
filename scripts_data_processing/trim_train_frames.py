@@ -2,10 +2,11 @@
 """
 Trim leading and trailing frames for each sequence under data_lion/train.
 
-By default removes the first 40 and last 30 frames from every directory that
-contains files named as six-digit frame indices (e.g. 000123.jpg) and then
-renames the remaining files so they start again from 000000 while preserving
-the original order.
+By default removes the first 25 and last 20 frames from every directory that
+contains six-digit frame files (e.g. 000123.jpg) and then renames the remaining
+files so they start again from 000000 while preserving the original order. Each
+directory is processed independently even if other directories in the same
+sequence have different frame counts.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 
 
 FRAME_NAME_PATTERN = re.compile(r"^\d{6}\.[^.]+$")
@@ -32,19 +33,6 @@ def find_frame_directories(seq_dir: Path) -> List[Tuple[Path, List[Path]]]:
         if frame_files:
             frame_dirs.append((child, frame_files))
     return frame_dirs
-
-
-def ensure_consistent_lengths(frame_dirs: Iterable[Tuple[Path, List[Path]]]) -> int:
-    """Ensure all frame directories hold the same number of frames."""
-    lengths = {len(files) for _, files in frame_dirs}
-    if not lengths:
-        return 0
-    if len(lengths) != 1:
-        detail = ", ".join(
-            f"{directory.name}: {len(files)}" for directory, files in frame_dirs
-        )
-        raise ValueError(f"Inconsistent frame counts detected ({detail})")
-    return lengths.pop()
 
 
 def delete_frames(files: List[Path], indices_to_drop: set[int], dry_run: bool) -> None:
@@ -93,27 +81,21 @@ def process_sequence(seq_dir: Path, front: int, back: int, dry_run: bool) -> Non
     if not frame_dirs:
         return
 
-    try:
-        frame_count = ensure_consistent_lengths(frame_dirs)
-    except ValueError as exc:
-        print(f"Skipping {seq_dir.name}: {exc}")
-        return
-    if frame_count == 0:
-        return
-
-    if frame_count <= front + back:
-        print(
-            f"Skipping {seq_dir} (only {frame_count} frames, need more than {front + back})"
-        )
-        return
-
-    indices_to_drop = set(range(front)) | set(range(frame_count - back, frame_count))
-    kept = frame_count - len(indices_to_drop)
-    print(
-        f"{seq_dir.name}: {frame_count} frames -> drop {len(indices_to_drop)} keep {kept}"
-    )
-
     for frame_dir, files in frame_dirs:
+        frame_count = len(files)
+        if frame_count == 0:
+            continue
+        if frame_count <= front + back:
+            print(
+                f"{seq_dir.name}/{frame_dir.name}: only {frame_count} frames, skipping (need more than {front + back})"
+            )
+            continue
+
+        indices_to_drop = set(range(front)) | set(range(frame_count - back, frame_count))
+        kept = frame_count - len(indices_to_drop)
+        print(
+            f"{seq_dir.name}/{frame_dir.name}: {frame_count} frames -> drop {len(indices_to_drop)} keep {kept}"
+        )
         delete_frames(files, indices_to_drop, dry_run=dry_run)
         rename_frames(frame_dir, dry_run=dry_run)
 
@@ -133,13 +115,13 @@ def main() -> None:
     parser.add_argument(
         "--front",
         type=int,
-        default=40,
+        default=25,
         help="Number of frames to remove from the beginning of each sequence.",
     )
     parser.add_argument(
         "--back",
         type=int,
-        default=30,
+        default=20,
         help="Number of frames to remove from the end of each sequence.",
     )
     parser.add_argument(
