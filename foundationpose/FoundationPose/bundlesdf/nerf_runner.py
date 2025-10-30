@@ -1222,9 +1222,13 @@ class NerfRunner:
       tex_image[uvs_unique[:,1],uvs_unique[:,0]] += torch.from_numpy(ray_colors).cuda().float()[unique_ids]*cur_weights.reshape(-1,1)
       weight_tex_image[uvs_unique[:,1], uvs_unique[:,0]] += cur_weights
 
-    tex_image = tex_image/weight_tex_image[...,None]
+    # Avoid division by zero leading to NaNs in texture
+    weight_safe = torch.clamp_min(weight_tex_image, 1e-8)
+    tex_image = tex_image / weight_safe[..., None]
     tex_image = tex_image.data.cpu().numpy()
-    tex_image = np.clip(tex_image,0,255).astype(np.uint8)
+    # Extra safety: replace any NaNs/Infs before casting
+    tex_image = np.nan_to_num(tex_image, nan=0.0, posinf=255.0, neginf=0.0)
+    tex_image = np.clip(tex_image, 0, 255).astype(np.uint8)
     tex_image = tex_image[::-1].copy()
     new_texture = texture_map_interpolation(tex_image)
 
