@@ -44,7 +44,7 @@ def main(args):
 
     marker_length = args.marker_length
     print(f"[INFO] Running detection with dictionary={args.aruco_dict}, marker_length={marker_length} m")
-    print("[INFO] Press 'q' to exit.")
+    print("[INFO] Press 'q' to exit; press 's' to save SE3 pose(s) to .npy in current directory.")
 
     try:
         while True:
@@ -65,8 +65,25 @@ def main(args):
                 print("[INFO] No markers detected.")
 
             cv2.imshow("aruco_detection", display)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            if key == ord("s"):
+                # Save detected poses as SE3 matrices to current directory.
+                if ids is None:
+                    print("[WARN] No markers to save.")
+                else:
+                    # rvecs/tvecs have shape (N,1,3); convert to SE3 per detection
+                    saved_files = []
+                    for (marker_id, rvec, tvec) in zip(ids.flatten(), rvecs, tvecs):
+                        R, _ = cv2.Rodrigues(rvec.reshape(3))
+                        T = np.eye(4, dtype=float)
+                        T[:3, :3] = R
+                        T[:3, 3] = tvec.reshape(3)
+                        out_name = f"T_cam_aruco_{int(marker_id)}.npy"
+                        np.save(out_name, T)
+                        saved_files.append(out_name)
+                    print(f"[INFO] Saved SE3 pose(s) to: {saved_files}")
     finally:
         cv2.destroyAllWindows()
         del camera
@@ -89,7 +106,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cam-index",
         type=int,
-        default=0,
+        default=1,
         help="Index into CAM_SERIAL for selecting the camera.",
     )
     args = parser.parse_args()

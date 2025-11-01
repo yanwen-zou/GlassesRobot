@@ -54,21 +54,28 @@ def compose_relative_delta(curr_pose7: np.ndarray, delta_xyz_rot6d: np.ndarray) 
     return _mat_to_pose7(T_target)
 
 
-def execute_relative_traj(robot, gripper, traj: np.ndarray, steps: int = 1, gripper_open_thresh: float = 0.8, step_sleep: float = 0.05):
-    """Execute first N relative steps (xyz+rot6d+grip) on the robot.
+def execute_relative_traj(robot, gripper, traj: np.ndarray, steps: int = 1, gripper_open_thresh: float = 0.8, step_sleep: float = 0.05, scale_factor: float = 1.0):
+    """Execute first N relative steps (-xyz+rot6d+grip) on the robot.
 
     - traj: shape (T, 10) where [:3] meters, [3:9] rot6d, [9] gripper prob
     - Executes in-place relative to live tcp pose for each step.
+    - Returns: np.ndarray of target pose7 for each executed step, shape (n, 7)
     """
     if traj is None or len(traj) == 0:
-        return
+        return np.empty((0, 7), dtype=np.float32)
     n = min(int(steps), len(traj))
+    targets = []
     for i in range(n):
         delta = traj[i, :9].astype(np.float32)
+        # Scale translation (dx, dy, dz) by scale_factor; keep rotation unchanged
+        if scale_factor != 1.0:
+            delta[:3] *= float(scale_factor)
         grip = float(traj[i, 9]) if traj.shape[1] > 9 else 0.0
         curr = robot.get_tcp_pose()
         target = compose_relative_delta(curr, delta)
+        print(f"target move:{target}")
         robot.send_tcp_pose(target)
+        targets.append(np.asarray(target, dtype=np.float32))
         # Simple gripper logic: open when > thresh else close
         try:
             if gripper is not None:
@@ -79,6 +86,9 @@ def execute_relative_traj(robot, gripper, traj: np.ndarray, steps: int = 1, grip
         except Exception:
             pass
         time.sleep(step_sleep)
+    if len(targets):
+        return np.stack(targets, axis=0)
+    return np.empty((0, 7), dtype=np.float32)
 
 class ModeMap:
     idle = "IDLE"
@@ -354,9 +364,9 @@ if __name__ == "__main__":
 
     # 定义两个往返目标点（在 X 方向前后移动）
     pose_forward = center_pose.copy()
-    pose_forward[2] += delta
+    pose_forward[1] += delta
     pose_backward = center_pose.copy()
-    pose_backward[2] -= delta
+    pose_backward[1] -= delta
 
     try:
         while True:

@@ -148,7 +148,7 @@ def render_item_predictions(ds: RealWorldDataset,
                             model: RISE,
                             obj_pose_mode: str = "abs",
                             add_legend: bool = False,
-                            compare_mode: str = "trajectory"):
+                            compare_mode: str = "traj"):
     item = ds[idx]
     coords, feats = ME.utils.sparse_collate(item["input_coords_list"],
                                             item["input_feats_list"])
@@ -211,7 +211,7 @@ def render_item_predictions(ds: RealWorldDataset,
 
     overlay = base_rgb
 
-    if compare_mode == "trajectory":
+    if compare_mode == "traj":
         pred_points_cam = []
         for pose_ref in pose_mats_ref:
             pose_world = ref_extr @ pose_ref
@@ -270,7 +270,7 @@ def render_item_predictions(ds: RealWorldDataset,
         raise ValueError(f"Unsupported compare_mode {compare_mode}.")
 
     if add_legend:
-        if compare_mode == "trajectory":
+        if compare_mode == "traj":
             cv2.putText(overlay, "Pred traj: blue→yellow", (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             if gt_pose_mats_ref is not None:
@@ -285,6 +285,193 @@ def render_item_predictions(ds: RealWorldDataset,
     return [(cur_frame_id, overlay)]
 
 
+def compute_first_step_abs_pose(ds: RealWorldDataset,
+                                idx: int,
+                                model: RISE,
+                                obj_pose_mode: str = "abs") -> Tuple[np.ndarray, np.ndarray]:
+    """Return (pred_first_pose_mat_ref, gt_first_pose_mat_ref) for the sample index.
+
+    Both are 4x4 poses in the episode reference (absolute) frame. GT may be None if
+    unavailable; in that case a zero-sized array is returned for GT.
+    """
+    item = ds[idx]
+    coords, feats = ME.utils.sparse_collate(item["input_coords_list"],
+                                            item["input_feats_list"])
+    st = ME.SparseTensor(feats.cuda(), coords.cuda())
+
+    current_obj = item.get("current_obj_pose_normalized")
+    current_obj_np = None
+    if current_obj is not None:
+        current_obj_np = current_obj.numpy()
+        current_obj = current_obj.unsqueeze(0).cuda()
+
+    with torch.no_grad():
+        outputs = model(st, actions=None, batch_size=1, current_obj=current_obj)
+    if "obj_pred" not in outputs:
+        raise RuntimeError("Model did not return object predictions.")
+    obj_traj_norm = outputs["obj_pred"].squeeze(0).cpu().numpy()
+
+    if obj_pose_mode == "delta":
+        if current_obj_np is None:
+            raise RuntimeError("Current object pose is required to convert delta predictions.")
+        if getattr(model.action_decoder, "returns_absolute_pose", True):
+            pass
+        else:
+            obj_traj_norm = delta_to_absolute_traj(obj_traj_norm, current_obj_np)
+
+    # denorm to absolute ref frame and build pose mats
+    obj_traj_ref = denormalize_obj_traj(obj_traj_norm)
+    pose_mats_ref = build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3 + 6])
+    pred_first = pose_mats_ref[0]
+
+    gt_first = np.empty((0,))
+    if "action_obj" in item:
+        gt_traj_ref = item["action_obj"].numpy()
+        gt_pose_mats_ref = build_pose_mats(gt_traj_ref[:, :3], gt_traj_ref[:, 3:3 + 6])
+        if len(gt_pose_mats_ref) > 0:
+            gt_first = gt_pose_mats_ref[0]
+    return pred_first, gt_first
+
+
+def draw_abs_traj_image(pred_pts: np.ndarray,
+                        gt_pts: np.ndarray,
+                        size: Tuple[int, int] = (900, 900),
+                        margin: int = 60,
+                        title: str = "Absolute XY Trajectory (Ref Frame)") -> np.ndarray:
+    """Draw 2D XY trajectory comparison on a single image in absolute frame.
+
+    pred_pts, gt_pts: arrays of shape (N, 2). N can differ; match by time for coloring.
+    """
+    w, h = size
+    canvas = np.full((h, w, 3), 255, dtype=np.uint8)
+
+    def to_px(xy: np.ndarray, bounds: Tuple[float, float, float, float]):
+        xmin, xmax, ymin, ymax = bounds
+        span_x = max(xmax - xmin, 1e-6)
+        span_y = max(ymax - ymin, 1e-6)
+        sx = (w - 2 * margin) / span_x
+        sy = (h - 2 * margin) / span_y
+        px = margin + (xy[:, 0] - xmin) * sx
+        py = h - margin - (xy[:, 1] - ymin) * sy
+        return np.stack([px, py], axis=1).astype(int)
+
+    all_pts = []
+    if pred_pts.size:
+        all_pts.append(pred_pts)
+    if gt_pts.size:
+        all_pts.append(gt_pts)
+    if not all_pts:
+        return canvas
+    all_cat = np.vstack(all_pts)
+    xmin, xmax = float(np.min(all_cat[:, 0])), float(np.max(all_cat[:, 0]))
+    ymin, ymax = float(np.min(all_cat[:, 1])), float(np.max(all_cat[:, 1]))
+    pad_x = 0.05 * max(1e-6, xmax - xmin)
+    pad_y = 0.05 * max(1e-6, ymax - ymin)
+    bounds = (xmin - pad_x, xmax + pad_x, ymin - pad_y, ymax + pad_y)
+
+    # axes
+    cv2.rectangle(canvas, (margin, margin), (w - margin, h - margin), (220, 220, 220), 1)
+    cv2.putText(canvas, title, (margin, margin - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    cv2.putText(canvas, "X", (w - margin + 10, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+    cv2.putText(canvas, "Y", (w // 2, margin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+
+    # draw GT
+    if gt_pts.size:
+        gt_px = to_px(gt_pts, bounds)
+        for i in range(len(gt_px)):
+            color = (0, 180, 0)
+            cv2.circle(canvas, tuple(gt_px[i]), 4, color, -1, lineType=cv2.LINE_AA)
+            if i > 0:
+                cv2.line(canvas, tuple(gt_px[i - 1]), tuple(gt_px[i]), (0, 140, 0), 2, lineType=cv2.LINE_AA)
+    # draw Pred
+    if pred_pts.size:
+        pred_px = to_px(pred_pts, bounds)
+        for i in range(len(pred_px)):
+            color = (50, 50, 230)
+            cv2.circle(canvas, tuple(pred_px[i]), 4, color, -1, lineType=cv2.LINE_AA)
+            if i > 0:
+                cv2.line(canvas, tuple(pred_px[i - 1]), tuple(pred_px[i]), (60, 60, 200), 2, lineType=cv2.LINE_AA)
+
+    # legend
+    cv2.rectangle(canvas, (w - margin - 220, margin + 10), (w - margin - 10, margin + 60), (255, 255, 255), -1)
+    cv2.rectangle(canvas, (w - margin - 220, margin + 10), (w - margin - 10, margin + 60), (0, 0, 0), 1)
+    cv2.circle(canvas, (w - margin - 200, margin + 25), 6, (0, 180, 0), -1)
+    cv2.putText(canvas, "GT (t+1 per step)", (w - margin - 180, margin + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+    cv2.circle(canvas, (w - margin - 200, margin + 45), 6, (50, 50, 230), -1)
+    cv2.putText(canvas, "Pred first-step", (w - margin - 180, margin + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+
+    return canvas
+
+
+def overlay_abs_firststep_on_ref_image(ds: RealWorldDataset,
+                                       seq_indices: List[int],
+                                       model: RISE,
+                                       obj_pose_mode: str) -> np.ndarray:
+    """Create an overlay image: project absolute-frame first-step trajectories onto the first frame image.
+
+    Returns the BGR overlay image (np.ndarray). If base image missing, returns empty array.
+    """
+    if not seq_indices:
+        return np.empty((0,), dtype=np.uint8)
+
+    first_idx = seq_indices[0]
+    seq_id = ds.seq_ids[first_idx]
+    ref_frame_id_int = ds.seq_ref_frame[seq_id]
+    demo_path = ds.data_paths[first_idx]
+    rgb_dir = os.path.join(demo_path, "rgb")
+
+    # Find the actual filename (with potential zero-padding) that corresponds to the reference frame id
+    ref_fname_stem = None
+    try:
+        rgb_files = [f for f in os.listdir(rgb_dir) if os.path.splitext(f)[1].lower() in [".png", ".jpg", ".jpeg"]]
+        for f in sorted(rgb_files):
+            stem = os.path.splitext(f)[0]
+            try:
+                if int(stem) == ref_frame_id_int:
+                    ref_fname_stem = stem
+                    break
+            except Exception:
+                continue
+    except Exception as e:
+        warnings.warn(f"[vis_prediction] Failed to list rgb dir {rgb_dir}: {e}")
+
+    # Fallback: use the integer directly if we couldn't resolve a matching stem
+    if ref_fname_stem is None:
+        ref_fname_stem = str(ref_frame_id_int)
+
+    rgb_path_png = os.path.join(rgb_dir, f"{ref_fname_stem}.png")
+    rgb_path_jpg = os.path.join(rgb_dir, f"{ref_fname_stem}.jpg")
+    base_rgb = cv2.imread(rgb_path_png) if os.path.exists(rgb_path_png) else cv2.imread(rgb_path_jpg)
+    if base_rgb is None:
+        warnings.warn(f"[vis_prediction] Missing RGB image for frame {ref_fname_stem} in {rgb_dir}")
+        return np.empty((0,), dtype=np.uint8)
+
+    cam_intr = ds.seq_intrinsics[seq_id].copy()
+
+    # Collect GT trajectory (in ref frame) as 3D points and project to ref image
+    gt_pts_ref: List[np.ndarray] = []
+    for sidx in seq_indices:
+        try:
+            _pred_first, gt_first = compute_first_step_abs_pose(ds, sidx, model, obj_pose_mode=obj_pose_mode)
+        except Exception as e:
+            warnings.warn(f"compute_first_step_abs_pose failed at index {sidx}: {e}")
+            continue
+        if gt_first.size:
+            gt_pts_ref.append(gt_first[:3, 3])
+
+    gt_pts_ref_np = np.stack(gt_pts_ref, axis=0) if len(gt_pts_ref) else np.empty((0, 3), dtype=np.float32)
+
+    overlay = base_rgb.copy()
+    if gt_pts_ref_np.size:
+        overlay = project_points_with_gradient(
+            overlay, cam_intr, gt_pts_ref_np,
+            color_start=(0, 255, 0), color_end=(255, 0, 255), radius=4, thickness=-1)
+
+    if gt_pts_ref_np.size:
+        cv2.putText(overlay, "GT (t+1): green->magenta", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    return overlay
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_path", default="data_lion")
@@ -296,10 +483,10 @@ def main():
                     help="Dataset split to load")
     ap.add_argument("--full_episode", action="store_true", help="Use entire episode length for prediction")
     ap.add_argument("--fps", type=int, default=15, help="Frames per second for the rendered video")
-    ap.add_argument("--compare_mode", type=str, default="trajectory",
-                    choices=["trajectory", "pose"],
+    ap.add_argument("--compare_mode", type=str, default="traj",
+                    choices=["traj", "pose"],
                     help="Comparison mode: full trajectory versus single-pose")
-    ap.add_argument("--obj_pose_mode", type=str, default="abs", choices=["abs", "delta"],
+    ap.add_argument("--obj_pose_mode", type=str, default="delta", choices=["abs", "delta"],
                     help="Object pose prediction target type used by the checkpoint.")
     args = ap.parse_args()
 
@@ -355,6 +542,33 @@ def main():
 
     if args.output_video is None:
         print(f"Rendered {len(rendered_frames)} frames.")
+
+    # After inference, overlay the absolute-frame first-step trajectory onto the reference frame image
+    try:
+        overlay_img = overlay_abs_firststep_on_ref_image(ds, seq_indices, model, obj_pose_mode=args.obj_pose_mode)
+        if overlay_img.size:
+            # Try to show the image; if not possible, save to disk
+            try:
+                window_name = 'Abs Traj on First Frame'
+                cv2.imshow(window_name, overlay_img)
+                # Poll until window closed or key pressed (Esc/q/Enter/Space)
+                while True:
+                    key = cv2.waitKey(50) & 0xFF
+                    vis = cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE)
+                    if vis < 1:
+                        break
+                    if key in (27, ord('q'), 13, 32):
+                        break
+                cv2.destroyWindow(window_name)
+            except Exception:
+                out_dir = os.path.dirname(args.output_video) if args.output_video else "outputs"
+                os.makedirs(out_dir, exist_ok=True)
+                seq_id = ds.seq_ids[seq_indices[0]]
+                out_path = os.path.join(out_dir, f"abs_traj_on_first_{seq_id}.png")
+                cv2.imwrite(out_path, overlay_img)
+                print(f"Saved absolute trajectory overlay to {out_path}")
+    except Exception as e:
+        warnings.warn(f"Failed to generate absolute-frame overlay on first image: {e}")
 
 
 if __name__ == "__main__":

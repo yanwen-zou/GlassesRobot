@@ -35,6 +35,11 @@ python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt_delta/policy_epoch_1000_see
 # This is amazing. It can literally grasp anything I want.
 python glasses_hardware/hardware/anygrasp_debug.py --real_robot
 
-# -------------6D Pose prediction ----------------
-
+# -------------6D Pose prediction Inference ----------------
 python src/egodata_eval/vis.py
+
+# -------------PiPER ------------------------
+cd glasses_hardware/piper_sdk/piper_sdk
+bash can_activate.sh can0 1000000
+ # Control
+pythonglasses_hardware/hardware/my_device/piper.py

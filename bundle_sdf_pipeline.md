@@ -7,4 +7,4 @@ python /home/yuwenye/yanwen/GlassesRobot/data_processing_scripts/zero_depth_ge_t
 # --------run sam, 50frames one prompt ------------
 python /home/yuwenye/yanwen/GlassesRobot/data_processing_scripts/run_sam_for_timestamp.py
 
-# --------then mv the episode to bundlesdf/data and follow its repo------
+# --------then mv the episode to bundlesdf/data and follow its repo------       
