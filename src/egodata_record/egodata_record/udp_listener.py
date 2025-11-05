@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
+import socket
+
 import rclpy
 from rclpy.node import Node
-import socket
 from std_msgs.msg import String
-from geometry_msgs.msg import PoseStamped
-import time
 
 class UDPListener(Node):
     def __init__(self):
         super().__init__('udp_listener')
 
         self.cmd_pub = self.create_publisher(String, '/control_cmd', 10)
-        self.pose_pub = self.create_publisher(PoseStamped, '/glasses_pose', 10)
 
         self.UDP_IP = "0.0.0.0"
         self.UDP_PORT = 5005
@@ -27,19 +25,6 @@ class UDPListener(Node):
             msg = data.decode().strip().split(",")
             if msg[0] in ["start", "stop"]:
                 self.cmd_pub.publish(String(data=msg[0]))
-            elif msg[0] == "pose":
-                x, y, z = map(float, msg[1:4])
-                qx, qy, qz, qw = map(float, msg[4:8])
-                pose = PoseStamped()
-                pose.pose.position.x = x
-                pose.pose.position.y = y
-                pose.pose.position.z = z
-                pose.pose.orientation.x = qx
-                pose.pose.orientation.y = qy
-                pose.pose.orientation.z = qz
-                pose.pose.orientation.w = qw
-                pose.header.stamp = self.get_clock().now().to_msg()
-                self.pose_pub.publish(pose)
         except BlockingIOError:
             pass
 

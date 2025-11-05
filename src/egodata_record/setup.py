@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'traj_recorder = egodata_record.zed_xreal_traj_recorder:main',
             'udp_listener = egodata_record.udp_listener:main',
+            'headpos_listener = egodata_record.headpos_listener:main',
             'zed_tracker = egodata_record.zed_tracker:main',
             'stereo_video_recorder = egodata_record.stereo_video_recorder:main',
             'pose_visualizer = egodata_record.pose_visualizer:main',

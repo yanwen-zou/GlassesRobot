@@ -40,9 +40,21 @@ def generate_launch_description():
         description='Factor to downscale captured frames before recording.'
     )
 
+    marker_length_arg = DeclareLaunchArgument(
+        'marker_length',
+        default_value='0.045',
+        description='ArUco marker side length in meters for grounding the camera pose.'
+    )
+
     udp_listener_node = Node(
         package='egodata_record',
         executable='udp_listener',
+        output='screen'
+    )
+
+    headpos_listener_node = Node(
+        package='egodata_record',
+        executable='headpos_listener',
         output='screen'
     )
 
@@ -54,6 +66,7 @@ def generate_launch_description():
             'output_dir': LaunchConfiguration('output_dir'),
             'frame_rate': LaunchConfiguration('frame_rate'),
             'downscale_factor': LaunchConfiguration('downscale_factor'),
+            'marker_length': LaunchConfiguration('marker_length'),
         }]
     )
 
@@ -61,6 +74,8 @@ def generate_launch_description():
         output_dir_arg,
         frame_rate_arg,
         downscale_factor_arg,
+        marker_length_arg,
         udp_listener_node,
+        headpos_listener_node,
         stereo_recorder_node,
     ])
