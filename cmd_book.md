@@ -28,6 +28,10 @@ python MBA/train_obj.py \
 
 python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt_delta/policy_epoch_1000_seed_233.ckpt     --output_video outputs/delta_eval.mp4 --demo_index 0 --full_episode --fps 20 --compare_mode traj --obj_pose_mode delta --data_path data
 
+  # 3D Traj Preview
+
+python MBA/dataset/traj_vis.py
+
 # -------------AnyGrasp------------------
 # This is amazing. It can literally grasp anything I want.
 python glasses_hardware/hardware/anygrasp_debug.py --real_robot

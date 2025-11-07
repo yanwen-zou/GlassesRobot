@@ -148,7 +148,7 @@ def render_item_predictions(ds: RealWorldDataset,
                             model: RISE,
                             obj_pose_mode: str = "abs",
                             add_legend: bool = False,
-                            compare_mode: str = "traj"):
+                            compare_mode: str = "traj") -> Tuple[List[Tuple[str, np.ndarray]], np.ndarray]:
     item = ds[idx]
     coords, feats = ME.utils.sparse_collate(item["input_coords_list"],
                                             item["input_feats_list"])
@@ -177,6 +177,9 @@ def render_item_predictions(ds: RealWorldDataset,
     # print(f"[termination] seq={ds.seq_ids[idx]} flags={np.round(term_signal.astype(float), 4)} >0.5?={term_reached}")
     obj_traj_ref = denormalize_obj_traj(obj_traj_norm)
     pose_mats_ref = build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3 + 6])
+    first_pred_point_ref = (pose_mats_ref[0][:3, 3].copy()
+                            if len(pose_mats_ref)
+                            else np.empty((0,), dtype=np.float32))
 
     gt_pose_mats_ref = None
     if "action_obj" in item:
@@ -203,7 +206,7 @@ def render_item_predictions(ds: RealWorldDataset,
         base_rgb = cv2.imread(rgb_path_jpg)
     if base_rgb is None:
         warnings.warn(f"[vis_prediction] Missing RGB image for frame {cur_frame_id} in {rgb_dir}")
-        return []
+        return [], first_pred_point_ref
 
     cam_extr_cur = ds.get_camera_extrinsic(seq_id, int(cur_frame_id), warn_prefix="vis_prediction(cur)")
     cam_extr_cur = np.asarray(cam_extr_cur)
@@ -282,7 +285,7 @@ def render_item_predictions(ds: RealWorldDataset,
             cv2.putText(overlay, "Pred label yellow, GT label cyan", (15, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    return [(cur_frame_id, overlay)]
+    return [(cur_frame_id, overlay)], first_pred_point_ref
 
 
 def compute_first_step_abs_pose(ds: RealWorldDataset,
@@ -520,10 +523,11 @@ def main():
 
     frame_map: Dict[str, np.ndarray] = {}
     frame_sequence: List[str] = []
+    traj_records: List[Tuple[str, np.ndarray]] = []
     legend_used = False
 
     for seq_idx in seq_indices:
-        overlays = render_item_predictions(
+        overlays, first_pred_point = render_item_predictions(
             ds,
             seq_idx,
             model,
@@ -537,9 +541,14 @@ def main():
             frame_map[frame_id] = overlay
             if frame_id not in frame_sequence:
                 frame_sequence.append(frame_id)
+        if first_pred_point.size:
+            obs_frames = ds.obs_frame_ids[seq_idx]
+            traj_frame_id = str(obs_frames[-1]) if len(obs_frames) else str(seq_idx)
+            traj_records.append((traj_frame_id, first_pred_point))
 
     rendered_frames = [frame_map[fid] for fid in frame_sequence]
 
+    traj_output_path = None
     if args.output_video:
         output_dir = os.path.dirname(args.output_video)
         if output_dir:
@@ -549,34 +558,28 @@ def main():
 
     if args.output_video is None:
         print(f"Rendered {len(rendered_frames)} frames.")
+    else:
+        print(f"Rendered {len(rendered_frames)} frames for video output.")
 
-    # After inference, overlay the absolute-frame first-step trajectory onto the reference frame image
-    try:
-        overlay_img = overlay_abs_firststep_on_ref_image(ds, seq_indices, model, obj_pose_mode=args.obj_pose_mode)
-        if overlay_img.size:
-            # Try to show the image; if not possible, save to disk
-            try:
-                window_name = 'Abs Traj on First Frame'
-                cv2.imshow(window_name, overlay_img)
-                # Poll until window closed or key pressed (Esc/q/Enter/Space)
-                while True:
-                    key = cv2.waitKey(50) & 0xFF
-                    vis = cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE)
-                    if vis < 1:
-                        break
-                    if key in (27, ord('q'), 13, 32):
-                        break
-                cv2.destroyWindow(window_name)
-            except Exception:
-                out_dir = os.path.dirname(args.output_video) if args.output_video else "outputs"
-                os.makedirs(out_dir, exist_ok=True)
-                seq_id = ds.seq_ids[seq_indices[0]]
-                out_path = os.path.join(out_dir, f"abs_traj_on_first_{seq_id}.png")
-                cv2.imwrite(out_path, overlay_img)
-                print(f"Saved absolute trajectory overlay to {out_path}")
-    except Exception as e:
-        warnings.warn(f"Failed to generate absolute-frame overlay on first image: {e}")
-
+    if traj_records:
+        if args.output_video:
+            traj_base = os.path.splitext(args.output_video)[0]
+        else:
+            default_traj_dir = os.path.join("outputs", "trajectories")
+            os.makedirs(default_traj_dir, exist_ok=True)
+            traj_base = os.path.join(default_traj_dir, seq_id)
+        traj_output_path = f"{traj_base}_traj.txt"
+        traj_dir = os.path.dirname(traj_output_path)
+        if traj_dir:
+            os.makedirs(traj_dir, exist_ok=True)
+        with open(traj_output_path, "w", encoding="utf-8") as f:
+            f.write("# frame_id x y z (absolute ref frame)\n")
+            for frame_id, point in traj_records:
+                f.write(f"{frame_id} {point[0]:.6f} {point[1]:.6f} {point[2]:.6f}\n")
+        print(f"Saved predicted first-step trajectory points to {traj_output_path}")
+    else:
+        print("No trajectory points recorded (empty predictions).")
+        
 
 if __name__ == "__main__":
     torch.cuda.set_device(0)
