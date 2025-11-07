@@ -474,15 +474,17 @@ def overlay_abs_firststep_on_ref_image(ds: RealWorldDataset,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_path", default="data_lion")
+    ap.add_argument("--data_path", default="data")
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--num_action", type=int, default=20)
-    ap.add_argument("--demo_index", type=int, default=0, help="Index of sequence to visualize")
+    ap.add_argument("--demo_index", type=int, default=0, help="Index of episode (demo folder) to visualize")
+    ap.add_argument("--demo_step", type=int, default=0,
+                    help="When not using --full_episode, pick the N-th window inside the chosen episode")
     ap.add_argument("--output_video", type=str, default=None, help="Optional mp4 path")
-    ap.add_argument("--split", type=str, default="train", choices=["train", "val", "all"],
+    ap.add_argument("--split", type=str, default="train", choices=["train", "eval", "all"],
                     help="Dataset split to load")
     ap.add_argument("--full_episode", action="store_true", help="Use entire episode length for prediction")
-    ap.add_argument("--fps", type=int, default=15, help="Frames per second for the rendered video")
+    ap.add_argument("--fps", type=int, default=20, help="Frames per second for the rendered video")
     ap.add_argument("--compare_mode", type=str, default="traj",
                     choices=["traj", "pose"],
                     help="Comparison mode: full trajectory versus single-pose")
@@ -492,14 +494,19 @@ def main():
 
     ds = RealWorldDataset(args.data_path, split=args.split, num_obs=1,
                           num_action=args.num_action, with_obj_action=True)
-    if args.demo_index >= len(ds):
-        raise IndexError(f"demo_index {args.demo_index} out of range for dataset of size {len(ds)}.")
-    seq_id = ds.seq_ids[args.demo_index]
+    available_seq_ids = getattr(ds, "all_demos", sorted(set(ds.seq_ids)))
+    if args.demo_index < 0 or args.demo_index >= len(available_seq_ids):
+        raise IndexError(f"demo_index {args.demo_index} out of range for {len(available_seq_ids)} episodes.")
+    seq_id = available_seq_ids[args.demo_index]
+    seq_indices_all = [i for i, sid in enumerate(ds.seq_ids) if sid == seq_id]
+    if not seq_indices_all:
+        raise RuntimeError(f"No samples found for episode id {seq_id}.")
 
     if args.full_episode:
-        seq_indices = sorted([i for i, sid in enumerate(ds.seq_ids) if sid == seq_id])
+        seq_indices = sorted(seq_indices_all)
     else:
-        seq_indices = [args.demo_index]
+        demo_step = max(0, min(args.demo_step, len(seq_indices_all) - 1))
+        seq_indices = [seq_indices_all[demo_step]]
 
     model = RISE(num_action=args.num_action,
                  input_dim=6,

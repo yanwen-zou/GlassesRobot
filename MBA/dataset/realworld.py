@@ -36,7 +36,7 @@ class RealWorldDataset(Dataset):
         with_cloud = False,
         with_obj_action = False,
     ):
-        assert split in ['train', 'val', 'all']
+        assert split in ['train', 'eval', 'all']
 
         self.path = path
         self.split = split

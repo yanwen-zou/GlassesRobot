@@ -6,12 +6,12 @@ set -euo pipefail
 # 2. Launch SAM-based mask generation.
 # 3. Run FoundationStereo depth generation.
 # 4. Save the 3x3 camera intrinsic matrix into each episode directory.
-# 5. Run FoundationPose to estimate object poses per episode.
+# 5. Run FoundationPose to estimate object poses per episode, using book as mesh.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT="$SCRIPT_DIR"
 FOUNDATION_STEREO_DIR="${PROJECT_ROOT}/src/FoundationStereo"
-DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data/train"
+DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data"
 DATA_ROOT="$DEFAULT_DATA_ROOT"
 INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
 

@@ -35,7 +35,7 @@ if __name__=='__main__':
   set_seed(0)
   
   demo_dir = os.path.join(args.data_root, args.demo_name)
-  mesh_file = os.path.join(args.data_root, 'sjtu_lion', 'lion.obj')
+  mesh_file = os.path.join(args.data_root, 'book', 'mesh.obj')
   test_scene_dir = demo_dir
 
   mesh = trimesh.load(mesh_file)
