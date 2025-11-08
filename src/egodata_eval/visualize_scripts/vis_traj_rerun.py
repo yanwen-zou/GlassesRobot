@@ -25,6 +25,13 @@ from typing import Tuple
 import numpy as np
 
 
+def _load_transform(path: Path) -> np.ndarray:
+    T = np.load(path)
+    if T.shape != (4, 4):
+        raise ValueError(f"Expected 4x4 SE3 matrix at {path}, got {T.shape}")
+    return T
+
+
 def load_traj_xyz(traj_path: Path) -> Tuple[np.ndarray, np.ndarray]:
     ids: list[int] = []
     xyz: list[tuple[float, float, float]] = []
@@ -56,10 +63,31 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize trajectory using Rerun")
     parser.add_argument("--file", type=Path, default=Path("outputs/delta_eval_book_traj.txt"))
     parser.add_argument("--fps", type=float, default=30.0, help="Playback FPS")
-    parser.add_argument("--spawn", action="store_true", help="Spawn Rerun viewer window")
+    parser.add_argument("--T_zed_aruco", type=Path, default=Path("T_zed_aruco.npy"))
+    parser.add_argument(
+        "--T_base_aruco", type=Path, default=Path("glasses_hardware/calib/T_base_aruco.npy")
+    )
     args = parser.parse_args()
 
     ids, xyz = load_traj_xyz(args.file)
+    # Normalize trajectory to be relative to the first frame's position
+    origin = xyz[0].copy()
+    xyz = xyz - origin
+    # Conjugate relative trajectory into base frame:
+    #   T_rel_base = T_base_zed @ T_rel_zed @ inv(T_base_zed)
+    # which preserves translation-only deltas but keeps logic consistent with eval/replay.
+    T_zed_aruco = _load_transform(args.T_zed_aruco)
+    T_base_aruco = _load_transform(args.T_base_aruco)
+    T_base_zed = T_base_aruco @ np.linalg.inv(T_zed_aruco)
+    T_zed_base = np.linalg.inv(T_base_zed)
+    xyz_base = []
+    for p in xyz:
+        T_rel = np.eye(4, dtype=np.float32)
+        T_rel[:3, 3] = p.astype(np.float32)
+        T_conj = T_base_zed @ T_rel @ T_zed_base
+        xyz_base.append(T_conj[:3, 3].astype(np.float32))
+    xyz_base = np.asarray(xyz_base, dtype=np.float32)
+    xyz = xyz.astype(np.float32)
 
     try:
         import rerun as rr
@@ -68,7 +96,7 @@ def main():
             "Rerun package is required. Install with `pip install rerun-sdk`."
         ) from e
 
-    rr.init("Trajectory Playback", spawn=args.spawn)
+    rr.init("Trajectory Playback", spawn=True)
     # Set a world coordinate convention (Right-Down-Forward typical for cameras)
     try:
         rr.log("world", rr.ViewCoordinates.RDF)
@@ -77,18 +105,23 @@ def main():
 
     # Log the full planned path once (optional visualization)
     rr.set_time("frame", sequence=int(ids[0]))
-    rr.log("traj/path_full", rr.LineStrips3D([xyz.astype(np.float32)]))
+    rr.log("traj/path_full_zed", rr.LineStrips3D([xyz]))
+    rr.log("traj/path_full_base", rr.LineStrips3D([xyz_base]))
 
     # Stream point-by-point with an accumulating strip
     dt = 1.0 / max(args.fps, 1e-6)
-    acc = []
-    for i, (fid, p) in enumerate(zip(ids, xyz)):
+    acc_zed: list[np.ndarray] = []
+    acc_base: list[np.ndarray] = []
+    for i, (fid, p_zed, p_base) in enumerate(zip(ids, xyz, xyz_base)):
         rr.set_time("frame", sequence=int(fid))
-        # Point at current frame
-        rr.log("traj/point", rr.Points3D(p[np.newaxis, :].astype(np.float32)))
-        # Accumulated line strip so far
-        acc.append(p.astype(np.float32))
-        rr.log("traj/path_so_far", rr.LineStrips3D([np.asarray(acc, dtype=np.float32)]))
+        # Points for ZED and base frames
+        rr.log("traj/zed_point", rr.Points3D(p_zed[np.newaxis, :]))
+        rr.log("traj/base_point", rr.Points3D(p_base[np.newaxis, :]))
+        # Accumulated line strips
+        acc_zed.append(p_zed)
+        acc_base.append(p_base)
+        rr.log("traj/path_so_far_zed", rr.LineStrips3D([np.asarray(acc_zed, dtype=np.float32)]))
+        rr.log("traj/path_so_far_base", rr.LineStrips3D([np.asarray(acc_base, dtype=np.float32)]))
         time.sleep(dt)
 
 

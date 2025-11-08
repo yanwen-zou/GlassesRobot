@@ -46,6 +46,7 @@ def load_zed_intrinsics(default_path: Path | None = None) -> np.ndarray:
     with open(intr_path, "r") as f:
         lines = f.readlines()
         K = np.array(list(map(float, lines[0].rstrip().split())), dtype=np.float32).reshape(3, 3)
+    print(f"[INFO] Loaded ZED intrinsics from {intr_path}: \n{K}")
     return K
 
 
@@ -83,7 +84,10 @@ class ArucoCalibrator:
         _add_project_root_to_path()
         from glasses_hardware.hardware.my_device.zed import ZEDCamera
         self.marker_length_m = float(marker_length_m)
-        self.K = K if K is not None else load_zed_intrinsics()
+        K_loaded = K if K is not None else load_zed_intrinsics()
+        # Stored intrinsics are from a 0.5 downscaled image; rescale by 2x to match the ZED feed we detect on.
+        self.K = K_loaded.astype(np.float32).copy()
+        self.K[:2, :] *= 2.0
         self.dist_coeffs = np.zeros((5, 1), dtype=np.float32)
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, "DICT_6X6_250"))
         detector_params_ctor = getattr(cv2.aruco, "DetectorParameters_create", None)
@@ -113,7 +117,9 @@ class ArucoCalibrator:
                 display = frame.copy()
                 if ids is not None and len(ids) > 0:
                     cv2.aruco.drawDetectedMarkers(display, corners, ids)
-                    rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, self.marker_length_m, self.K, self.dist_coeffs)
+                    rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                        corners, self.marker_length_m, self.K, self.dist_coeffs
+                    )
                     rvec = rvecs[0].reshape(3)
                     tvec = tvecs[0].reshape(3)
                     R, _ = cv2.Rodrigues(rvec)
