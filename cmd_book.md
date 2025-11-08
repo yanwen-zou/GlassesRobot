@@ -37,7 +37,7 @@ python MBA/dataset/traj_vis.py
 python glasses_hardware/hardware/anygrasp_debug.py --real_robot
 
 # -------------6D Pose prediction Inference ----------------
-python src/egodata_eval/vis.py
+python src/egodata_eval/eval.py --ckpt MBA/ckpt_deploy/policy_last.ckpt 
 
 # -------------PiPER ------------------------
 cd glasses_hardware/piper_sdk/piper_sdk

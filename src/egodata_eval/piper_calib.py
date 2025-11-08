@@ -67,81 +67,114 @@ def move_arm_to_pose(pose_deg):
         pass
 
 
-def detect_aruco_and_cache(K: np.ndarray, marker_length_m: float, out_path: Path) -> np.ndarray:
-    from glasses_hardware.hardware.my_device.zed import ZEDCamera
+# NOTE: ArUco detection helpers are encapsulated in ArucoCalibrator class below to avoid duplicate logic.
 
-    zed = ZEDCamera(resolution="720P", fps=30)
-    dist_coeffs = np.zeros((5, 1), dtype=np.float32)
 
-    # Prepare ArUco detector
-    aruco_dict_id = getattr(cv2.aruco, "DICT_6X6_250")
-    aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
-    detector_params = getattr(cv2.aruco, "DetectorParameters_create", None)
-    if detector_params is not None:
-        detector_params = detector_params()
-    else:
-        detector_params = cv2.aruco.DetectorParameters()
 
-    T = None
-    try:
-        win = "ZED ArUco"
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+class ArucoCalibrator:
+    """Reusable ArUco calibrator that avoids repeated camera initialization.
 
+    - Opens ZED once in constructor and provides `detect` to obtain T_cam_aruco.
+    - Optionally caches result to a .npy file.
+    - Call `close()` when done.
+    """
+
+    def __init__(self, marker_length_m: float = 0.045, K: np.ndarray | None = None):
+        _add_project_root_to_path()
+        from glasses_hardware.hardware.my_device.zed import ZEDCamera
+        self.marker_length_m = float(marker_length_m)
+        self.K = K if K is not None else load_zed_intrinsics()
+        self.dist_coeffs = np.zeros((5, 1), dtype=np.float32)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, "DICT_6X6_250"))
+        detector_params_ctor = getattr(cv2.aruco, "DetectorParameters_create", None)
+        self.detector_params = detector_params_ctor() if detector_params_ctor else cv2.aruco.DetectorParameters()
+        # Open camera once
+        self._zed = ZEDCamera(resolution="720P", fps=30)
+
+    def detect(self, timeout_s: float = 5.0, show: bool = True) -> np.ndarray:
+        """Detect ArUco once and return T_cam_aruco (cam<-aruco), 4x4."""
+        win = None
+        if show:
+            win = "ZED ArUco"
+            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         start = time.time()
-        timeout_s = 5.0
-        while time.time() - start < timeout_s:
-            frame = zed.read()
-            if frame is None:
-                continue
-            try:
-                frame = _ensure_bgr(frame)
-            except ValueError:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=detector_params)
-
-            display = frame.copy()
-            if ids is not None and len(ids) > 0:
-                cv2.aruco.drawDetectedMarkers(display, corners, ids)
-                rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, marker_length_m, K, dist_coeffs)
-                # Draw axes for each detection
-                for rvec, tvec in zip(rvecs, tvecs):
-                    cv2.drawFrameAxes(display, K, dist_coeffs, rvec, tvec, marker_length_m * 0.5)
-
-                # Use the first marker to compute and cache T
-                rvec = rvecs[0].reshape(3)
-                tvec = tvecs[0].reshape(3)
-                R, _ = cv2.Rodrigues(rvec)
-                T = np.eye(4, dtype=float)
-                T[:3, :3] = R
-                T[:3, 3] = tvec
-
-                # Show the annotated view for ~3 seconds before exiting
-                show_until = time.time() + 3.0
-                while time.time() < show_until:
+        T = None
+        try:
+            while time.time() - start < timeout_s:
+                frame = self._zed.read()
+                if frame is None:
+                    continue
+                try:
+                    frame = _ensure_bgr(frame)
+                except ValueError:
+                    continue
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.detector_params)
+                display = frame.copy()
+                if ids is not None and len(ids) > 0:
+                    cv2.aruco.drawDetectedMarkers(display, corners, ids)
+                    rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(corners, self.marker_length_m, self.K, self.dist_coeffs)
+                    rvec = rvecs[0].reshape(3)
+                    tvec = tvecs[0].reshape(3)
+                    R, _ = cv2.Rodrigues(rvec)
+                    T = np.eye(4, dtype=float)
+                    T[:3, :3] = R
+                    T[:3, 3] = tvec
+                    if show:
+                        for rvec, tvec in zip(rvecs, tvecs):
+                            cv2.drawFrameAxes(display, self.K, self.dist_coeffs, rvec, tvec, self.marker_length_m * 0.5)
+                        # brief show
+                        show_until = time.time() + 1.0
+                        while time.time() < show_until:
+                            cv2.imshow(win, display)
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord('q') or key == 27:
+                                break
+                    return T
+                if show:
                     cv2.imshow(win, display)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q') or key == 27:
                         break
-                np.save(str(out_path), T)
-                return T
+        finally:
+            if show:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+        raise RuntimeError("未检测到 ArUco 标记，无法获得 T_cam_aruco")
 
-            # No detection yet; keep showing live feed
-
-            display = _ensure_bgr(display)
-
-            cv2.imshow(win, display)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:
-                break
-    finally:
+    def detect_and_cache(self, out_path: Path, timeout_s: float = 5.0, show: bool = True) -> np.ndarray:
+        """Detect ArUco and cache; on timeout, fallback to repo-root T_zed_aruco.npy if available."""
         try:
-            cv2.destroyAllWindows()
+            T = self.detect(timeout_s=timeout_s, show=show)
+            np.save(str(out_path), T)
+            return T
+        except Exception:
+            # Fallback: repo root cache
+            try:
+                project_root = Path(__file__).resolve().parents[2]
+                fallback = project_root / "T_zed_aruco.npy"
+                if fallback.exists():
+                    T = np.load(str(fallback)).astype(np.float32)
+                    if T.shape == (4, 4) or T.shape == (3, 4):
+                        if T.shape == (3, 4):
+                            T = np.vstack([T, np.array([0, 0, 0, 1], dtype=np.float32)])
+                        print(f"[WARN] 超时未检测到 ArUco，使用根目录缓存: {fallback}")
+                        try:
+                            np.save(str(out_path), T)
+                        except Exception:
+                            pass
+                        return T
+            except Exception:
+                pass
+            raise
+
+    def close(self):
+        try:
+            self._zed.close()
         except Exception:
             pass
-        zed.close()
-
-    raise RuntimeError("未检测到 ArUco 标记，无法缓存 T_zed_aruco")
 
 
 def preview_zed_3s():
@@ -186,14 +219,15 @@ def main():
     args = parser.parse_args()
 
     # 1) Move arm to given pose (degrees)
-    target_deg = [-18.00, 16.00, -24.00, -10.00, 10.00, 0.00]
+    target_deg = [-18.00, 16.00, -24.00, -10.00, 20.00, 9.00]
     move_arm_to_pose(target_deg)
 
-    # 2) Load ZED intrinsics
-    K = load_zed_intrinsics()
-
-    # 3) Detect and cache
-    T = detect_aruco_and_cache(K, args.marker_length, args.out)
+    # 2) Detect and cache via reusable calibrator
+    calib = ArucoCalibrator(marker_length_m=args.marker_length)
+    try:
+        T = calib.detect_and_cache(args.out, timeout_s=5.0, show=True)
+    finally:
+        calib.close()
     print(f"[OK] Cached T_zed_aruco to {args.out} with shape {T.shape}")
 
 

@@ -370,7 +370,7 @@ def main() -> None:
     lift_pose = base_T_grasp.copy()
     lift_pose[:3, 3] = lift_pose[:3, 3] + np.array([0, 0, cfgs.lift_distance])
 
-    target_pose = matrix_to_pose(base_T_grasp) - np.array([0, 0, -0.06, 0, 0, 0, 0], dtype=np.float64) # Higher approach by 5 cm
+    target_pose = matrix_to_pose(base_T_grasp) - np.array([0, 0, -0.07, 0, 0, 0, 0], dtype=np.float64) # Higher approach by 5 cm
     pregrasp_tcp = matrix_to_pose(pregrasp_pose)
     lift_tcp = matrix_to_pose(lift_pose)
 

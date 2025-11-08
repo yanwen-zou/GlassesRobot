@@ -20,13 +20,18 @@ if str(project_root) not in sys.path:
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from FoundationStereo.sam2_root.notebooks.get_mask import click_mask  # type: ignore
-from egodata_eval.eval_utils import save_mask, _find_default_ckpt,  \
+from egodata_eval.eval_utils import save_mask,  \
 _denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient, \
 _import_zed_class   # type: ignore
 
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
 from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
 from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper, execute_relative_traj  # type: ignore
+from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
+from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
+
+# For live ArUco detection to build camera->base mapping
+from egodata_eval import piper_calib  # type: ignore
 
 # ========== MBA Trajectory Prediction (RISE) ==========
 
@@ -36,7 +41,7 @@ from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type:
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot  # type: ignore
 
 class TrajectoryPredictor:
-    def __init__(self, ckpt_path: Path | None = None, num_action: int = 20, obj_pose_mode: str = "delta", voxel_size: float = 0.005):
+    def __init__(self, ckpt_path: Path, num_action: int = 20, obj_pose_mode: str = "delta", voxel_size: float = 0.005):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_action = num_action
         self.obj_pose_mode = obj_pose_mode
@@ -52,7 +57,9 @@ class TrajectoryPredictor:
                           enable_mba=True,
                           obj_dim=10,
                           obj_pose_mode=obj_pose_mode).to(self.device).eval()
-        ckpt_path = ckpt_path or _find_default_ckpt()
+        if ckpt_path is None:
+            raise ValueError("ckpt_path is required; please pass --ckpt to eval.py")
+        ckpt_path = Path(ckpt_path)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Trajectory ckpt not found: {ckpt_path}")
         state = torch.load(str(ckpt_path), map_location=self.device)
@@ -179,9 +186,50 @@ class TrajectoryPredictor:
         )
 
 
+def _load_calib_mat_safe(path: Path) -> np.ndarray | None:
+    try:
+        arr = np.load(str(path)).astype(np.float32)
+        if arr.shape == (4, 4):
+            return arr
+        if arr.shape == (3, 4):
+            arr = np.vstack([arr, np.array([0, 0, 0, 1], dtype=np.float32)])
+            return arr
+    except Exception:
+        return None
+    return None
+
+
+def _traj_cam_to_base(traj_cam: np.ndarray, T_base_cam: np.ndarray) -> np.ndarray:
+    """Conjugate each relative delta (xyz+rot6d[+grip]) from camera frame to base.
+
+    T_delta_base = T_base_cam @ T_delta_cam @ inv(T_base_cam)
+    """
+    if traj_cam is None or traj_cam.size == 0:
+        return traj_cam
+    out = []
+    Tbc_inv = np.linalg.inv(T_base_cam)
+    for i in range(traj_cam.shape[0]):
+        step = traj_cam[i]
+        xyz = step[:3].astype(np.float32)
+        r6 = step[3:9].astype(np.float32)
+        grip = step[9:10] if step.shape[0] > 9 else None
+        T_cam = _build_pose_mats(xyz[None, :], r6[None, :])[0]
+        T_base = T_base_cam @ T_cam @ Tbc_inv
+        xyzr6 = mat_to_xyz_rot(T_base.astype(np.float32), rotation_rep="rotation_6d").astype(np.float32)
+        if grip is not None:
+            out.append(np.concatenate([xyzr6[:3], xyzr6[3:9], grip.astype(np.float32)], axis=0))
+        else:
+            out.append(np.concatenate([xyzr6[:3], xyzr6[3:9]], axis=0))
+    return np.stack(out, axis=0).astype(np.float32)
+
+
 
 
 def run():
+    import argparse
+    ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
+    ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
+    args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = 10
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -190,11 +238,31 @@ def run():
     out_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "stream.mp4"
     ZEDCamera = _import_zed_class()
-    cam = ZEDCamera(resolution="WVGA", fps=30)
     # Initialize depth estimator and load model at start
     print("[INFO] Loading FoundationStereo depth model...")
     depth_est = DepthEstimator()
     
+    # One-time ArUco calibration to compute T_base_cam
+    project_root = Path(__file__).resolve().parents[2]
+    calib_dir = project_root / 'glasses_hardware' / 'calib'
+    calib_dir.mkdir(parents=True, exist_ok=True)
+    T_base_cam = None
+
+    T_base_aruco = _load_calib_mat_safe(calib_dir / 'T_base_aruco.npy')
+
+    print("[INFO] Detecting ArUco once for T_cam_aruco...")
+    calibrator = piper_calib.ArucoCalibrator(marker_length_m=0.045, K=depth_est.K.astype(np.float32))
+
+    T_cam_aruco = calibrator.detect_and_cache(calib_dir / 'T_zed_aruco.npy', timeout_s=5.0, show=True)
+    T_base_cam = T_base_aruco @ np.linalg.inv(T_cam_aruco)
+    print("[OK] Computed T_base_cam from T_base_aruco and T_cam_aruco")
+
+    calibrator.close()
+
+
+    # Open ZED for main loop
+    cam = ZEDCamera(resolution="WVGA", fps=30)
+
     # Initialize robot and gripper
     print("[INFO] Initializing robot and gripper...")
     robot = FlexivRobot(home=False)
@@ -238,8 +306,8 @@ def run():
 
     # Try initialize trajectory predictor (optional)
 
-    traj_pred = TrajectoryPredictor()
-    print("[INFO] Loaded RISE trajectory predictor from MBA/ckpt_deploy")
+    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt))
+    print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
 
     frame_idx = 0
     try:
@@ -287,7 +355,7 @@ def run():
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
                     # try:
-                    mesh_path = Path(__file__).resolve().parents[2] / "data" / "sjtu_lion" / "lion.obj"
+                    mesh_path = Path(__file__).resolve().parents[2] / "data" / "book" / "mesh.obj"
                     if pose_est is None:
                         pose_est = PoseEstimatorFP(mesh_path)
                     pose = pose_est.initialize(frame, depth_m, last_mask, depth_est.K.astype(np.float32))
@@ -312,10 +380,19 @@ def run():
                                 frame, depth_m, depth_est.K.astype(np.float32),
                                 pose_est.pose_cam_ob.astype(np.float32)
                             )
-                            # Execute first 5 relative steps using delta
+
                             if traj_pred.last_traj_delta is not None:
-                                print(f'traj_pred.last_traj_delta: {traj_pred.last_traj_delta[0]}')
-                                execute_relative_traj(robot, gripper, traj_pred.last_traj_delta, steps=1, gripper_open_thresh=0.8, step_sleep=0.05)
+                                if T_base_cam is None:
+                                    print("[WARN] T_base_cam unavailable; skipping execution.")
+                                else:
+                                    # Conjugate traj deltas from cam to base and execute
+                                    traj_base = _traj_cam_to_base(traj_pred.last_traj_delta, T_base_cam)
+                                    print(f"traj_cam first step: {traj_pred.last_traj_delta[0]}")
+                                    print(f"traj_base first step: {traj_base[0]}")
+                                    execute_relative_traj(
+                                        robot, gripper, traj_base,
+                                        steps=1, gripper_open_thresh=0.8, step_sleep=0.05
+                                    )
 
 
                         else:
@@ -345,17 +422,15 @@ def run():
             torch.cuda.empty_cache()
     finally:
         # Release resources and save video
-        try:
-            if writer is not None:
-                writer.release()
-                print(f"[INFO] Saved video to: {video_path}")
-        except Exception:
-            pass
+
+        if writer is not None:
+            writer.release()
+            print(f"[INFO] Saved video to: {video_path}")
+
         cv2.destroyAllWindows()
-        try:
-            cam.close()
-        except Exception:
-            pass
+
+        cam.close()
+
 
 
 if __name__ == "__main__":
