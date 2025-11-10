@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Visualize the ArUco marker pose relative to the robot base frame.
+Visualize the ArUco marker pose relative to the robot/world base frame.
 
-This script assumes you already have calibration files produced via `piper_calib`:
-  - `T_base_aruco.npy`: 4x4 SE3 transform (base <- aruco)
+This recreates the same transform composition used in
+`glasses_hardware/calib/move_tcp_to_aruco_offset.py` (minus any target offset):
 
-It logs the base frame as the world origin and displays the ArUco frame plus a
-translation arrow that highlights the marker offset in base coordinates.
+    T_world_aruco = T_world_tcp @ T_tcp_cam @ T_cam_aruco
+
+where T_world_tcp is the TCP pose in world coordinates, T_tcp_cam is `eih_camT`
+(tcp -> cam), and T_cam_aruco is the camera -> ArUco pose.
 """
 from __future__ import annotations
 
@@ -71,14 +73,26 @@ def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize ArUco pose with the robot base as origin")
+    parser = argparse.ArgumentParser(description="Visualize ArUco pose with the robot/world base as origin")
     parser.add_argument("--spawn", action="store_true", help="Spawn a standalone Rerun viewer window")
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length in meters")
     parser.add_argument(
-        "--T_base_aruco",
+        "--T_world_tcp",
         type=Path,
-        default=Path("glasses_hardware/calib/T_base_aruco.npy"),
-        help="Cached 4x4 transform from ArUco to robot base",
+        default=Path("glasses_hardware/calib/T_world_tcp.npy"),
+        help="4x4 SE3 from world/base to TCP (recorded pose)",
+    )
+    parser.add_argument(
+        "--T_tcp_cam",
+        type=Path,
+        default=Path("glasses_hardware/calib/eih_camT.npy"),
+        help="4x4 SE3 from TCP to camera (eih_camT)",
+    )
+    parser.add_argument(
+        "--T_cam_aruco",
+        type=Path,
+        default=Path("glasses_hardware/calib/T_cam_aruco_51.npy"),
+        help="4x4 SE3 from camera to ArUco (e.g., T_cam_aruco_51.npy)",
     )
     parser.add_argument(
         "--T_zed_aruco",
@@ -90,9 +104,8 @@ def main():
 
     T_base_aruco = _load_transform(args.T_base_aruco)
     T_zed_aruco_rdf = _load_transform(args.T_zed_aruco)
-    T_zed_aruco_fru = _rdf_to_fru_transform(T_zed_aruco_rdf)
 
-    T_zed_aruco = (T_zed_aruco_fru).astype(np.float32)
+    T_zed_aruco = (T_zed_aruco_rdf).astype(np.float32)
     T_base_zed = T_base_aruco @ np.linalg.inv(T_zed_aruco)
     T_base = np.eye(4, dtype=np.float32)
 
