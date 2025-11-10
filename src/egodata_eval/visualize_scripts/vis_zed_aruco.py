@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
 """
-Visualize ZED, ArUco, and robot base coordinate frames in Rerun.
+Visualize the ArUco marker's coordinate frame relative to the ZED camera base.
+
+This script loads a cached `T_zed_aruco.npy` (4x4 SE3, ArUco -> ZED) and displays both
+frames inside Rerun so you can quickly confirm the detected pose. The ZED camera is
+used as the visualization root.
 """
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Tuple
 
 import numpy as np
 
+X_ROT_180= np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, -1.0],
+    ],
+    dtype=np.float32,
+)
+X_ROT_180_H = np.eye(4, dtype=np.float32)
+X_ROT_180_H[:3, :3] = X_ROT_180
 
 def _load_transform(path: Path) -> np.ndarray:
     T = np.load(path)
     if T.shape != (4, 4):
-        raise ValueError(f"Expected 4x4 SE3 at {path}, got {T.shape}")
+        raise ValueError(f"Expected 4x4 SE3 matrix at {path}, got {T.shape}")
     return T.astype(np.float32)
 
 
 def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
+    """Log a coordinate frame plus RGB axes."""
     origin = T[:3, 3]
     R = T[:3, :3]
     rr.log(
@@ -28,8 +42,9 @@ def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
             mat3x3=R,
         ),
     )
-    origins = np.repeat(origin[None, :], 3, axis=0)
-    vectors = (R.T * axis_len).astype(np.float32)
+    # Log axes in the frame's local coordinates; Rerun composes the transform.
+    origins = np.zeros((3, 3), dtype=np.float32)
+    vectors = (np.eye(3, dtype=np.float32) * axis_len).astype(np.float32)
     colors = np.array(
         [
             [255, 0, 0, 255],   # +X red
@@ -49,81 +64,53 @@ def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
     )
 
 
-def _load_traj(traj_path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    ids: list[int] = []
-    xyz: list[Tuple[float, float, float]] = []
-    with open(traj_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            try:
-                fid = int(float(parts[0]))
-                x, y, z = map(float, parts[1:4])
-            except ValueError:
-                continue
-            ids.append(fid)
-            xyz.append((x, y, z))
-    if not xyz:
-        raise FileNotFoundError(f"No valid waypoints loaded from {traj_path}")
-    order = np.argsort(np.asarray(ids))
-    ids_arr = np.asarray(ids, dtype=np.int64)[order]
-    xyz_arr = np.asarray(xyz, dtype=np.float32)[order]
-    return ids_arr, xyz_arr
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Visualize ZED/Aruco/Base frames in Rerun")
-    parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length in meters")
-    parser.add_argument(
-        "--traj",
-        type=Path,
-        default=Path("outputs/delta_eval_book_traj.txt"),
-        help="Absolute trajectory text file (frame_id x y z)",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--spawn", action="store_true")
+    parser.add_argument("--axis_len", type=float, default=0.2)
     parser.add_argument("--T_zed_aruco", type=Path, default=Path("T_zed_aruco.npy"))
-    parser.add_argument(
-        "--T_base_aruco",
-        type=Path,
-        default=Path("glasses_hardware/calib/T_base_aruco.npy"),
-    )
+    parser.add_argument("--T_base_aruco", type=Path, default=Path("glasses_hardware/calib/T_base_aruco.npy"))
     args = parser.parse_args()
 
-    T_zed_aruco = _load_transform(args.T_zed_aruco)
+    # 1️⃣ 加载变换（都是 child→parent 形式）
+    T_zed_aruco = _load_transform(args.T_zed_aruco) # aruco → zed
+    T_base_aruco = _load_transform(args.T_base_aruco) @ X_ROT_180_H  # aruco → base
+    
+    # 2️⃣ 打印验证（物理距离必须与实际场景匹配！）
+    print(f"\n[验证] ArUco在ZED下的平移: {T_zed_aruco[:3, 3]}")
+    print(f"[验证] ArUco在Base下的平移: {T_base_aruco[:3, 3]}")
 
-    # Base frame is the visualization root; express ZED and ArUco relative to base.
-    T_zed = np.eye(4, dtype=np.float32)
-    T_aruco = T_zed_aruco.astype(np.float32)
+    # 3️⃣ 计算 Rerun 需要的 parent→child 形式
+    T_zed_aruco_vis = T_zed_aruco          # zed → aruco
+    T_zed_base_vis = T_zed_aruco @ np.linalg.inv(T_base_aruco)     # zed → base
+    
+    # 4️⃣ 再次验证（zed→base 的距离）
+    print(f"[验证] Base在ZED下的平移: {T_zed_base_vis[:3, 3]}")
+    print(f"[验证] 相机到机械臂基座距离: {np.linalg.norm(T_zed_base_vis[:3, 3]):.3f} 米")
+
 
     import rerun as rr
+    rr.init("ZED/Aruco Frames", spawn=args.spawn)
+    rr.log("world", rr.ViewCoordinates.RDF)  # 与ZED/OpenCV一致
 
-    rr.init("Frame Visualization", spawn=True)
-    try:
-        rr.log("world", rr.ViewCoordinates.RDF)
-    except Exception:
-        pass
+    # 5️⃣ 可视化（传入 parent→child 变换）
+    _log_frame(rr, "zed_base", np.eye(4, dtype=np.float32), args.axis_len)  # world→zed
+    _log_frame(rr, "aruco", T_zed_aruco_vis, args.axis_len)                # zed→aruco
+    _log_frame(rr, "robot_base", T_zed_base_vis.astype(np.float32), args.axis_len)  # zed→base
 
-    _log_frame(rr, "zed", T_zed, args.axis_len)
-    _log_frame(rr, "aruco", T_aruco, args.axis_len)
+    # 6️⃣ 箭头用正确的平移分量（zed→aruco）
+    translation = T_zed_aruco_vis[:3, 3].astype(np.float32)
+    rr.log(
+        "frames/zed_base/aruco_offset",
+        rr.Arrows3D(
+            origins=np.zeros((1, 3), dtype=np.float32),
+            vectors=translation[None, :],
+            colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
+            radii=np.full(1, args.axis_len * 0.03, dtype=np.float32),
+        ),
+    )
 
-
-    traj_path = args.traj
-    if traj_path and traj_path.exists():
-        ids, xyz_abs_zed = _load_traj(traj_path)
-        N = ids.shape[0]
-        hom = np.concatenate(
-            [xyz_abs_zed.astype(np.float32), np.ones((N, 1), dtype=np.float32)],
-            axis=1,
-        )
-        rr.set_time("frame", sequence=int(ids[0]))
-        rr.log("traj_abs/zed/path", rr.LineStrips3D([xyz_abs_zed.astype(np.float32)]))
-        rr.log("traj_abs/zed/points", rr.Points3D(xyz_abs_zed.astype(np.float32)))
-    else:
-        print(f"[WARN] Trajectory file not found: {traj_path}")
-
+    print("[SUCCESS] 变换方向已修正，请检查机械臂基座位置是否与实际一致")
 
 if __name__ == "__main__":
     main()

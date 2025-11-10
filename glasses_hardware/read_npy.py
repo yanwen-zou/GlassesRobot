@@ -133,19 +133,7 @@ def main() -> None:
         action="store_true",
         help="Print full array contents (may be large).",
     )
-    parser.add_argument(
-        "--rotate-y90",
-        action="store_true",
-        help="For 4x4 transform matrices, append an extra +90° rotation about Y (post-multiply).",
-    )
-    parser.add_argument(
-        "--save-rotated",
-        metavar="PATH",
-        help=(
-            "File path to store the rotated transform. If omitted but --rotate-y90 is set, "
-            "a sibling file with suffix '_ry90.npy' will be created."
-        ),
-    )
+
     parser.add_argument(
         "--plot",
         action="store_true",
