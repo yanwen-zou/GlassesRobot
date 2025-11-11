@@ -39,6 +39,7 @@ src/egodata_eval/eval_output/
 *.ipynb_checkpoints/
 .TimeRecord
 
+
 # Model checkpoints and weights
 *.ckpt
 *.ckpt.*

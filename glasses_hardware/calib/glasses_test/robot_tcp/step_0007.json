@@ -1,0 +1,35 @@
+{
+  "stamp": 1762868236.0465665,
+  "position_m": [
+    0.056931999999999996,
+    0.0,
+    0.260069
+  ],
+  "orientation_xyzw": [
+    0.0,
+    0.6754679531178884,
+    0.0,
+    0.7373893437735116
+  ],
+  "raw_end_pose_counts": {
+    "X_axis": 56932,
+    "Y_axis": 0,
+    "Z_axis": 260069,
+    "RX_axis": 0,
+    "RY_axis": 84981,
+    "RZ_axis": 0
+  },
+  "measurement_stamp": 1762868238.0624716,
+  "stamp_head_aligned": 1762868236.0465665,
+  "capture_latency_s": 2.0159051418304443,
+  "target_index": 1,
+  "end_pose_target": [
+    57.0,
+    0.0,
+    260.0,
+    0.0,
+    85.0,
+    0.0,
+    0.0
+  ]
+}

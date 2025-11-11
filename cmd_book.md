@@ -44,3 +44,6 @@ cd glasses_hardware/piper_sdk/piper_sdk
 bash can_activate.sh can0 1000000
  # Control
 pythonglasses_hardware/hardware/my_device/piper.py
+
+# -----------Visualize point cloud-----------
+python src/egodata_eval/vis_pointcloud_sequence.py     --data_path data/moving --seq_index 0 --fps 30

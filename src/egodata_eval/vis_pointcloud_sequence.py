@@ -11,7 +11,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -77,7 +77,8 @@ def visualize_sequence(frame_clouds: Sequence[Tuple[str, np.ndarray]],
                        seq_id: str,
                        fps: float,
                        point_radius: float,
-                       spawn_viewer: bool) -> None:
+                       spawn_viewer: bool,
+                       camera_poses: Sequence[Tuple[str, np.ndarray]] | None = None) -> None:
     if not frame_clouds:
         raise ValueError("cloud_sequence is empty; nothing to visualize.")
 
@@ -89,6 +90,11 @@ def visualize_sequence(frame_clouds: Sequence[Tuple[str, np.ndarray]],
         pass
 
     dt = 1.0 / fps if fps > 1e-6 else 0.0
+    entity_path = f"sample/{seq_id}/cloud"
+    cam_entity = f"sample/{seq_id}/camera_pose"
+    cam_path_entity = f"sample/{seq_id}/camera_path"
+    cam_pose_map = {fid: pose for fid, pose in camera_poses} if camera_poses else {}
+    cam_points: list[np.ndarray] = []
     for idx, (frame_id, cloud) in enumerate(frame_clouds):
         if cloud.size == 0:
             continue
@@ -99,14 +105,40 @@ def visualize_sequence(frame_clouds: Sequence[Tuple[str, np.ndarray]],
         except ValueError:
             time_idx = idx
         rr.set_time("frame", sequence=time_idx)
-        rr.log(
-            f"sample/{seq_id}/frame_{frame_id}",
-            rr.Points3D(
-                positions=positions,
-                colors=colors,
-                radii=point_radius,
-            ),
-        )
+        rr.log(entity_path, rr.Clear(recursive=False))
+        rr.log(entity_path,
+               rr.Points3D(
+                   positions=positions,
+                   colors=colors,
+                   radii=point_radius,
+               ))
+        pose = cam_pose_map.get(frame_id)
+        if pose is not None:
+            rr.log(cam_entity, rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3]))
+            rr.log(
+                f"{cam_entity}/axes",
+                rr.Arrows3D(
+                    origins=np.zeros((3, 3), dtype=np.float32),
+                    vectors=np.eye(3, dtype=np.float32) * 0.05,
+                    colors=np.array(
+                        [
+                            [255, 0, 0, 255],
+                            [0, 255, 0, 255],
+                            [0, 0, 255, 255],
+                        ],
+                        dtype=np.uint8,
+                    ),
+                ),
+            )
+            cam_points.append(pose[:3, 3].astype(np.float32))
+            rr.log(
+                cam_path_entity,
+                rr.LineStrips3D(
+                    [np.asarray(cam_points, dtype=np.float32)],
+                    radii=point_radius,
+                    colors=np.array([[255, 200, 0, 255]], dtype=np.uint8),
+                ),
+            )
         if dt > 0:
             time.sleep(dt)
 
@@ -155,12 +187,58 @@ def gather_sequence_frames(dataset: RealWorldDataset,
     return frames, meta
 
 
+def transform_clouds_to_first_frame(dataset: RealWorldDataset,
+                                    seq_id: str,
+                                    frame_clouds: Sequence[Tuple[str, np.ndarray]]) -> List[Tuple[str, np.ndarray]]:
+    if not frame_clouds:
+        return []
+    ref_frame_id = dataset.seq_ref_frame.get(seq_id)
+    if ref_frame_id is None:
+        raise KeyError(f"Reference frame id missing for sequence {seq_id}")
+    ref_extr = dataset.get_camera_extrinsic(seq_id, int(ref_frame_id), warn_prefix="vis_pointcloud(ref)")
+    ref_extr_inv = np.linalg.inv(ref_extr).astype(np.float32)
+
+    transformed: List[Tuple[str, np.ndarray]] = []
+    for frame_id, cloud in frame_clouds:
+        points = cloud[:, :3].astype(np.float32)
+        if points.size == 0:
+            transformed.append((frame_id, cloud))
+            continue
+        cam_extr = dataset.get_camera_extrinsic(seq_id, int(frame_id), warn_prefix="vis_pointcloud")
+        T = ref_extr_inv @ cam_extr
+        print(f'[DEBUG] Transforming frame {frame_id} to ref frame {ref_frame_id} coord sys,T=\n{T}')
+        ones = np.ones((points.shape[0], 1), dtype=np.float32)
+        homo = np.concatenate([points, ones], axis=1)
+        points_ref = (T @ homo.T).T[:, :3]
+        cloud_ref = cloud.copy()
+        cloud_ref[:, :3] = points_ref
+        transformed.append((frame_id, cloud_ref))
+    return transformed
+
+
+def get_camera_pose_mats(dataset: RealWorldDataset,
+                         seq_id: str,
+                         frame_ids: Sequence[str],
+                         align_to_ref: bool) -> List[Tuple[str, np.ndarray]]:
+    poses: List[Tuple[str, np.ndarray]] = []
+    ref_frame_id = dataset.seq_ref_frame.get(seq_id)
+    ref_inv = None
+    if align_to_ref:
+        if ref_frame_id is None:
+            raise KeyError(f"Reference frame id missing for sequence {seq_id}")
+        ref_extr = dataset.get_camera_extrinsic(seq_id, int(ref_frame_id), warn_prefix="vis_pointcloud(cam_ref)")
+        ref_inv = np.linalg.inv(ref_extr)
+    for fid in frame_ids:
+        cam_extr = dataset.get_camera_extrinsic(seq_id, int(fid), warn_prefix="vis_pointcloud(cam)")
+        pose = ref_inv @ cam_extr if ref_inv is not None else cam_extr
+        poses.append((fid, pose.astype(np.float32)))
+    return poses
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize dataset point clouds per frame using Rerun.")
     parser.add_argument("--data_path", type=str, default="data/moving", help="Dataset root path.")
     parser.add_argument("--split", type=str, default="train", choices=["train", "eval", "all"], help="Dataset split.")
-    parser.add_argument("--mode", type=str, default="sample", choices=["sample", "sequence"],
-                        help="'sample' visualizes a single dataset item, 'sequence' streams all frames from a demo.")
     parser.add_argument("--sample_index", type=int, default=0,
                         help="Dataset sample index (used when --mode sample).")
     parser.add_argument("--seq_id", type=str, default=None,
@@ -174,6 +252,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=5.0, help="Playback speed for stepping through frames.")
     parser.add_argument("--point_radius", type=float, default=0.002, help="Point radius (meters) for Rerun markers.")
     parser.add_argument("--no_spawn", action="store_true", help="Do not spawn a separate Rerun viewer window.")
+    parser.add_argument("--no_align_ref", action="store_true",
+                        help="Disable transforming each frame into the first-frame coordinate system.")
     return parser.parse_args()
 
 
@@ -190,28 +270,22 @@ def main():
         aug=False,
         aug_jitter=False,
     )
-    if args.mode == "sample":
-        batch, meta = load_data_point(dataset, args.sample_index, args.num_workers)
-        clouds_batch = batch.get("clouds_list")
-        if not clouds_batch:
-            raise RuntimeError("Dataset was expected to return 'clouds_list'. Ensure with_cloud=True.")
-        cloud_sequence = clouds_batch[0]
-        frame_ids = meta["obs_frame_ids"]
-        if len(cloud_sequence) != len(frame_ids):
-            raise RuntimeError(f"Mismatched lengths: {len(cloud_sequence)} clouds vs {len(frame_ids)} frame ids.")
-        frame_clouds = list(zip(frame_ids, cloud_sequence))
-        print(f"[INFO] Visualizing seq={meta['seq_id']} sample_index={args.sample_index} from {meta['data_path']}")
+
+    if args.seq_id is not None:
+        seq_id = args.seq_id
     else:
-        if args.seq_id is not None:
-            seq_id = args.seq_id
-        else:
-            if args.seq_index < 0 or args.seq_index >= len(dataset.all_demos):
-                raise IndexError(f"seq_index {args.seq_index} out of range (dataset has {len(dataset.all_demos)} demos)")
-            seq_id = dataset.all_demos[args.seq_index]
-        frame_clouds, meta = gather_sequence_frames(dataset, seq_id, args.num_workers)
-        if not frame_clouds:
-            raise RuntimeError(f"No frames collected for sequence {seq_id}.")
-        print(f"[INFO] Visualizing entire seq={seq_id} ({meta['total_frames']} unique frames) from {meta['data_path']}")
+        if args.seq_index < 0 or args.seq_index >= len(dataset.all_demos):
+            raise IndexError(f"seq_index {args.seq_index} out of range (dataset has {len(dataset.all_demos)} demos)")
+        seq_id = dataset.all_demos[args.seq_index]
+    frame_clouds, meta = gather_sequence_frames(dataset, seq_id, args.num_workers)
+    if not frame_clouds:
+        raise RuntimeError(f"No frames collected for sequence {seq_id}.")
+    frame_ids_ordered = [fid for fid, _ in frame_clouds]
+    align_to_ref = not args.no_align_ref
+    if align_to_ref:
+        frame_clouds = transform_clouds_to_first_frame(dataset, meta["seq_id"], frame_clouds)
+    camera_poses = get_camera_pose_mats(dataset, meta["seq_id"], frame_ids_ordered, align_to_ref=align_to_ref)
+    print(f"[INFO] Visualizing entire seq={seq_id} ({meta['total_frames']} unique frames) from {meta['data_path']}")
 
     visualize_sequence(
         frame_clouds=frame_clouds,
@@ -219,6 +293,7 @@ def main():
         fps=args.fps,
         point_radius=args.point_radius,
         spawn_viewer=not args.no_spawn,
+        camera_poses=camera_poses,
     )
 
 
