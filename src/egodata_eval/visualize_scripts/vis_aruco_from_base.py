@@ -77,22 +77,10 @@ def main():
     parser.add_argument("--spawn", action="store_true", help="Spawn a standalone Rerun viewer window")
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length in meters")
     parser.add_argument(
-        "--T_world_tcp",
+        "--T_base_aruco",
         type=Path,
-        default=Path("glasses_hardware/calib/T_world_tcp.npy"),
-        help="4x4 SE3 from world/base to TCP (recorded pose)",
-    )
-    parser.add_argument(
-        "--T_tcp_cam",
-        type=Path,
-        default=Path("glasses_hardware/calib/eih_camT.npy"),
-        help="4x4 SE3 from TCP to camera (eih_camT)",
-    )
-    parser.add_argument(
-        "--T_cam_aruco",
-        type=Path,
-        default=Path("glasses_hardware/calib/T_cam_aruco_51.npy"),
-        help="4x4 SE3 from camera to ArUco (e.g., T_cam_aruco_51.npy)",
+        default=Path("glasses_hardware/calib/T_base_aruco.npy"),
+        help="4x4 SE3 from base/world to ArUco (saved without offset)",
     )
     parser.add_argument(
         "--T_zed_aruco",

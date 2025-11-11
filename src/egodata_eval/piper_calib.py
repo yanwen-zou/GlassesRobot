@@ -84,7 +84,7 @@ class ArucoCalibrator:
         _add_project_root_to_path()
         from glasses_hardware.hardware.my_device.zed import ZEDCamera
         self.marker_length_m = float(marker_length_m)
-        K_loaded = K if K is not None else load_zed_intrinsics()
+        K_loaded = load_zed_intrinsics()
         # Stored intrinsics are from a 0.5 downscaled image; rescale by 2x to match the ZED feed we detect on.
         self.K = K_loaded.astype(np.float32).copy()
         self.K[:2, :] *= 2.0

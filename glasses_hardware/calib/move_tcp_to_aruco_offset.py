@@ -88,11 +88,13 @@ def main():
     print("[INFO] Relative T_tcp_target:\n", T_tcp_target)
     print("[INFO] Target T_world_target:\n", T_world_target)
 
-    # Save base<-aruco transform (world/base to aruco) for later replay usage
-    # Here T_world_target equals T_base_aruco when aligning TCP with ArUco at zero offset.
+    # Save base<-aruco transform (world/base to ArUco) WITHOUT offset.
+    # T_base_aruco is computed directly from the current chain: T_world_tcp @ T_tcp_cam @ T_cam_aruco
     # Persist to calib directory as T_base_aruco.npy
+    T_base_aruco = (T_world_tcp @ T_tcp_cam @ T_cam_aruco).astype(np.float32)
     out_path = Path("glasses_hardware/calib/T_base_aruco.npy")
-    np.save(str(out_path), T_world_target.astype(np.float32))
+    np.save(str(out_path), T_base_aruco)
+    print("[INFO] Saved T_base_aruco (no offset):\n", T_base_aruco)
     print(f"[OK] Saved T_base_aruco to {out_path}")
 
     print("[INFO] Sending target TCP pose7 [x y z rw rx ry rz]:\n", np.round(target_pose7, 6))

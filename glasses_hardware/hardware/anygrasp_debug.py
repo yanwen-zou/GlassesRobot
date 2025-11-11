@@ -203,7 +203,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--z_min", type=float, default=0.0, help="Minimum Z (meters) for workspace filtering")
     parser.add_argument("--z_max", type=float, default=1.5, help="Maximum Z (meters) for workspace filtering")
     parser.add_argument("--debug", action="store_true", help="Enable AnyGrasp debug visualization")
-    parser.add_argument("--lift_distance", type=float, default=0.15, help="Retract distance (m) after closing gripper")
+    parser.add_argument("--lift_distance", type=float, default=0.2, help="Retract distance (m) after closing gripper")
     parser.add_argument("--grasp_index", type=int, default=0, help="Index of grasp candidate to execute after sorting")
     parser.add_argument(
         "--cam_to_tcp",
@@ -329,14 +329,13 @@ def main() -> None:
     if cloud is None:
         print("Warning: AnyGrasp returned no point cloud geometry; proceeding with locally reconstructed point cloud.")
         if cfgs.debug:
-            try:
-                import open3d as o3d
 
-                cloud = o3d.geometry.PointCloud()
-                cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-                cloud.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-            except ImportError:
-                print("open3d not available; debug visualization disabled.")
+            import open3d as o3d
+
+            cloud = o3d.geometry.PointCloud()
+            cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+            cloud.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+
 
     gg = gg.nms().sort_by_score()
     gg_pick = gg[:20]
@@ -364,13 +363,52 @@ def main() -> None:
     base_T_cam = base_T_tcp @ tcp_T_cam
     base_T_grasp = base_T_cam @ cam_T_grasp
 
+    # Preview current camera image and the grasp candidate (projected axes like AnyGrasp demo)
+    try:
+        img_disp = color_image.copy()
+        # Build grasp frame in camera coordinates
+        Rg = (chosen_grasp.rotation_matrix @ tool_rot_y90).astype(np.float64)
+        tg = chosen_grasp.translation.astype(np.float64)
+        # Define short axis segments (meters) in grasp local frame
+        L = 0.05  # 5 cm for visualization
+        pts_cam = [
+            tg,                      # origin
+            tg + Rg[:, 0] * L,       # +X (red)
+            tg + Rg[:, 1] * L,       # +Y (green)
+            tg + Rg[:, 2] * L,       # +Z (blue, approach)
+        ]
+        def proj(pt):
+            X, Y, Z = float(pt[0]), float(pt[1]), float(pt[2])
+            if Z <= 1e-6:
+                return None
+            u = int(intrinsics[0, 0] * X / Z + intrinsics[0, 2])
+            v = int(intrinsics[1, 1] * Y / Z + intrinsics[1, 2])
+            return (u, v)
+        pix = [proj(p) for p in pts_cam]
+        # Draw axes if valid
+        if all(p is not None for p in pix):
+            o, px, py, pz = pix
+            cv2.line(img_disp, o, px, (0, 0, 255), 2)   # X - red
+            cv2.line(img_disp, o, py, (0, 255, 0), 2)   # Y - green
+            cv2.line(img_disp, o, pz, (255, 0, 0), 2)   # Z - blue
+            cv2.circle(img_disp, o, 3, (255, 255, 255), -1)
+        cv2.putText(img_disp, "Preview grasp candidate: 'y' proceed, 'q' cancel", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (10, 200, 10), 2)
+        cv2.imshow("AnyGrasp Preview", img_disp)
+        key = cv2.waitKey(0) & 0xFF
+        cv2.destroyWindow("AnyGrasp Preview")
+        if key in (ord('q'), 27):
+            print("[Preview] Canceled by user.")
+            return
+    except Exception as e:
+        print(f"[Preview] Failed to show preview: {e}")
+
     pregrasp_pose = base_T_grasp.copy()
     pregrasp_pose[:3, 3] = pregrasp_pose[:3, 3] + np.array([0.0, 0.0, 0.1], dtype=np.float64)
 
     lift_pose = base_T_grasp.copy()
     lift_pose[:3, 3] = lift_pose[:3, 3] + np.array([0, 0, cfgs.lift_distance])
 
-    target_pose = matrix_to_pose(base_T_grasp) - np.array([0, 0, -0.07, 0, 0, 0, 0], dtype=np.float64) # Higher approach by 5 cm
+    target_pose = matrix_to_pose(base_T_grasp) - np.array([0, 0, -0.05, 0, 0, 0, 0], dtype=np.float64) # Higher approach by 5 cm
     pregrasp_tcp = matrix_to_pose(pregrasp_pose)
     lift_tcp = matrix_to_pose(lift_pose)
 

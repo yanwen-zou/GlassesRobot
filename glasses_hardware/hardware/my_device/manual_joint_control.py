@@ -73,7 +73,7 @@ def build_keymap(step: float) -> Dict[int, Tuple[int, float]]:
 
 
 def main() -> None:
-    robot = FlexivRobot()
+    robot = FlexivRobot(home=False)
     serial = CAM_SERIAL[1] if CAM_SERIAL else None
     camera = CameraD400(serial=serial)
 

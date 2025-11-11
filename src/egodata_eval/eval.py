@@ -26,7 +26,7 @@ _import_zed_class   # type: ignore
 
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
 from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
-from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper, execute_relative_traj  # type: ignore
+from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
 
@@ -48,7 +48,6 @@ class TrajectoryPredictor:
         self.voxel_size = voxel_size
         self._cached_points_cam: np.ndarray | None = None
         self.last_traj_denorm: np.ndarray | None = None
-        self.last_traj_delta: np.ndarray | None = None
         self.model = RISE(num_action=num_action,
                           input_dim=6,
                           obs_feature_dim=512,
@@ -150,18 +149,12 @@ class TrajectoryPredictor:
             outputs = self.model(st, actions=None, batch_size=1, current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device))
         if "obj_pred" not in outputs:
             self.last_traj_denorm = None
-            self.last_traj_delta = None
             return image_bgr
         obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
         # In delta mode, model already returns absolute poses relative to current pose; just denormalize translation.
         obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
         self.last_traj_denorm = obj_traj_ref
-        # Also compute delta wrt current pose for robot execution
-        try:
-            self.last_traj_delta = self._absolute_to_delta_np(obj_traj_ref, pose_cam_ob)
-        except Exception as e:
-            print(f"[WARN] delta conversion failed: {e}")
-            self.last_traj_delta = None
+        # Deltas are not used in current execution path; keep only absolute trajectory
 
         # Debug prints to compare current FP pose and first predicted absolute pose
         fp_xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
@@ -197,32 +190,6 @@ def _load_calib_mat_safe(path: Path) -> np.ndarray | None:
     except Exception:
         return None
     return None
-
-
-def _traj_cam_to_base(traj_cam: np.ndarray, T_base_cam: np.ndarray) -> np.ndarray:
-    """Conjugate each relative delta (xyz+rot6d[+grip]) from camera frame to base.
-
-    T_delta_base = T_base_cam @ T_delta_cam @ inv(T_base_cam)
-    """
-    if traj_cam is None or traj_cam.size == 0:
-        return traj_cam
-    out = []
-    Tbc_inv = np.linalg.inv(T_base_cam)
-    for i in range(traj_cam.shape[0]):
-        step = traj_cam[i]
-        xyz = step[:3].astype(np.float32)
-        r6 = step[3:9].astype(np.float32)
-        grip = step[9:10] if step.shape[0] > 9 else None
-        T_cam = _build_pose_mats(xyz[None, :], r6[None, :])[0]
-        T_base = T_base_cam @ T_cam @ Tbc_inv
-        xyzr6 = mat_to_xyz_rot(T_base.astype(np.float32), rotation_rep="rotation_6d").astype(np.float32)
-        if grip is not None:
-            out.append(np.concatenate([xyzr6[:3], xyzr6[3:9], grip.astype(np.float32)], axis=0))
-        else:
-            out.append(np.concatenate([xyzr6[:3], xyzr6[3:9]], axis=0))
-    return np.stack(out, axis=0).astype(np.float32)
-
-
 
 
 def run():
@@ -268,7 +235,7 @@ def run():
     robot = FlexivRobot(home=False)
     gripper = FlexivGripper(robot,home=False)
 
-    disp_w, disp_h = 640, 360 #hardcoded display size
+    disp_w, disp_h = 640, 360 # target working/display size
     win = "ZED Stream (click to segment)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     # Video writer (writes displayed frames)
@@ -317,14 +284,22 @@ def run():
                 continue
             frame, frame_right = stereo
 
-            # Prepare an RGB copy if needed downstream
+            # Immediately downscale stereo to 640x360 for both display and model input
+            h0, w0 = frame.shape[:2]
+            if (w0, h0) != (disp_w, disp_h):
+                frame = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+                frame_right = cv2.resize(frame_right, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+            # Use pre-downscaled intrinsics directly (K already matches 640x360)
+            K_rs = depth_est.K.astype(np.float32)
+
+            # Prepare an RGB copy if needed downstream (already resized)
             image_bgr = frame
             image_rgb = image_bgr[..., ::-1].copy()
-            
-            last_frame_full = image_rgb
-            last_size = (frame.shape[1], frame.shape[0])
 
-            disp = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+            last_frame_full = image_rgb
+            last_size = (frame.shape[1], frame.shape[0])  # (640,360)
+
+            disp = frame  # already 640x360
 
             if click_state["pending"]:
                 click_state["pending"] = False
@@ -350,6 +325,7 @@ def run():
                 # Run depth only every `update_interval` frames; reuse cached otherwise
                 if frame_idx % update_interval == 0:
                     with torch.no_grad():
+                        # Depth on resized stereo
                         last_depth_m = depth_est.depth(frame, frame_right)
                 depth_m = last_depth_m
                 # Initialize FoundationPose once we have a mask and depth
@@ -358,7 +334,7 @@ def run():
                     mesh_path = Path(__file__).resolve().parents[2] / "data" / "book" / "mesh.obj"
                     if pose_est is None:
                         pose_est = PoseEstimatorFP(mesh_path)
-                    pose = pose_est.initialize(frame, depth_m, last_mask, depth_est.K.astype(np.float32))
+                    pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
                     pose_ready = pose is not None
                     print(f'pose_ready: {pose_ready}')
                     # except Exception as e:
@@ -369,35 +345,73 @@ def run():
                 if pose_ready and pose_est is not None:
                     # Use the same `update_interval` for pose tracking
                     if (frame_idx % update_interval == 0) and (depth_m is not None):
-                        pose_est.track(frame, depth_m, depth_est.K.astype(np.float32))
-                    frame = pose_est.draw_overlay(frame, depth_est.K.astype(np.float32))
+                        pose_est.track(frame, depth_m, K_rs)
+                    frame = pose_est.draw_overlay(frame, K_rs)
 
-                    # Overlay trajectory prediction; then execute first 5 steps on robot
+                    # Overlay trajectory prediction; then execute a few steps on robot
                     if traj_pred is not None and depth_m is not None and pose_est.pose_cam_ob is not None:
                         if (frame_idx % update_interval == 0):
                             print("[INFO] Running trajectory prediction...")
                             frame = traj_pred.predict_and_overlay(
-                                frame, depth_m, depth_est.K.astype(np.float32),
+                                frame, depth_m, K_rs,
                                 pose_est.pose_cam_ob.astype(np.float32)
                             )
 
-                            if traj_pred.last_traj_delta is not None:
+                            # Execute first N steps relative to current TCP using robot_replay logic
+                            if traj_pred.last_traj_denorm is not None:
                                 if T_base_cam is None:
                                     print("[WARN] T_base_cam unavailable; skipping execution.")
                                 else:
-                                    # Conjugate traj deltas from cam to base and execute
-                                    traj_base = _traj_cam_to_base(traj_pred.last_traj_delta, T_base_cam)
-                                    print(f"traj_cam first step: {traj_pred.last_traj_delta[0]}")
-                                    print(f"traj_base first step: {traj_base[0]}")
-                                    execute_relative_traj(
-                                        robot, gripper, traj_base,
-                                        steps=1, gripper_open_thresh=0.8, step_sleep=0.05
-                                    )
+                                    try:
+                                        steps_to_execute = 5  # how many relative steps to send each update
+                                        # Absolute predicted points in camera (ZED) frame
+                                        xyz_abs_cam = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
+                                        # Gripper signal per step if available (10th channel)
+                                        grip_seq = None
+                                        if traj_pred.last_traj_denorm.shape[1] > 9:
+                                            grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
+                                        if xyz_abs_cam.shape[0] >= 2:
+                                            # Base<-cam rotation
+                                            R_base_cam = T_base_cam[:3, :3].astype(np.float32)
+                                            p0_cam = xyz_abs_cam[0]
+                                            # Relative-to-first in base frame
+                                            base_rel_pts = (R_base_cam @ (xyz_abs_cam - p0_cam).T).T  # (N,3)
+                                            # Take the first `steps_to_execute` non-zero steps starting from index 1
+                                            steps_pts = base_rel_pts[1:1+int(steps_to_execute), :]
+                                            steps_grip = None
+                                            if grip_seq is not None:
+                                                steps_grip = grip_seq[1:1+int(steps_to_execute)]
+                                            if steps_pts.size > 0:
+                                                # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
+                                                curr_pose7 = robot.get_tcp_pose().astype(np.float32)
+                                                start_xyz = curr_pose7[:3].astype(np.float32)
+                                                start_quat = curr_pose7[3:7].astype(np.float32)
+                                                open_width = getattr(gripper, 'max_width', 0.085)
+                                                open_thresh = 0.8
+                                                for i in range(steps_pts.shape[0]):
+                                                    xyz = start_xyz + steps_pts[i]
+                                                    pose7 = np.concatenate([xyz, start_quat], axis=0).astype(np.float32)
+                                                    # Gripper control if grip available
+                                                    if steps_grip is not None and i < len(steps_grip):
+                                                        grip_val = float(steps_grip[i])
+                                                        width_cmd = open_width if grip_val > open_thresh else 0.0
+                                                        print(f"[EVAL] step {i+1}/{steps_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
+                                                        try:
+                                                            gripper.move(width_cmd)
+                                                        except Exception:
+                                                            pass
+                                                    print(f"[EVAL] send step {i+1}/{steps_pts.shape[0]} pose7=", np.round(pose7, 6))
+                                                    robot.send_tcp_pose(pose7)
+                                                    time.sleep(0.05)
+                                        else:
+                                            print("[INFO] Predicted traj has <2 points; skip execution.")
+                                    except Exception as e:
+                                        print(f"[WARN] Execution error: {e}")
 
 
                         else:
                             # Persist last predicted trajectory between updates
-                            frame = traj_pred.overlay_cached(frame, depth_est.K.astype(np.float32))
+                            frame = traj_pred.overlay_cached(frame, K_rs)
 
                 # Visualize depth
                 # depth_vis = colorize_depth(depth_m, max_depth=5.0)

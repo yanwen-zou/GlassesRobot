@@ -13,16 +13,6 @@ from pathlib import Path
 
 import numpy as np
 
-X_ROT_180= np.array(
-    [
-        [1.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, -1.0],
-    ],
-    dtype=np.float32,
-)
-X_ROT_180_H = np.eye(4, dtype=np.float32)
-X_ROT_180_H[:3, :3] = X_ROT_180
 
 def _load_transform(path: Path) -> np.ndarray:
     T = np.load(path)
@@ -74,7 +64,7 @@ def main():
 
     # 1️⃣ 加载变换（都是 child→parent 形式）
     T_zed_aruco = _load_transform(args.T_zed_aruco) # aruco → zed
-    T_base_aruco = _load_transform(args.T_base_aruco) @ X_ROT_180_H  # aruco → base
+    T_base_aruco = _load_transform(args.T_base_aruco) # aruco → base
     
     # 2️⃣ 打印验证（物理距离必须与实际场景匹配！）
     print(f"\n[验证] ArUco在ZED下的平移: {T_zed_aruco[:3, 3]}")
