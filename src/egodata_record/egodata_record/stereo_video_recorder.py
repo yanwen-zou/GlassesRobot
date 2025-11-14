@@ -77,6 +77,7 @@ class StereoVideoRecorder(Node):
         self.waiting_for_head_pose = False
         self.calibrated_transform: np.ndarray | None = None
         self.calibrated_head_pose: np.ndarray | None = None
+        self._calibration_log_emitted = False
 
         self.runtime_params = sl.RuntimeParameters()
         self.left_image = sl.Mat()
@@ -194,6 +195,8 @@ class StereoVideoRecorder(Node):
         self.frame_index = 0
         self.get_logger().info(f'Start recording session {self.recording_id}.')
         self.recording = True
+        self._calibration_log_emitted = False
+        self._persist_calibration_to_disk()
         self._send_udp('start')
 
     def stop_recording(self):
@@ -318,9 +321,32 @@ class StereoVideoRecorder(Node):
         self.get_logger().info(
             f'Detected ArUco marker {marker_id}; cached transform and head pose in memory.'
         )
+        self._persist_calibration_to_disk()
+        self._log_calibration_save_path()
         if not self._aruco_message_sent:
             self._send_udp('aruco')
             self._aruco_message_sent = True
+
+    def _persist_calibration_to_disk(self) -> None:
+        if self.recording_dir is None:
+            return
+
+        if self.calibrated_transform is not None:
+            transform_path = self.recording_dir / 'calibrated_transform.txt'
+            np.savetxt(transform_path, self.calibrated_transform, fmt='%.6f')
+
+        if self.calibrated_head_pose is not None:
+            pose_path = self.recording_dir / 'calibrated_head_pose.txt'
+            pose_line = ' '.join(f'{value:.6f}' for value in self.calibrated_head_pose)
+            pose_path.write_text(pose_line + '\n')
+
+    def _log_calibration_save_path(self) -> None:
+        if self._calibration_log_emitted:
+            return
+        if self.recording_dir is None:
+            return
+        self.get_logger().info(f'Persisted calibration outputs under {self.recording_dir}.')
+        self._calibration_log_emitted = True
 
     def destroy_node(self):
         if self.recording:

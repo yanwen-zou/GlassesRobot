@@ -2,8 +2,8 @@ from pathlib import Path
 
 ROOT = Path("data")   # 换成你的 data 也可以
 TARGET_DIRS = ["head_pos", "zed_left", "zed_right"]
-CUT_FRONT = 40
-CUT_BACK = 20
+CUT_FRONT = 50
+CUT_BACK = 40
 
 for timestamp_dir in ROOT.iterdir():
     if not timestamp_dir.is_dir():
