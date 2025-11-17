@@ -278,24 +278,62 @@ if [ "${#READY_EPISODES[@]}" -eq 0 ]; then
   exit 1
 fi
 
-SAM_TEMP_ROOT=$(mktemp -d)
-cleanup_sam() {
-  rm -rf "$SAM_TEMP_ROOT"
-}
-trap cleanup_sam EXIT
-
+declare -a SAM_EPISODES=()
 for episode in "${READY_EPISODES[@]}"; do
-  ln -s "${DATA_ROOT}/${episode}" "${SAM_TEMP_ROOT}/${episode}"
+  episode_dir="${DATA_ROOT}/${episode}"
+  masks_dir="${episode_dir}/masks"
+  if [ -d "$masks_dir" ] && find "$masks_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Masks already exist for $episode; skipping SAM segmentation."
+    continue
+  fi
+  SAM_EPISODES+=("$episode")
 done
 
-echo "=============================="
-echo "🪄 Launching SAM for selected episodes..."
-conda run --no-capture-output -n foundation_stereo python -u \
-  "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
-  --data_root "$SAM_TEMP_ROOT"
+if [ "${#SAM_EPISODES[@]}" -gt 0 ]; then
+  SAM_TEMP_ROOT=$(mktemp -d)
+  cleanup_sam() {
+    rm -rf "$SAM_TEMP_ROOT"
+  }
+  trap cleanup_sam EXIT
 
-cleanup_sam
-trap - EXIT
+  for episode in "${SAM_EPISODES[@]}"; do
+    ln -s "${DATA_ROOT}/${episode}" "${SAM_TEMP_ROOT}/${episode}"
+  done
+
+  echo "=============================="
+  echo "🪄 Launching SAM for selected episodes..."
+  conda run --no-capture-output -n foundation_stereo python -u \
+    "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
+    --data_root "$SAM_TEMP_ROOT"
+
+  cleanup_sam
+  trap - EXIT
+else
+  echo "⏭️  All episodes already have SAM masks; skipping SAM segmentation."
+fi
+
+echo "=============================="
+echo "🖐️  Generating hand masks with Grounded-SAM 2..."
+for episode in "${READY_EPISODES[@]}"; do
+  episode_dir="${DATA_ROOT}/${episode}"
+  jpg_dir="${episode_dir}/jpg"
+  output_dir="${episode_dir}/mask_hand"
+
+  if [ ! -d "$jpg_dir" ] || ! find "$jpg_dir" -maxdepth 1 -name '*.jpg' -print -quit >/dev/null; then
+    echo "⚠️  JPG frames missing for ${episode}; skipping hand mask export." >&2
+    continue
+  fi
+
+  if [ -d "$output_dir" ] && find "$output_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Hand masks already exist for $episode; skipping Grounded-SAM2 export."
+    continue
+  fi
+
+  conda run --no-capture-output -n foundation_stereo python -u \
+    "${FOUNDATION_STEREO_DIR}/Grounded-SAM-2/grounded_sam2_mask_export.py" \
+    --video_dir "$jpg_dir" \
+    --output_dir "$output_dir"
+done
 
 for episode in "${READY_EPISODES[@]}"; do
   echo "=============================="
@@ -327,6 +365,12 @@ for episode in "${READY_EPISODES[@]}"; do
 
   if [ ! -d "$depth_dir" ] || ! find "$depth_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
     echo "⚠️  Depth maps missing for $episode, skipping FoundationPose." >&2
+    continue
+  fi
+
+  vis_video_path="${episode_dir}/foundationpose_vis.mp4"
+  if [ -f "$vis_video_path" ]; then
+    echo "⏭️  FoundationPose output already exists for $episode (foundationpose_vis.mp4). Skipping."
     continue
   fi
 

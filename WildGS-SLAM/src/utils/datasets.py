@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
 from thirdparty.gaussian_splatting.utils.graphics_utils import focal2fov
 
@@ -472,6 +473,66 @@ class RGB_NoPose(BaseDataset):
         self.color_paths = self.color_paths[:max_frames][::stride]
         self.n_img = len(self.color_paths)
 
+
+class GlassDataset(BaseDataset):
+    """
+    Dataset for custom RGB-D sequences with per-frame poses stored in head_pos/*.txt.
+    """
+
+    def __init__(self, cfg, device='cuda:0'):
+        super(GlassDataset, self).__init__(cfg, device)
+        stride = cfg['stride']
+        max_frames = cfg['max_frames']
+
+        color_paths = sorted(
+            glob.glob(os.path.join(self.input_folder, 'rgb', '*.png')),
+            key=lambda x: int(os.path.splitext(os.path.basename(x))[0])
+        )
+        depth_paths = sorted(
+            glob.glob(os.path.join(self.input_folder, 'depth', '*.png')),
+            key=lambda x: int(os.path.splitext(os.path.basename(x))[0])
+        )
+        poses_all = self._load_head_poses(os.path.join(self.input_folder, 'head_pos'))
+
+        total_frames = min(len(color_paths), len(depth_paths), len(poses_all))
+        if total_frames == 0:
+            raise FileNotFoundError(f"No RGB-D data found under {self.input_folder}")
+
+        if max_frames < 0:
+            max_frames = total_frames
+        max_frames = min(max_frames, total_frames)
+
+        indices = list(range(max_frames))[::stride]
+        self.color_paths = [color_paths[i] for i in indices]
+        self.depth_paths = [depth_paths[i] for i in indices]
+        self.poses = [poses_all[i] for i in indices]
+        self.n_img = len(self.color_paths)
+        if self.n_img == 0:
+            raise FileNotFoundError(f"No frames available under {self.input_folder}")
+
+        # Normalize poses so frame 0 becomes identity (matching other loaders).
+        first_pose_inv = np.linalg.inv(self.poses[0])
+        self.poses = [first_pose_inv @ pose for pose in self.poses]
+
+    def _load_head_poses(self, pose_dir):
+        pose_files = sorted(
+            glob.glob(os.path.join(pose_dir, '*.txt')),
+            key=lambda x: int(os.path.splitext(os.path.basename(x))[0])
+        )
+        poses = []
+        for path in pose_files:
+            values = np.loadtxt(path).reshape(-1)
+            if values.shape[0] < 7:
+                raise ValueError(f"Pose file {path} must contain tx ty tz qx qy qz qw.")
+            t = values[:3]
+            q = values[3:7]
+            rot = Rotation.from_quat(q).as_matrix()
+            mat = np.eye(4)
+            mat[:3, :3] = rot
+            mat[:3, 3] = t
+            poses.append(mat)
+        return poses
+
 dataset_dict = {
     "replica": Replica,
     "scannet": ScanNet,
@@ -479,5 +540,6 @@ dataset_dict = {
     "bonn_dynamic": TUM_RGBD,
     "wild_slam_mocap": TUM_RGBD,
     "7scenes": SevenScenes,
-    "wild_slam_iphone": RGB_NoPose
+    "wild_slam_iphone": RGB_NoPose,
+    "glass": GlassDataset,
 }

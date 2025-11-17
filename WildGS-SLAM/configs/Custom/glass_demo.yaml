@@ -1,13 +1,14 @@
-inherit_from: ./configs/wildgs_slam.yaml
+inherit_from: WildGS-SLAM/configs/wildgs_slam.yaml
 
 scene: slam_glass_demo
 
 dataset: 'glass'
 
 data:
-  input_folder: ./data/20251112_142342
-  output: ./data/20251112_142342
-
+  # input_folder: ./data/20251112_142342
+  # output: ./data/20251112_142342
+  input_folder: ./data/test
+  output: ./data/test
 cam:
   H: 360
   W: 640
@@ -17,6 +18,7 @@ cam:
   fy: 194.3455
   cx: 163.5895
   cy: 91.0140
+  png_depth_scale: 1000 #for depth image in png format
 
 mapping:
   Training:

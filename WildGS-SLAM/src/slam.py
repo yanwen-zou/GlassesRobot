@@ -12,6 +12,10 @@ from src.utils.eval_traj import kf_traj_eval
 from src.utils.datasets import BaseDataset, RGB_NoPose
 from src.mapper import Mapper
 from src.utils.dyn_uncertainty.uncertainty_model import generate_uncertainty_mlp
+from src.utils.mono_priors.img_feature_extractors import (
+    get_feature_extractor,
+    predict_img_features,
+)
 from src.gui import gui_utils, slam_gui
 from thirdparty.gaussian_splatting.scene.gaussian_model import GaussianModel
 
@@ -50,12 +54,15 @@ class SLAM:
         self.all_trigered = torch.zeros((1)).int()
         self.all_trigered.share_memory_()
 
-        if self.cfg["mapping"]["uncertainty_params"]["activate"]:
+        self.require_features = self.cfg["mapping"]["uncertainty_params"]["activate"]
+        if self.require_features:
             n_features = self.cfg["mapping"]["uncertainty_params"]["feature_dim"]
             self.uncer_network = generate_uncertainty_mlp(n_features)
             self.uncer_network.share_memory()
+            self.feature_extractor = get_feature_extractor(cfg)
         else:
             self.uncer_network = None
+            self.feature_extractor = None
 
         self.video = DepthVideo(cfg, self.printer, uncer_network=self.uncer_network)
 
@@ -121,6 +128,9 @@ class SLAM:
                     "Ground-truth stream requires pose information for every frame."
                 )
 
+            if self.require_features:
+                self._ensure_feature(idx=timestamp, image=image)
+
             image_tensor = image.squeeze(0)
             depth_tensor = depth.to(self.device).float()
             w2c = torch.linalg.inv(pose).to(self.device)
@@ -150,6 +160,25 @@ class SLAM:
         )
         self.printer.print("Sequence feeding done.", FontColor.TRACKER)
 
+    def _ensure_feature(self, idx, image):
+        """
+        Compute and save DINO features for the given frame if not already cached.
+        """
+        feat_path = os.path.join(
+            self.save_dir, "mono_priors", "features", f"{int(idx):05d}.npy"
+        )
+        if os.path.exists(feat_path):
+            return
+        image_cuda = image.to(self.device)
+        predict_img_features(
+            self.feature_extractor,
+            int(idx),
+            image_cuda,
+            self.cfg,
+            device=self.device,
+            save_feat=True,
+        )
+
     def mapping(self, pipe, q_main2vis, q_vis2main):
         if self.cfg["mapping"]["uncertainty_params"]["activate"]:
             self.mapper = Mapper(self, pipe, self.uncer_network, q_main2vis, q_vis2main)
@@ -170,19 +199,6 @@ class SLAM:
 
     def terminate(self):
         """Finalize the run, dump assets, and evaluate metrics."""
-        self.video.save_video(f"{self.save_dir}/video.npz")
-        if not isinstance(self.stream, RGB_NoPose):
-            try:
-                kf_traj_eval(
-                    f"{self.save_dir}/video.npz",
-                    f"{self.save_dir}/traj",
-                    "kf_traj",
-                    self.stream,
-                    self.logger,
-                    self.printer,
-                )
-            except Exception as e:
-                self.printer.print(e, FontColor.ERROR)
 
         if self.cfg["mapping"]["final_refine_iters"] > 0:
             self.mapper.final_refine(iters=self.cfg["mapping"]["final_refine_iters"])
@@ -192,6 +208,7 @@ class SLAM:
             iteration="after_refine",
         )
 
+        print("Exporting point clouds...")
         self._export_pointclouds_from_mapper()
 
         self.mapper.gaussians.save_ply(f"{self.save_dir}/final_gs.ply")

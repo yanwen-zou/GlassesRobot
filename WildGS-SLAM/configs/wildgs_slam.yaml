@@ -80,7 +80,7 @@ mapping:
     weight_decay: 0.00001
 
 tracking:
-  pretrained: ./pretrained/droid.pth
+  pretrained: .WildGS-SLAM/pretrained/droid.pth
   buffer: 350     # maximum number of keyframes that can be stored
   beta: 0.75      # beta * Distance(R|t) + (1-beta) * Distance(I|t), refer to droid_kernels.cu:frame_distance_kernel
   warmup: 12       # use the first X keyframes for bootstrapping the tracker
@@ -149,7 +149,7 @@ mono_prior:
   feature_extractor: 'dinov2_reg_small_fine' 
 
 data:
-  output: ./output/wildgs_slam
+  output: WildGS-SLAM/output/wildgs_slam
   input_folder: Please_specify_the_path_to_the_dataset
 
 dataset: 'tumrgbd'

@@ -802,11 +802,18 @@ class Mapper(object):
                         "name": "exposure_b_{}".format(viewpoint.uid),
                     }
                 )
-        self.keyframe_optimizers = torch.optim.Adam(opt_params)
+        # Only optimize exposure parameters for frames after the first one.
+        # If there is only a single frame, skip creating the optimizer.
+        self.keyframe_optimizers = (
+            torch.optim.Adam(opt_params) if opt_params else None
+        )
 
-        self.initialize_map_opt()
-        # Only keep the recent <self.window_size> number of keyframes in the window
-        self.current_window = self.current_window[-self.window_size :]
+        # Skip any optimization when we only have the first frame:
+        # just keep the initial point cloud built from RGB-D + pose.
+        if len(self.current_window) > 1:
+            self.initialize_map_opt()
+            # Only keep the recent <self.window_size> number of keyframes in the window
+            self.current_window = self.current_window[-self.window_size :]
 
         if self.config['gui']:
             self._send_to_gui(cur_video_idx)
@@ -1030,8 +1037,9 @@ class Mapper(object):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(self.iteration_count)
-                self.keyframe_optimizers.step()
-                self.keyframe_optimizers.zero_grad(set_to_none=True)
+                if self.keyframe_optimizers is not None:
+                    self.keyframe_optimizers.step()
+                    self.keyframe_optimizers.zero_grad(set_to_none=True)
                 if self.uncertainty_aware:
                     self.uncer_optimizer.step()
                     self.uncer_optimizer.zero_grad()
@@ -1053,6 +1061,9 @@ class Mapper(object):
     def map_opt_online(self, current_window, iters=1):
         if len(current_window) == 0:
             raise ValueError("No keyframes in the current window")
+        # If we only have one keyframe, skip online optimization (nothing to optimize yet)
+        if len(current_window) < 2:
+            return False
 
         # Online plot before optimization
         cur_idx = current_window[np.array(current_window).argmax()]
@@ -1067,22 +1078,8 @@ class Mapper(object):
                 viewpoint_stack.append(viewpoint)
                 viewpoint_kf_idx_stack.append(kf_idx)
 
-        # We set the current frame to be chosen by prob at least 50%
-        # and the rest frame evenly distribute the remaining prob
-        cur_window_prob = 0.5
-        prob = np.full(
-            len(viewpoint_stack),
-            (1 - cur_window_prob)
-            * iters
-            / (len(viewpoint_stack) - len(current_window)),
-        )
-        assert viewpoint_kf_idx_stack[-1] == cur_idx
-        if len(current_window) <= len(viewpoint_stack) / 2.0:
-            for view_idx in range(len(viewpoint_kf_idx_stack)):
-                kf_idx = viewpoint_kf_idx_stack[view_idx]
-                if kf_idx in current_window:
-                    prob[view_idx] = cur_window_prob * iters / (len(current_window))
-        prob /= prob.sum()
+        # Uniform sampling over all keyframes to avoid biased distribution
+        prob = np.full(len(viewpoint_stack), 1.0 / len(viewpoint_stack))
 
         for cur_iter in range(iters):
             self.iteration_count += 1
@@ -1216,8 +1213,9 @@ class Mapper(object):
                 self.gaussians.optimizer.step()
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(self.iteration_count)
-                self.keyframe_optimizers.step()
-                self.keyframe_optimizers.zero_grad(set_to_none=True)
+                if self.keyframe_optimizers is not None:
+                    self.keyframe_optimizers.step()
+                    self.keyframe_optimizers.zero_grad(set_to_none=True)
                 if self.uncertainty_aware:
                     self.uncer_optimizer.step()
                     self.uncer_optimizer.zero_grad()
@@ -1358,8 +1356,9 @@ class Mapper(object):
                 self.gaussians.optimizer.zero_grad(set_to_none=True)
                 self.gaussians.update_learning_rate(self.iteration_count)
                 # Optimize the exposure compensation
-                self.keyframe_optimizers.step()
-                self.keyframe_optimizers.zero_grad(set_to_none=True)
+                if self.keyframe_optimizers is not None:
+                    self.keyframe_optimizers.step()
+                    self.keyframe_optimizers.zero_grad(set_to_none=True)
                 if self.uncertainty_aware:
                     self.uncer_optimizer.step()
                     self.uncer_optimizer.zero_grad()
