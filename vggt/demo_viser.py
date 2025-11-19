@@ -81,6 +81,9 @@ def viser_wrapper(
     if not use_point_map:
         world_points = unproject_depth_map_to_point_map(depth_map, extrinsics_cam, intrinsics_cam)
         conf = depth_conf
+        valid_depth_mask = depth_map.squeeze(-1) <= 2.0
+        world_points = np.where(valid_depth_mask[..., None], world_points, np.nan)
+        conf = np.where(valid_depth_mask, conf, 0.0)
     else:
         world_points = world_points_map
         conf = conf_map
@@ -95,6 +98,10 @@ def viser_wrapper(
     S, H, W, _ = world_points.shape
 
     # Flatten
+    # valid_depth_mask = depth_map.squeeze(-1) <= 2.0
+    # world_points = np.where(valid_depth_mask[..., None], world_points, np.nan)
+    conf = np.where(valid_depth_mask, conf, 0.0)
+
     points = world_points.reshape(-1, 3)
     colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
     conf_flat = conf.reshape(-1)
@@ -313,7 +320,7 @@ parser.add_argument("--use_point_map", action="store_true", help="Use point map 
 parser.add_argument("--background_mode", action="store_true", help="Run the viser server in background mode")
 parser.add_argument("--port", type=int, default=8080, help="Port number for the viser server")
 parser.add_argument(
-    "--conf_threshold", type=float, default=25.0, help="Initial percentage of low-confidence points to filter out"
+    "--conf_threshold", type=float, default=55.0, help="Initial percentage of low-confidence points to filter out"
 )
 parser.add_argument("--mask_sky", action="store_true", help="Apply sky segmentation to filter out sky points")
 
@@ -353,8 +360,11 @@ def main():
 
     # Use the provided image folder path
     print(f"Loading images from {args.image_folder}...")
-    image_names = glob.glob(os.path.join(args.image_folder, "*"))
+    image_names = sorted(glob.glob(os.path.join(args.image_folder, "*")))
     print(f"Found {len(image_names)} images")
+    if len(image_names) > 30:
+        image_names = image_names[::5]
+        print(f"Too many images; subsampling to {len(image_names)} keyframes with stride 5.")
 
     images = load_and_preprocess_images(image_names).to(device)
     print(f"Preprocessed images shape: {images.shape}")
