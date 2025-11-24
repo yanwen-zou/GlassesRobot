@@ -216,6 +216,22 @@ def main():
     o3d.io.write_point_cloud(str(out_path), pcd)
     print(f"Saved VGGT point cloud with {len(points)} points to {out_path}")
 
+    # Persist per-frame camera data to enable downstream reprojection tasks.
+    depth_map = preds_np["depth"]
+    if depth_map.ndim == 4:  # (S, H, W, 1)
+        depth_map = depth_map[..., 0]
+    depth_map = depth_map * scale_factor
+
+    camera_data = {
+        "extrinsic": preds_np["extrinsic"],
+        "intrinsic": preds_np["intrinsic"],
+        "depth": depth_map,
+        "frame_ids": np.array(frame_ids, dtype=np.int32),
+    }
+    cam_path = output_dir / "camera_data.npz"
+    np.savez(cam_path, **camera_data)
+    print(f"Saved per-frame camera data to {cam_path}")
+
 
 if __name__ == "__main__":
     main()

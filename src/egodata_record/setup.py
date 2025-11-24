@@ -30,6 +30,7 @@ setup(
             'zed_tracker = egodata_record.zed_tracker:main',
             'stereo_video_recorder = egodata_record.stereo_video_recorder:main',
             'pose_visualizer = egodata_record.pose_visualizer:main',
+            'zed_handeye_node = egodata_record.zed_handeye_node:main',
         ],
     },
 )
