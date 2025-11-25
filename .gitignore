@@ -85,3 +85,6 @@ glasses_hardware/anygrasp_debug*
 # ZED stereo raw dumps
 **/zed_left/
 **/zed_right/
+
+.sii/
+.vscode/
