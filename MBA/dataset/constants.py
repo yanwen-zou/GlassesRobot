@@ -1,6 +1,6 @@
 import numpy as np
 
-from utils.constants import *
+from ..utils.constants import *
 
 
 TO_TENSOR_KEYS = [

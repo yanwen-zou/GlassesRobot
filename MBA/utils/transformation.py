@@ -9,7 +9,7 @@ import functools
 import numpy as np
 import pytorch3d.transforms.rotation_conversions as ptc
 
-from utils import rotation_utils as rtu
+from . import rotation_utils as rtu
 
 VALID_ROTATION_REPRESENTATIONS = [
     'axis_angle',

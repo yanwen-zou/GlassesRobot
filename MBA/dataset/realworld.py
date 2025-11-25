@@ -10,8 +10,8 @@ import collections.abc as container_abcs
 from PIL import Image
 from torch.utils.data import Dataset
 
-from dataset.constants import *
-from utils.transformation import xyz_rot_transform
+from .constants import *
+from ..utils.transformation import xyz_rot_transform
 
 class RealWorldDataset(Dataset):
     """
@@ -176,6 +176,18 @@ class RealWorldDataset(Dataset):
             except ValueError:
                 return stem
 
+        AXIS_MIRROR = np.diag([1.0, -1.0, 1.0]).astype(np.float32)
+
+        def _mirror_pose(mat: np.ndarray) -> np.ndarray:
+            R = mat[:3, :3]
+            t = mat[:3, 3]
+            R_new = AXIS_MIRROR @ R @ AXIS_MIRROR
+            t_new = AXIS_MIRROR @ t
+            T_new = np.eye(4, dtype=np.float32)
+            T_new[:3, :3] = R_new
+            T_new[:3, 3] = t_new
+            return T_new
+
         for fname in sorted(files, key=sort_key):
             path = os.path.join(directory, fname)
             values = np.loadtxt(path).astype(np.float32)
@@ -185,10 +197,22 @@ class RealWorldDataset(Dataset):
                 elif values.size == 12:
                     mat = np.vstack([values.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
                 elif values.size == 7:
-                    mat = xyz_rot_transform(
-                        values,
-                        from_rep="quaternion",
-                        to_rep="matrix"
+                    x, y, z, qx, qy, qz, qw = values
+                    mat = np.eye(4, dtype=np.float32)
+                    mat[:3, 3] = np.array([x, y, z], dtype=np.float32)
+                    q = np.array([qx, qy, qz, qw], dtype=np.float32)
+                    norm = np.linalg.norm(q)
+                    if norm < 1e-8:
+                        raise ValueError(f"Quaternion norm too small in {path}")
+                    q /= norm
+                    qx, qy, qz, qw = q
+                    mat[:3, :3] = np.array(
+                        [
+                            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+                        ],
+                        dtype=np.float32,
                     )
                 else:
                     raise ValueError(f"Invalid extrinsic vector length {values.size} in {path}")
@@ -198,6 +222,9 @@ class RealWorldDataset(Dataset):
                 mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
             if mat.shape != (4, 4):
                 raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {path}")
+
+            mat = _mirror_pose(mat)
+
             key = sort_key(fname)
             extr_map[key] = mat.astype(np.float32)
         return extr_map
@@ -282,12 +309,12 @@ class RealWorldDataset(Dataset):
         clouds = []
         for i, frame_id in enumerate(obs_frame_ids):
             points, colors = self.load_point_cloud(colors_list[i], depths_list[i], cam_intrinsic)
-            x_mask = ((points[:, 0] >= WORKSPACE_MIN[0]) & (points[:, 0] <= WORKSPACE_MAX[0]))
-            y_mask = ((points[:, 1] >= WORKSPACE_MIN[1]) & (points[:, 1] <= WORKSPACE_MAX[1]))
-            z_mask = ((points[:, 2] >= WORKSPACE_MIN[2]) & (points[:, 2] <= WORKSPACE_MAX[2]))
-            mask = (x_mask & y_mask & z_mask)
-            points = points[mask]
-            colors = colors[mask]
+            # x_mask = ((points[:, 0] >= WORKSPACE_MIN[0]) & (points[:, 0] <= WORKSPACE_MAX[0]))
+            # y_mask = ((points[:, 1] >= WORKSPACE_MIN[1]) & (points[:, 1] <= WORKSPACE_MAX[1]))
+            # z_mask = ((points[:, 2] >= WORKSPACE_MIN[2]) & (points[:, 2] <= WORKSPACE_MAX[2]))
+            # mask = (x_mask & y_mask & z_mask)
+            # points = points[mask]
+            # colors = colors[mask]
             # apply imagenet normalization
             colors = (colors - IMG_MEAN) / IMG_STD
             cloud = np.concatenate([points, colors], axis = -1)
