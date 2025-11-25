@@ -52,6 +52,7 @@ src/egodata_eval/eval_output/
 src/FoundationStereo/pretrained_models/
 src/FoundationStereo/sam2_root/checkpoints/
 foundationpose/FoundationPose/demo_data/
+install/
 
 # Serialized data artifacts
 *.npz

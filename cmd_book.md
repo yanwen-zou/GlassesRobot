@@ -3,6 +3,12 @@
 # Recording data recording pipeline launching
 ros2 launch egodata_record stereo_record.launch.py 
 
+# Zed&Cam Calibration
+ros2 launch egodata_record zed_handeye.launch.py \
+  intrinsics:=/home/yanwen/research/unity_comm/src/FoundationStereo/assets/K_ZED.txt \
+  intrinsic_scale:=2.0 \
+  output:=/home/yanwen/research/unity_comm/glasses_hardware/calib/T_zed_tcp.npy
+
 # -------------foundation_stereo Env----------
 # SAM2 For Mask -> FoundationStereo For Depth -> FoundationPose for Obj Pose Tracking
 ./cmd_book_pipeline.sh
@@ -47,3 +53,10 @@ pythonglasses_hardware/hardware/my_device/piper.py
 
 # -----------Visualize point cloud-----------
 python src/egodata_eval/vis_pointcloud_sequence.py     --data_path data/moving --seq_index 0 --fps 30
+
+# -----------VGGT Pointcloud Reconstruction-------------
+
+ # IN foundation_stereo ENV
+python vggt/glass_demo.py --episode-dir data/20251112_142342
+
+python src/egodata_eval/visualize_scripts/vis_tsdf.py
