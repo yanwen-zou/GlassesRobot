@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Stream RealWorldDataset point clouds frame-by-frame in Rerun.
+"""Stream point clouds frame-by-frame in Rerun.
 
 Example:
     python src/egodata_eval/vis_pointcloud_sequence.py \
-        --data_path data/moving --sample_index 0 --fps 5
+        --data_path data/moving --seq_id 20251125_210453 --fps 5
+    
+    # Transform point clouds from camera to base coordinates no need of head pose
+    python src/egodata_eval/vis_pointcloud_sequence.py \
+    --data_path /home/akihi/code/GlassesRobot/data \
+    --split train \
+    --seq_id 20251125_210453 \
+    --cam_to_base_npy /home/akihi/code/GlassesRobot/data/train/20251125_210453/cam_to_base.npy
 """
 from __future__ import annotations
 
@@ -14,7 +21,8 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
-import torch
+import open3d as o3d
+from PIL import Image
 
 
 HERE = Path(__file__).resolve()
@@ -22,10 +30,7 @@ PROJECT_ROOT = HERE.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from MBA.dataset.realworld import RealWorldDataset, collate_fn  # type: ignore
-from MBA.utils.constants import IMG_MEAN, IMG_STD  # type: ignore
-
-AXIS_MIRROR = np.diag([1.0, -1.0, 1.0]).astype(np.float32)
+DEPTH_SCALE_DEFAULT = 1000.0  # Depth units -> meters
 
 
 def _import_rerun():
@@ -36,43 +41,201 @@ def _import_rerun():
     return rr
 
 
-def _denormalize_colors(norm_colors: np.ndarray) -> np.ndarray:
-    colors = norm_colors * IMG_STD + IMG_MEAN
-    colors = np.clip(colors, 0.0, 1.0)
-    return (colors * 255).astype(np.uint8)
+def list_sequences(data_path: Path, split: str) -> List[str]:
+    """List all sequence IDs in the data path.
+    
+    Args:
+        data_path: Root data directory
+        split: Dataset split ('train', 'eval', or 'all')
+        
+    Returns:
+        Sorted list of sequence IDs (directory names)
+    """
+    if split == 'all':
+        search_path = data_path
+    else:
+        search_path = data_path / split
+    
+    if not search_path.exists():
+        raise FileNotFoundError(f"Data path {search_path} does not exist.")
+    
+    sequences = sorted([
+        d.name for d in search_path.iterdir()
+        if d.is_dir() and (d / "rgb").exists() and (d / "depth").exists()
+    ])
+    
+    if not sequences:
+        raise RuntimeError(f"No valid sequences found under {search_path}.")
+    
+    return sequences
 
 
-def _build_dataloader(dataset: RealWorldDataset,
-                      num_workers: int = 0) -> torch.utils.data.DataLoader:
-    sampler = torch.utils.data.SequentialSampler(dataset)
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=1,
-        sampler=sampler,
-        collate_fn=collate_fn,
-        num_workers=num_workers,
-        pin_memory=False,
+def list_frames(seq_path: Path) -> List[str]:
+    """List all frame IDs in a sequence.
+    
+    Args:
+        seq_path: Sequence directory path
+        
+    Returns:
+        Sorted list of frame IDs (without extension)
+    """
+    rgb_dir = seq_path / "rgb"
+    depth_dir = seq_path / "depth"
+    
+    # Try rgb directory first
+    if rgb_dir.exists():
+        frame_files = sorted(set([
+            f.stem for f in list(rgb_dir.glob("*.png")) + list(rgb_dir.glob("*.jpg"))
+        ]))
+    elif depth_dir.exists():
+        frame_files = sorted(set([
+            f.stem for f in list(depth_dir.glob("*.png")) + list(depth_dir.glob("*.jpg"))
+        ]))
+    else:
+        raise FileNotFoundError(f"Neither rgb nor depth directory found in {seq_path}")
+    
+    return frame_files
+
+
+def _load_head_pose_from_file(head_pos_dir: Path, frame_id: int) -> np.ndarray | None:
+    """Load head pose from file directly.
+    
+    Args:
+        head_pos_dir: Directory containing head pose files
+        frame_id: Frame ID (integer)
+        
+    Returns:
+        4x4 transformation matrix (world->cam) or None if file not found
+    """
+    pose_file = head_pos_dir / f"{frame_id:06d}.txt"
+    if not pose_file.exists():
+        return None
+    try:
+        values = np.loadtxt(pose_file, dtype=np.float32).reshape(-1)
+        if values.size < 7:
+            return None
+        t = values[:3]
+        q = values[3:7]
+        # Normalize quaternion
+        q_norm = np.linalg.norm(q)
+        if q_norm < 1e-8:
+            return None
+        q = q / q_norm
+        qx, qy, qz, qw = q
+        
+        # Convert quaternion to rotation matrix
+        rot = np.array(
+            [
+                [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+            ],
+            dtype=np.float32,
+        )
+        mat = np.eye(4, dtype=np.float32)
+        mat[:3, :3] = rot
+        mat[:3, 3] = t
+        return mat
+    except Exception:
+        return None
+
+
+def load_camera_intrinsics(seq_path: Path) -> np.ndarray:
+    """Load camera intrinsics from file.
+    
+    Args:
+        seq_path: Sequence directory path
+        
+    Returns:
+        3x3 camera intrinsic matrix
+    """
+    intrinsic_path = seq_path / "cam_K.txt"
+    if not intrinsic_path.exists():
+        intrinsic_path = seq_path / "camera_intrinsics.txt"
+    
+    if not intrinsic_path.exists():
+        raise FileNotFoundError(f"Camera intrinsic file not found in {seq_path}")
+    
+    rows = [list(map(float, line.split())) for line in intrinsic_path.read_text().splitlines() if line.strip()]
+    mat = np.array(rows, dtype=np.float32)
+    if mat.shape != (3, 3):
+        raise ValueError(f"Intrinsic matrix must be 3x3, got {mat.shape}")
+    return mat
+
+
+def load_camera_extrinsics(seq_path: Path) -> Dict[int, np.ndarray]:
+    """Load all camera extrinsics from head_pos directory.
+    
+    Args:
+        seq_path: Sequence directory path
+        
+    Returns:
+        Dictionary mapping frame_id (int) to 4x4 transformation matrix (world->cam)
+    """
+    head_pos_dir = seq_path / "head_pos"
+    if not head_pos_dir.exists():
+        return {}
+    
+    extrinsics: Dict[int, np.ndarray] = {}
+    pose_files = sorted(head_pos_dir.glob("*.txt"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)
+    
+    for pose_file in pose_files:
+        try:
+            frame_id = int(pose_file.stem)
+            pose = _load_head_pose_from_file(head_pos_dir, frame_id)
+            if pose is not None:
+                extrinsics[frame_id] = pose
+        except (ValueError, Exception):
+            continue
+    
+    return extrinsics
+
+
+def load_point_cloud_from_files(
+    rgb_path: Path,
+    depth_path: Path,
+    intrinsic: np.ndarray,
+    depth_scale: float,
+    voxel_size: float,
+) -> np.ndarray:
+    """Load point cloud from RGB and depth images.
+    
+    Args:
+        rgb_path: Path to RGB image
+        depth_path: Path to depth image
+        intrinsic: Camera intrinsic matrix (3x3)
+        depth_scale: Depth scale factor (meters per depth unit)
+        voxel_size: Voxel size for downsampling
+        
+    Returns:
+        Point cloud array [N, 6] where first 3 columns are xyz and last 3 are rgb (0-1 range)
+    """
+    # Load images
+    rgb_img = np.array(Image.open(rgb_path).convert("RGB"), dtype=np.uint8)
+    depth_img = np.array(Image.open(depth_path), dtype=np.float32)
+    
+    h, w = depth_img.shape
+    fx, fy = intrinsic[0, 0], intrinsic[1, 1]
+    cx, cy = intrinsic[0, 2], intrinsic[1, 2]
+    
+    # Create point cloud using open3d
+    colors = o3d.geometry.Image(rgb_img.astype(np.uint8))
+    depths = o3d.geometry.Image(depth_img.astype(np.float32))
+    camera_intrinsics = o3d.camera.PinholeCameraIntrinsic(
+        width=w, height=h, fx=fx, fy=fy, cx=cx, cy=cy
     )
-
-
-def load_data_point(dataset: RealWorldDataset,
-                    sample_index: int,
-                    num_workers: int = 0) -> Tuple[Dict, Dict]:
-    """Load a single sample via DataLoader to honor collate_fn behavior."""
-    if sample_index < 0 or sample_index >= len(dataset):
-        raise IndexError(f"sample_index {sample_index} out of range (dataset has {len(dataset)} samples)")
-
-    dataloader = _build_dataloader(dataset, num_workers)
-    for batch_idx, batch in enumerate(dataloader):
-        if batch_idx == sample_index:
-            meta = {
-                "seq_id": dataset.seq_ids[sample_index],
-                "obs_frame_ids": dataset.obs_frame_ids[sample_index],
-                "action_frame_ids": dataset.action_frame_ids[sample_index],
-                "data_path": dataset.data_paths[sample_index],
-            }
-            return batch, meta
-    raise RuntimeError(f"Failed to load sample_index {sample_index} via DataLoader.")
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        colors, depths, depth_scale, convert_rgb_to_intensity=False
+    )
+    cloud = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, camera_intrinsics)
+    cloud = cloud.voxel_down_sample(voxel_size)
+    
+    points = np.array(cloud.points, dtype=np.float32)
+    colors = np.array(cloud.colors, dtype=np.float32)
+    
+    # Concatenate points and colors (colors are in 0-1 range)
+    cloud_array = np.concatenate([points, colors], axis=1)
+    return cloud_array.astype(np.float32)
 
 
 def _log_coordinate_frame(rr,
@@ -136,20 +299,6 @@ def _pose_from_seven(values: Sequence[float]) -> np.ndarray:
     return T
 
 
-def _mirror_pose_y(T: np.ndarray, ctx: str = "") -> np.ndarray:
-    """Mirror pose along Y-axis (Y-up to Y-down coordinate system conversion)."""
-    R = T[:3, :3]
-    t = T[:3, 3]
-    R_new = AXIS_MIRROR @ R @ AXIS_MIRROR
-    t_new = AXIS_MIRROR @ t
-    T_new = np.eye(4, dtype=np.float32)
-    T_new[:3, :3] = R_new
-    T_new[:3, 3] = t_new
-    if ctx:
-        print(f"[DEBUG] mirror_pose({ctx})=\n{T_new}")
-    return T_new
-
-
 def _load_matrix4x4(path: Path) -> np.ndarray:
     """Load a 4x4 transformation matrix from file, handling various formats."""
     mat = np.loadtxt(path).astype(np.float32)
@@ -186,7 +335,7 @@ def _load_tcp_to_zed_transform(transform_path: Path) -> np.ndarray:
 
 
 def _load_calibrated_head_pose(seq_path: Path) -> np.ndarray:
-    """Load calibrated head pose from calibrated_head_pose.txt and convert to standard camera coordinate system."""
+    """Load calibrated head pose from calibrated_head_pose.txt."""
     head_pose_path = seq_path / "calibrated_head_pose.txt"
     if not head_pose_path.exists():
         raise FileNotFoundError(f"Missing calibrated head pose at {head_pose_path}")
@@ -194,64 +343,11 @@ def _load_calibrated_head_pose(seq_path: Path) -> np.ndarray:
     if head_vals.ndim != 1 or head_vals.size != 7:
         raise ValueError(f"Invalid contents in {head_pose_path}")
     world_T_cam = _pose_from_seven(head_vals)
-    world_T_cam = _mirror_pose_y(world_T_cam, ctx="calib_head_pose")
     return world_T_cam.astype(np.float32)
 
 
-def _load_aruco_transform(seq_path: Path) -> np.ndarray:
-    """Load ArUco transform from calibrated_transform.txt (cam_T_aruco, NOT Y-mirrored)."""
-    aruco_path = seq_path / "calibrated_transform.txt"
-    if not aruco_path.exists():
-        raise FileNotFoundError(f"Missing calibrated transform at {aruco_path}")
-    return _load_matrix4x4(aruco_path)
-
-
-def _load_aruco_poses(seq_path: Path, ref_pose: np.ndarray | None = None) -> Dict[str, np.ndarray]:
-    """Load ArUco poses in different coordinate systems.
-    
-    Returns:
-        Dictionary with keys:
-        - 'world': ArUco pose in world coordinate system
-        - 'calib_head': ArUco pose in calibrated head pose coordinate system
-        - 'first': ArUco pose in first frame coordinate system (if ref_pose provided)
-        - 'camera_at_aruco_first': Camera pose when seeing ArUco, in first frame coordinate system
-    """
-    result: Dict[str, np.ndarray] = {}
-    
-    # Load base data
-    head_pose_path = seq_path / "calibrated_head_pose.txt"
-    if not head_pose_path.exists():
-        return result
-    
-    head_vals = np.loadtxt(head_pose_path).astype(np.float32)
-    if head_vals.ndim != 1 or head_vals.size != 7:
-        return result
-    
-    world_T_cam = _pose_from_seven(head_vals)
-    world_T_cam = _mirror_pose_y(world_T_cam, ctx="aruco_head_pose")
-    
-    # Load ArUco transform (cam_T_aruco, NOT Y-mirrored)
-    cam_T_aruco = _load_aruco_transform(seq_path)
-    
-    # World coordinate system: world_T_aruco = world_T_cam @ cam_T_aruco
-    result['world'] = (world_T_cam @ cam_T_aruco).astype(np.float32)
-    
-    # Calib head coordinate system: In calib_head frame, camera is at identity, so ArUco is directly cam_T_aruco
-    result['calib_head'] = cam_T_aruco.astype(np.float32)
-    
-    # First frame coordinate system (if ref_pose provided)
-    if ref_pose is not None:
-        first_inv = np.linalg.inv(ref_pose.astype(np.float32))
-        first_T_cam = first_inv @ world_T_cam
-        result['camera_at_aruco_first'] = first_T_cam.astype(np.float32)
-        result['first'] = (first_T_cam @ cam_T_aruco).astype(np.float32)
-    
-    return result
-
-
 def transform_clouds_to_coordinate_system(
-    dataset: RealWorldDataset,
-    seq_id: str,
+    extrinsics: Dict[int, np.ndarray],
     frame_clouds: Sequence[Tuple[str, np.ndarray]],
     target_pose: np.ndarray | None = None,
     ref_frame_id: str | None = None,
@@ -260,8 +356,7 @@ def transform_clouds_to_coordinate_system(
     """Transform point clouds to a target coordinate system.
     
     Args:
-        dataset: RealWorldDataset instance
-        seq_id: Sequence ID
+        extrinsics: Dictionary mapping frame_id (int) to 4x4 transformation matrix (world->cam)
         frame_clouds: List of (frame_id, cloud) tuples
         target_pose: Target pose matrix (4x4). If None, uses first frame as reference.
         ref_frame_id: Reference frame ID (used if target_pose is None)
@@ -277,7 +372,12 @@ def transform_clouds_to_coordinate_system(
     if target_pose is not None:
         target_inv = np.linalg.inv(target_pose).astype(np.float32)
     elif ref_frame_id is not None:
-        ref_extr = dataset.get_camera_extrinsic(seq_id, int(ref_frame_id), warn_prefix=f"{warn_prefix}(ref)")
+        ref_frame_id_int = int(ref_frame_id) if isinstance(ref_frame_id, str) else ref_frame_id
+        ref_extr = extrinsics.get(ref_frame_id_int)
+        if ref_extr is None:
+            if warn_prefix:
+                print(f"[{warn_prefix}] Missing camera extrinsic for ref_frame={ref_frame_id}, using identity")
+            ref_extr = np.eye(4, dtype=np.float32)
         target_inv = np.linalg.inv(ref_extr).astype(np.float32)
     else:
         # No transformation
@@ -291,7 +391,13 @@ def transform_clouds_to_coordinate_system(
             transformed.append((frame_id, cloud))
             continue
         
-        cam_extr = dataset.get_camera_extrinsic(seq_id, int(frame_id), warn_prefix=warn_prefix)
+        frame_id_int = int(frame_id) if isinstance(frame_id, str) else frame_id
+        cam_extr = extrinsics.get(frame_id_int)
+        if cam_extr is None:
+            if warn_prefix:
+                print(f"[{warn_prefix}] Missing camera extrinsic for frame={frame_id}, using identity")
+            cam_extr = np.eye(4, dtype=np.float32)
+        
         T = target_inv @ cam_extr
         ones = np.ones((points.shape[0], 1), dtype=np.float32)
         homo = np.concatenate([points, ones], axis=1)
@@ -304,8 +410,7 @@ def transform_clouds_to_coordinate_system(
 
 
 def get_camera_poses(
-    dataset: RealWorldDataset,
-    seq_id: str,
+    extrinsics: Dict[int, np.ndarray],
     frame_ids: Sequence[str],
     target_pose: np.ndarray | None = None,
     ref_frame_id: str | None = None,
@@ -315,8 +420,7 @@ def get_camera_poses(
     """Get camera poses in a target coordinate system.
     
     Args:
-        dataset: RealWorldDataset instance
-        seq_id: Sequence ID
+        extrinsics: Dictionary mapping frame_id (int) to 4x4 transformation matrix (world->cam)
         frame_ids: List of frame IDs
         target_pose: Target pose matrix (4x4). If None, uses first frame as reference.
         ref_frame_id: Reference frame ID (used if target_pose is None)
@@ -332,7 +436,12 @@ def get_camera_poses(
     if target_pose is not None:
         ref_inv = np.linalg.inv(target_pose)
     elif ref_frame_id is not None:
-        ref_extr = dataset.get_camera_extrinsic(seq_id, int(ref_frame_id), warn_prefix=f"{warn_prefix}(cam_ref)")
+        ref_frame_id_int = int(ref_frame_id) if isinstance(ref_frame_id, str) else ref_frame_id
+        ref_extr = extrinsics.get(ref_frame_id_int)
+        if ref_extr is None:
+            if warn_prefix:
+                print(f"[{warn_prefix}] Missing camera extrinsic for ref_frame={ref_frame_id}, using identity")
+            ref_extr = np.eye(4, dtype=np.float32)
         # Apply TCP to ZED transform if provided
         if tcp_to_zed is not None:
             ref_extr = ref_extr @ tcp_to_zed
@@ -340,7 +449,12 @@ def get_camera_poses(
     
     poses: List[Tuple[str, np.ndarray]] = []
     for fid in frame_ids:
-        cam_extr = dataset.get_camera_extrinsic(seq_id, int(fid), warn_prefix=f"{warn_prefix}(cam)")
+        fid_int = int(fid) if isinstance(fid, str) else fid
+        cam_extr = extrinsics.get(fid_int)
+        if cam_extr is None:
+            if warn_prefix:
+                print(f"[{warn_prefix}] Missing camera extrinsic for frame={fid}, using identity")
+            cam_extr = np.eye(4, dtype=np.float32)
         # Apply TCP to ZED transform if provided: world_T_zed = world_T_tcp @ tcp_T_zed
         if tcp_to_zed is not None:
             cam_extr = cam_extr @ tcp_to_zed
@@ -357,7 +471,10 @@ def visualize_sequence(
     spawn_viewer: bool,
     camera_poses: Sequence[Tuple[str, np.ndarray]] | None = None,
     anchor_frames: Sequence[Tuple[str, np.ndarray]] | None = None,
-    aruco_pose: np.ndarray | None = None,
+    ball_centers: Dict[str, Dict[int, np.ndarray]] | None = None,
+    head_pos_dir: Path | None = None,
+    target_pose: np.ndarray | None = None,
+    ref_frame_id: str | None = None,
 ) -> None:
     """Visualize point cloud sequence in Rerun."""
     if not frame_clouds:
@@ -374,8 +491,16 @@ def visualize_sequence(
     entity_path = f"sample/{seq_id}/cloud"
     cam_entity = f"sample/{seq_id}/camera_pose"
     cam_path_entity = f"sample/{seq_id}/camera_path"
+    ball_centers_entity = f"sample/{seq_id}/ball_centers"
     cam_pose_map = {fid: pose for fid, pose in camera_poses} if camera_poses else {}
     cam_points: list[np.ndarray] = []
+    
+    # Ball colors: red, green, blue for ball_id 1, 2, 3
+    ball_colors = {
+        1: np.array([255, 0, 0, 255], dtype=np.uint8),  # Red
+        2: np.array([0, 255, 0, 255], dtype=np.uint8),  # Green
+        3: np.array([0, 0, 255, 255], dtype=np.uint8),  # Blue
+    }
 
     rr.log(f"sample/{seq_id}", rr.Transform3D())
     rr.log(entity_path, rr.Transform3D())
@@ -396,16 +521,11 @@ def visualize_sequence(
             continue
         positions = cloud[:, :3].astype(np.float32)
         
-        # Handle colors: check if they need denormalization
+        # Handle colors: convert from 0-1 range to 0-255
         if cloud.shape[1] >= 6:
             color_data = cloud[:, 3:6]
-            # Check if colors are in normalized range (0-1) or already denormalized
-            if color_data.max() <= 1.0:
-                # Colors are in 0-1 range, convert to 0-255
-                colors = (color_data * 255.0).astype(np.uint8)
-            else:
-                # Colors are already denormalized (RealWorldDataset format)
-                colors = _denormalize_colors(color_data)
+            # Colors are in 0-1 range, convert to 0-255
+            colors = (color_data * 255.0).astype(np.uint8)
         else:
             # No colors, use white
             colors = np.full((positions.shape[0], 3), 255, dtype=np.uint8)
@@ -424,6 +544,10 @@ def visualize_sequence(
                 radii=point_radius,
             ),
         )
+        
+        # Clear ball centers for this frame
+        if ball_centers is not None:
+            rr.log(ball_centers_entity, rr.Clear(recursive=False))
         
         # Log camera pose
         pose = cam_pose_map.get(frame_id)
@@ -453,22 +577,90 @@ def visualize_sequence(
                     colors=np.array([[255, 200, 0, 255]], dtype=np.uint8),
                 ),
             )
-            
-            # Draw line from camera to ArUco if both poses are available
-            if aruco_pose is not None:
-                cam_pos = pose[:3, 3].astype(np.float32)
-                aruco_pos = aruco_pose[:3, 3].astype(np.float32)
-                line_entity = f"sample/{seq_id}/camera_to_aruco"
-                rr.log(
-                    line_entity,
-                    rr.LineStrips3D(
-                        [np.array([cam_pos, aruco_pos], dtype=np.float32)],
-                        radii=point_radius * 2.0,
-                        colors=np.array([[255, 0, 255, 255]], dtype=np.uint8),
-                    ),
-                )
+        
+        # Visualize ball centers for this frame
+        if ball_centers is not None:
+            frame_balls = ball_centers.get(frame_id)
+            if frame_balls is not None and len(frame_balls) > 0:
+                ball_positions = []
+                ball_colors_list = []
+                
+                # Calculate transformation from current frame camera to target coordinate system
+                transform_to_target = None
+                if head_pos_dir is not None:
+                    try:
+                        cam_extr = _load_head_pose_from_file(head_pos_dir, int(frame_id))
+                        if cam_extr is not None:
+                            if target_pose is not None:
+                                target_inv = np.linalg.inv(target_pose).astype(np.float32)
+                                transform_to_target = target_inv @ cam_extr
+                            elif ref_frame_id is not None:
+                                ref_extr = _load_head_pose_from_file(head_pos_dir, int(ref_frame_id))
+                                if ref_extr is not None:
+                                    target_inv = np.linalg.inv(ref_extr).astype(np.float32)
+                                    transform_to_target = target_inv @ cam_extr
+                    except Exception as e:
+                        print(f"[WARN] Failed to get transform for ball centers in frame {frame_id}: {e}")
+                
+                for ball_id in sorted(frame_balls.keys()):
+                    pos = frame_balls[ball_id]  # Position in current frame camera coordinate system
+                    
+                    # Transform to target coordinate system if transform is available
+                    if transform_to_target is not None:
+                        pos_homo = np.array([pos[0], pos[1], pos[2], 1.0], dtype=np.float32)
+                        pos_target = (transform_to_target @ pos_homo)[:3]
+                        ball_positions.append(pos_target)
+                    else:
+                        # No transformation, use as-is
+                        ball_positions.append(pos)
+                    
+                    ball_colors_list.append(ball_colors.get(ball_id, np.array([255, 255, 255, 255], dtype=np.uint8)))
+                
+                if ball_positions:
+                    rr.log(
+                        ball_centers_entity,
+                        rr.Points3D(
+                            positions=np.array(ball_positions, dtype=np.float32),
+                            colors=np.array(ball_colors_list, dtype=np.uint8),
+                            radii=point_radius * 5.0,  # Make ball centers more visible
+                        ),
+                    )
+        
         if dt > 0:
             time.sleep(dt)
+
+
+def load_ball_centers(ball_centers_path: Path) -> Dict[str, Dict[int, np.ndarray]]:
+    """Load ball centers from text file.
+    
+    Args:
+        ball_centers_path: Path to ball_centers.txt file (format: frame_id ball_id x y z)
+        
+    Returns:
+        Dictionary mapping frame_id (as string, with leading zeros) to dict of ball_id -> [x, y, z] position
+    """
+    if not ball_centers_path.exists():
+        raise FileNotFoundError(f"Ball centers file not found: {ball_centers_path}")
+    
+    ball_centers: Dict[str, Dict[int, np.ndarray]] = {}
+    with open(ball_centers_path, "r") as f:
+        lines = f.readlines()
+        # Skip header
+        for line in lines[1:]:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            frame_id_int = int(parts[0])
+            # Convert to string with leading zeros (6 digits) to match dataset format
+            frame_id = f"{frame_id_int:06d}"
+            ball_id = int(parts[1])
+            x, y, z = float(parts[2]), float(parts[3]), float(parts[4])
+            
+            if frame_id not in ball_centers:
+                ball_centers[frame_id] = {}
+            ball_centers[frame_id][ball_id] = np.array([x, y, z], dtype=np.float32)
+    
+    return ball_centers
 
 
 def _frame_sort_key(frame_id: str) -> Tuple[int, int | str]:
@@ -479,79 +671,96 @@ def _frame_sort_key(frame_id: str) -> Tuple[int, int | str]:
         return (1, frame_id)
 
 
-def gather_sequence_frames(
-    dataset: RealWorldDataset,
-    seq_id: str,
-    num_workers: int = 0,
+def gather_sequence_frames_from_files(
+    seq_path: Path,
+    voxel_size: float,
+    depth_scale: float = DEPTH_SCALE_DEFAULT,
 ) -> Tuple[List[Tuple[str, np.ndarray]], Dict]:
-    """Gather all frames for a sequence."""
-    indices = [i for i, sid in enumerate(dataset.seq_ids) if sid == seq_id]
-    if not indices:
-        raise ValueError(f"Sequence id '{seq_id}' not found in dataset.")
-
-    dataloader = _build_dataloader(dataset, num_workers)
-    target_set = set(indices)
+    """Gather all frames for a sequence by loading from files.
+    
+    Args:
+        seq_path: Sequence directory path
+        voxel_size: Voxel size for point cloud downsampling
+        depth_scale: Depth scale factor (meters per depth unit)
+        
+    Returns:
+        Tuple of (frames list, metadata dict)
+    """
+    seq_id = seq_path.name
+    
+    # List all frames
+    frame_ids = list_frames(seq_path)
+    if not frame_ids:
+        raise RuntimeError(f"No frames found in {seq_path}")
+    
+    # Load intrinsics
+    intrinsic = load_camera_intrinsics(seq_path)
+    
+    # Load point clouds for each frame
+    rgb_dir = seq_path / "rgb"
+    depth_dir = seq_path / "depth"
     frames: List[Tuple[str, np.ndarray]] = []
-    seen_frames: set[str] = set()
-    for idx, batch in enumerate(dataloader):
-        if idx not in target_set:
+    
+    for frame_id in frame_ids:
+        # Find RGB and depth files
+        rgb_path = rgb_dir / f"{frame_id}.png"
+        if not rgb_path.exists():
+            rgb_path = rgb_dir / f"{frame_id}.jpg"
+        
+        depth_path = depth_dir / f"{frame_id}.png"
+        if not depth_path.exists():
+            depth_path = depth_dir / f"{frame_id}.jpg"
+        
+        if not rgb_path.exists() or not depth_path.exists():
+            print(f"[WARN] Missing RGB or depth for frame {frame_id}, skipping")
             continue
-        clouds_batch = batch.get("clouds_list")
-        if not clouds_batch:
+        
+        try:
+            cloud = load_point_cloud_from_files(
+                rgb_path, depth_path, intrinsic, depth_scale, voxel_size
+            )
+            frames.append((frame_id, cloud))
+        except Exception as e:
+            print(f"[WARN] Failed to load point cloud for frame {frame_id}: {e}")
             continue
-        frame_ids = dataset.obs_frame_ids[idx]
-        cloud_sequence = clouds_batch[0]
-        for fid, cloud in zip(frame_ids, cloud_sequence):
-            if fid in seen_frames:
-                continue
-            frames.append((fid, cloud))
-            seen_frames.add(fid)
-        target_set.remove(idx)
-        if not target_set:
-            break
-
+    
     frames.sort(key=lambda tup: _frame_sort_key(tup[0]))
     meta = {
         "seq_id": seq_id,
-        "data_path": dataset.data_paths[indices[0]],
+        "data_path": str(seq_path),
         "total_frames": len(frames),
     }
     return frames, meta
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize dataset point clouds per frame using Rerun.")
+    parser = argparse.ArgumentParser(description="Visualize point clouds per frame using Rerun.")
     parser.add_argument("--data_path", type=str, default="data/moving", help="Dataset root path.")
     parser.add_argument("--split", type=str, default="train", choices=["train", "eval", "all"], help="Dataset split.")
-    parser.add_argument("--sample_index", type=int, default=0,
-                        help="Dataset sample index (used when --mode sample).")
     parser.add_argument("--seq_id", type=str, default=None,
-                        help="Sequence folder name to visualize (overrides --seq_index) when --mode sequence.")
+                        help="Sequence folder name to visualize (overrides --seq_index).")
     parser.add_argument("--seq_index", type=int, default=0,
-                        help="Sequence index from dataset listing when --seq_id is not provided.")
-    parser.add_argument("--num_obs", type=int, default=1, help="Number of observation frames per sample.")
-    parser.add_argument("--num_action", type=int, default=20, help="Number of action frames per sample (affects padding).")
-    parser.add_argument("--voxel_size", type=float, default=0.005, help="Voxel size passed to RealWorldDataset.")
-    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader worker count.")
-    parser.add_argument("--fps", type=float, default=5.0, help="Playback speed for steppqiting through frames.")
+                        help="Sequence index from listing when --seq_id is not provided.")
+    parser.add_argument("--voxel_size", type=float, default=0.005, help="Voxel size for point cloud downsampling.")
+    parser.add_argument("--fps", type=float, default=5.0, help="Playback speed for stepping through frames.")
     parser.add_argument("--point_radius", type=float, default=0.002, help="Point radius (meters) for Rerun markers.")
     parser.add_argument("--no_spawn", action="store_true", help="Do not spawn a separate Rerun viewer window.")
     parser.add_argument("--no_align_ref", action="store_true",
                         help="Disable transforming each frame into the first-frame coordinate system.")
     parser.add_argument("--align_calib_head", action="store_true",
                         help="Align clouds and poses to the calibrated head pose coordinate system.")
-    parser.add_argument("--show_aruco_frame", action="store_true",
-                        help="Display the calibrated ArUco frame (requires calibrated files).")
-    parser.add_argument("--show_aruco_in_calib", action="store_true",
-                        help="When aligning to calibrated head pose, also show ArUco frame in that coordinate system.")
-    parser.add_argument("--align_aruco", action="store_true",
-                        help="Align clouds and poses to the ArUco coordinate system.")
+    parser.add_argument("--raw_frames", action="store_true",
+                        help="Display point clouds and ball centers in each frame's original camera coordinate system without any transformation.")
     parser.add_argument("--max_frames", type=int, default=None,
                         help="Maximum number of frames to display (from the beginning).")
     parser.add_argument("--end_frame_id", type=str, default=None,
                         help="Display frames up to and including this frame ID (e.g., '000100').")
     parser.add_argument("--tcp_to_zed", type=str, default=None,
                         help="Path to TCP to ZED camera transform matrix file (4x4 matrix). If provided, converts head_pos (TCP poses) to camera poses.")
+    parser.add_argument("--ball_centers", type=str, default=None,
+                        help="Path to ball_centers.txt file. If provided, visualizes ball centers in each frame.")
+    parser.add_argument("--cam_to_base_npy", type=str, default=None,
+                        help="Optional path to cam_to_base.npy to transform point clouds from camera to base coordinates.")
     return parser.parse_args()
 
 
@@ -568,26 +777,34 @@ def main():
         except Exception as e:
             raise RuntimeError(f"Failed to load TCP to ZED transform from {tcp_to_zed_path}: {e}") from e
     
-    dataset = RealWorldDataset(
-        path=args.data_path,
-        split=args.split,
-        num_obs=args.num_obs,
-        num_action=args.num_action,
-        voxel_size=args.voxel_size,
-        with_cloud=True,
-        with_obj_action=False,
-        aug=False,
-        aug_jitter=False,
-    )
-
+    # Get data path
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data path {data_path} does not exist.")
+    
     # Get sequence ID
     if args.seq_id is not None:
         seq_id = args.seq_id
     else:
-        if args.seq_index < 0 or args.seq_index >= len(dataset.all_demos):
-            raise IndexError(f"seq_index {args.seq_index} out of range (dataset has {len(dataset.all_demos)} demos)")
-        seq_id = dataset.all_demos[args.seq_index]
-    frame_clouds, meta = gather_sequence_frames(dataset, seq_id, args.num_workers)
+        sequences = list_sequences(data_path, args.split)
+        if args.seq_index < 0 or args.seq_index >= len(sequences):
+            raise IndexError(f"seq_index {args.seq_index} out of range (found {len(sequences)} sequences)")
+        seq_id = sequences[args.seq_index]
+    
+    # Get sequence path
+    if args.split == 'all':
+        seq_path = data_path / seq_id
+    else:
+        seq_path = data_path / args.split / seq_id
+    
+    if not seq_path.exists():
+        raise FileNotFoundError(f"Sequence path {seq_path} does not exist.")
+    
+    # Load frames and point clouds
+    print(f"[INFO] Loading frames from {seq_path}")
+    frame_clouds, meta = gather_sequence_frames_from_files(
+        seq_path, args.voxel_size, DEPTH_SCALE_DEFAULT
+    )
     if not frame_clouds:
         raise RuntimeError(f"No frames collected for sequence {seq_id}.")
     
@@ -616,84 +833,146 @@ def main():
         raise RuntimeError("No frames to display after filtering.")
     
     frame_ids_ordered = [fid for fid, _ in frame_clouds]
-    ref_frame_id = dataset.seq_ref_frame.get(meta["seq_id"])
-    ref_pose = (
-        dataset.get_camera_extrinsic(meta["seq_id"], int(ref_frame_id), warn_prefix="vis_pointcloud(ref_base)")
-        if ref_frame_id is not None
-        else None
-    )
     
-    seq_path = Path(meta["data_path"])
-    align_to_ref = not args.no_align_ref and not args.align_calib_head and not args.align_aruco
+    # Optional: load camera-to-base transforms (camera -> base) from .npy
+    cam_to_base: dict[str, np.ndarray] | None = None
+    if args.cam_to_base_npy is not None:
+        cam_to_base_path = Path(args.cam_to_base_npy)
+        if not cam_to_base_path.exists():
+            raise FileNotFoundError(f"cam_to_base.npy not found at {cam_to_base_path}")
+        cam_base_data = np.load(cam_to_base_path, allow_pickle=True).item()
+        frame_ids_arr = cam_base_data.get("frame_ids", None)
+        transforms_arr = cam_base_data.get("transforms", None)
+        if frame_ids_arr is None or transforms_arr is None:
+            raise ValueError(f"cam_to_base.npy at {cam_to_base_path} does not contain expected keys 'frame_ids' and 'transforms'.")
+        if frame_ids_arr.shape[0] != transforms_arr.shape[0]:
+            raise ValueError("Mismatch between number of frame_ids and transforms in cam_to_base.npy.")
+        # Store using 6-digit string frame ids to match frame_clouds
+        cam_to_base = {
+            f"{int(fid):06d}": transforms_arr[idx].astype(np.float32)
+            for idx, fid in enumerate(frame_ids_arr)
+        }
+        print(f"[INFO] Loaded cam_to_base transforms from {cam_to_base_path} ({len(cam_to_base)} frames)")
     
-    # Load ArUco poses
-    aruco_poses = _load_aruco_poses(seq_path, ref_pose)
+    # If cam_to_base is provided, transform point clouds from camera to base coordinates
+    if cam_to_base is not None:
+        print("[INFO] Transforming point clouds from camera to base coordinate system using cam_to_base.npy")
+        frame_clouds_proc: List[Tuple[str, np.ndarray]] = []
+        camera_poses: List[Tuple[str, np.ndarray]] = []
+        for fid, cloud in frame_clouds:
+            T_base_cam = cam_to_base.get(fid)
+            if T_base_cam is None:
+                print(f"[WARN] No cam_to_base transform for frame {fid}, leaving point cloud in camera coordinates")
+                frame_clouds_proc.append((fid, cloud))
+                continue
+            points = cloud[:, :3].astype(np.float32)
+            if points.size == 0:
+                frame_clouds_proc.append((fid, cloud))
+                continue
+            ones = np.ones((points.shape[0], 1), dtype=np.float32)
+            homo = np.concatenate([points, ones], axis=1)
+            points_base = (T_base_cam @ homo.T).T[:, :3]
+            cloud_new = cloud.copy()
+            cloud_new[:, :3] = points_base
+            frame_clouds_proc.append((fid, cloud_new))
+            # Camera pose in base coordinates: base_T_cam
+            camera_poses.append((fid, T_base_cam.astype(np.float32)))
+        # In this mode, we are already in the base coordinate system
+        target_pose: np.ndarray | None = None
+        anchor_frames: List[Tuple[str, np.ndarray]] = [("base_frame", np.eye(4, dtype=np.float32))]
+    else:
+        # Load camera extrinsics
+        extrinsics = load_camera_extrinsics(seq_path)
+        
+        # Get reference frame ID (first frame)
+        ref_frame_id = None
+        if frame_ids_ordered:
+            try:
+                ref_frame_id_int = int(frame_ids_ordered[0])
+                ref_frame_id = frame_ids_ordered[0]
+            except ValueError:
+                pass
+        
+        ref_pose = None
+        if ref_frame_id is not None:
+            ref_frame_id_int = int(ref_frame_id)
+            ref_pose = extrinsics.get(ref_frame_id_int)
+        
+        # Handle raw_frames mode: no transformation, display in original camera coordinate system
+        if args.raw_frames:
+            print("[INFO] Using raw_frames mode: displaying point clouds and ball centers in each frame's original camera coordinate system")
+            # Use original point clouds without transformation
+            frame_clouds_proc = list(frame_clouds)
+            # Camera poses in original coordinate system (identity for each frame's camera)
+            camera_poses = [(fid, np.eye(4, dtype=np.float32)) for fid in frame_ids_ordered]
+            target_pose = None
+            ref_frame_id = None
+            anchor_frames = []
+        else:
+            align_to_ref = not args.no_align_ref and not args.align_calib_head
+            
+            # Determine target coordinate system and transform clouds
+            target_pose: np.ndarray | None = None
+            anchor_frames: List[Tuple[str, np.ndarray]] = []
+            
+            if args.align_calib_head:
+                calib_world_pose = _load_calibrated_head_pose(seq_path)
+                target_pose = calib_world_pose
+                anchor_frames.append(("calib_head_frame", np.eye(4, dtype=np.float32)))
+            elif align_to_ref:
+                if ref_pose is None:
+                    raise RuntimeError("Reference frame extrinsic is required for alignment.")
+                target_pose = None  # Will use ref_frame_id
+                anchor_frames.append(("ref_frame", np.eye(4, dtype=np.float32)))
+            
+            # Transform clouds to target coordinate system
+            frame_clouds_proc = transform_clouds_to_coordinate_system(
+                extrinsics,
+                frame_clouds,
+                target_pose=target_pose,
+                ref_frame_id=ref_frame_id if align_to_ref else None,
+                warn_prefix="vis_pointcloud",
+            )
+            
+            # Get camera poses in target coordinate system
+            camera_poses = get_camera_poses(
+                extrinsics,
+                frame_ids_ordered,
+                target_pose=target_pose,
+                ref_frame_id=ref_frame_id if align_to_ref else None,
+                warn_prefix="vis_pointcloud",
+                tcp_to_zed=tcp_to_zed_transform,
+            )
     
-    # Determine target coordinate system and transform clouds
-    target_pose: np.ndarray | None = None
-    anchor_frames: List[Tuple[str, np.ndarray]] = []
-    aruco_pose_for_line: np.ndarray | None = None
-    
-    if args.align_aruco:
-        target_pose = aruco_poses.get('world')
-        if target_pose is None:
-            raise RuntimeError("ArUco pose in world is required for --align_aruco.")
-        anchor_frames.append(("aruco_frame", np.eye(4, dtype=np.float32)))
-        aruco_pose_for_line = np.eye(4, dtype=np.float32)
-    elif args.align_calib_head:
-        calib_world_pose = _load_calibrated_head_pose(seq_path)
-        target_pose = calib_world_pose
-        anchor_frames.append(("calib_head_frame", np.eye(4, dtype=np.float32)))
-        if args.show_aruco_frame or args.show_aruco_in_calib:
-            aruco_pose_calib = aruco_poses.get('calib_head')
-            if aruco_pose_calib is not None:
-                anchor_frames.append(("aruco_frame", aruco_pose_calib))
-                aruco_pose_for_line = aruco_pose_calib
-    elif align_to_ref:
-        if ref_pose is None:
-            raise RuntimeError("Reference frame extrinsic is required for alignment.")
-        target_pose = None  # Will use ref_frame_id
-        anchor_frames.append(("ref_frame", np.eye(4, dtype=np.float32)))
-        if args.show_aruco_frame:
-            aruco_cam_first = aruco_poses.get('camera_at_aruco_first')
-            aruco_pose_first = aruco_poses.get('first')
-            if aruco_cam_first is not None:
-                anchor_frames.append(("camera_at_aruco", aruco_cam_first))
-            if aruco_pose_first is not None:
-                anchor_frames.append(("aruco_frame", aruco_pose_first))
-                aruco_pose_for_line = aruco_pose_first
-    elif args.show_aruco_frame:
-        aruco_cam_first = aruco_poses.get('camera_at_aruco_first')
-        aruco_pose_first = aruco_poses.get('first')
-        if aruco_cam_first is not None:
-            anchor_frames.append(("camera_at_aruco", aruco_cam_first))
-        if aruco_pose_first is not None:
-            anchor_frames.append(("aruco_frame", aruco_pose_first))
-            aruco_pose_for_line = aruco_pose_first
-    
-    # Transform clouds to target coordinate system
-    frame_clouds_proc = transform_clouds_to_coordinate_system(
-        dataset,
-        meta["seq_id"],
-        frame_clouds,
-        target_pose=target_pose,
-        ref_frame_id=ref_frame_id if align_to_ref else None,
-        warn_prefix="vis_pointcloud",
-    )
-    
-    # Get camera poses in target coordinate system
-    camera_poses = get_camera_poses(
-        dataset,
-        meta["seq_id"],
-        frame_ids_ordered,
-        target_pose=target_pose,
-        ref_frame_id=ref_frame_id if align_to_ref else None,
-        warn_prefix="vis_pointcloud",
-        tcp_to_zed=tcp_to_zed_transform,
-    )
+    # Load ball centers if provided
+    ball_centers_data = None
+    if args.ball_centers is not None:
+        ball_centers_path = Path(args.ball_centers)
+        try:
+            ball_centers_data = load_ball_centers(ball_centers_path)
+            print(f"[INFO] Loaded ball centers from {ball_centers_path} ({len(ball_centers_data)} frames)")
+        except Exception as e:
+            print(f"[WARN] Failed to load ball centers from {ball_centers_path}: {e}")
     
     print(f"[INFO] Visualizing entire seq={seq_id} ({meta['total_frames']} unique frames) from {meta['data_path']}")
 
+    # Get head_pos directory path for ball centers transformation
+    # In raw_frames mode, don't transform ball centers (they're already in current frame camera coordinate system)
+    head_pos_dir = None
+    if ball_centers_data is not None and not args.raw_frames:
+        seq_path = Path(meta["data_path"])
+        head_pos_dir = seq_path / "head_pos"
+        if not head_pos_dir.exists():
+            head_pos_dir = None
+            print(f"[WARN] head_pos directory not found at {seq_path / 'head_pos'}, ball centers will not be transformed")
+
+    # Determine ref_frame_id for visualization (only used if cam_to_base is None, not raw_frames and align_to_ref)
+    vis_ref_frame_id = None
+    if cam_to_base is None and not args.raw_frames:
+        align_to_ref = not args.no_align_ref and not args.align_calib_head
+        if align_to_ref:
+            vis_ref_frame_id = ref_frame_id
+    
     visualize_sequence(
         frame_clouds=frame_clouds_proc,
         seq_id=meta["seq_id"],
@@ -702,7 +981,10 @@ def main():
         spawn_viewer=not args.no_spawn,
         camera_poses=camera_poses,
         anchor_frames=anchor_frames,
-        aruco_pose=aruco_pose_for_line,
+        ball_centers=ball_centers_data,
+        head_pos_dir=head_pos_dir,
+        target_pose=target_pose,
+        ref_frame_id=vis_ref_frame_id,
     )
 
 
