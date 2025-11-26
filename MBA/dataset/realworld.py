@@ -176,18 +176,6 @@ class RealWorldDataset(Dataset):
             except ValueError:
                 return stem
 
-        AXIS_MIRROR = np.diag([1.0, -1.0, 1.0]).astype(np.float32)
-
-        def _mirror_pose(mat: np.ndarray) -> np.ndarray:
-            R = mat[:3, :3]
-            t = mat[:3, 3]
-            R_new = AXIS_MIRROR @ R @ AXIS_MIRROR
-            t_new = AXIS_MIRROR @ t
-            T_new = np.eye(4, dtype=np.float32)
-            T_new[:3, :3] = R_new
-            T_new[:3, 3] = t_new
-            return T_new
-
         for fname in sorted(files, key=sort_key):
             path = os.path.join(directory, fname)
             values = np.loadtxt(path).astype(np.float32)
@@ -222,8 +210,6 @@ class RealWorldDataset(Dataset):
                 mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
             if mat.shape != (4, 4):
                 raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {path}")
-
-            mat = _mirror_pose(mat)
 
             key = sort_key(fname)
             extr_map[key] = mat.astype(np.float32)
