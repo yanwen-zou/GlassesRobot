@@ -117,7 +117,7 @@ def main():
     data_dir: Path = args.data_dir
     
     # Setup paths
-    mask_balls_dir = data_dir / "mask_balls"
+    mask_balls_dir = data_dir / "masks_balls"
     depth_dir = data_dir / "depth"
     intrinsic_path = data_dir / "cam_K.txt"
     if not intrinsic_path.exists():

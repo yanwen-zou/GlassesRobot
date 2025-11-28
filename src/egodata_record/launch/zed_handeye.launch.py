@@ -24,7 +24,7 @@ def generate_launch_description():
 
     intrinsics_arg = DeclareLaunchArgument(
         "intrinsics",
-        default_value=str(workspace_root / "src/FoundationStereo/assets/K_ZED.txt"),
+        default_value=str(workspace_root / "src/FoundationStereo/assets/K_distort.txt"),
         description="ZED 左相机内参路径（npy/npz/txt）。默认使用 FoundationStereo 的 K_ZED.txt。",
     )
     intrinsic_scale_arg = DeclareLaunchArgument(

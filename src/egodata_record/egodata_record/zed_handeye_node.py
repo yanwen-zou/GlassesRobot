@@ -235,6 +235,7 @@ class ZedHandeyeNode(Node):
                     continue
                 self.zed.retrieve_image(self.left, sl.VIEW.LEFT)
                 frame = self.left.get_data()
+                self.get_logger().info(f"pose:{self.latest_pose}")
                 if frame is None:
                     continue
 
@@ -350,7 +351,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--intrinsics",
         type=Path,
-        default=Path("src/FoundationStereo/assets/K_ZED.txt"),
+        default=Path("src/FoundationStereo/assets/K_distort.txt"),
         help="ZED 左相机内参路径（npy/npz/txt），默认使用 FoundationStereo 的 K_ZED.txt。",
     )
     parser.add_argument(

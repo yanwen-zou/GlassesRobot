@@ -82,8 +82,8 @@ def main() -> None:
     rr.init("ZED <-> TCP", spawn=args.spawn)
     rr.log("world", rr.ViewCoordinates.RDF)  # matches ZED/OpenCV
 
-    _log_frame(rr, "zed", np.eye(4, dtype=np.float32), args.axis_len)
-    _log_frame(rr, "tcp", T_zed_tcp, args.axis_len)
+    _log_frame(rr, "tcp", np.eye(4, dtype=np.float32), args.axis_len)
+    _log_frame(rr, "zed", T_zed_tcp, args.axis_len)
 
     # Visualize the translation vector for quick distance/direction sanity checks.
     rr.log(

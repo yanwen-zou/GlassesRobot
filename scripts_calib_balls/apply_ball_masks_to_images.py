@@ -56,7 +56,7 @@ def _load_mask(mask_path: Path) -> np.ndarray:
 
 def apply_masks_for_sequence(data_dir: Path) -> None:
     """Apply all ball masks in `mask_balls/` onto images in this sequence."""
-    mask_balls_dir = data_dir / "mask_balls"
+    mask_balls_dir = data_dir / "masks_balls"
     if not mask_balls_dir.exists():
         raise FileNotFoundError(f"mask_balls directory not found: {mask_balls_dir}")
 

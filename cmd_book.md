@@ -13,6 +13,8 @@ ros2 launch egodata_record zed_handeye.launch.py \
 # SAM2 For Mask -> FoundationStereo For Depth -> FoundationPose for Obj Pose Tracking
 ./cmd_book_pipeline.sh
 
+# SAM2 For ball calib
+./scripts_calib_balls/run_ball_pipeline.sh --data-dir data/20251127_175609
 
 # -------------MBA Env------------------
 # Train a obj pose prediction model
@@ -60,3 +62,6 @@ python src/egodata_eval/vis_pointcloud_sequence.py     --data_path data/moving -
 python vggt/glass_demo.py --episode-dir data/20251112_142342
 
 python src/egodata_eval/visualize_scripts/vis_tsdf.py
+
+# obtain obj mask
+python scripts_data_processing/obj_mask2pointcloud.py --episode-dir data/20251112_142342

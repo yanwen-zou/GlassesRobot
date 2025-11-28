@@ -26,7 +26,7 @@ def quaternion_to_matrix(quat: np.ndarray) -> np.ndarray:
     )
 
 
-def load_head_poses(head_dir: Path) -> dict[int, np.ndarray]:
+def load_head_poses(head_dir: Path, T_tcp_zed: np.ndarray) -> dict[int, np.ndarray]:
     pose_files = sorted(head_dir.glob("*.txt"), key=lambda p: int(p.stem))
     if not pose_files:
         raise FileNotFoundError(f"No pose files in {head_dir}")
@@ -43,14 +43,15 @@ def load_head_poses(head_dir: Path) -> dict[int, np.ndarray]:
         mat = np.eye(4, dtype=np.float32)
         mat[:3, :3] = rot
         mat[:3, 3] = t
-        # head_pos gives world->head. Convert to world->cam by flipping Y axis.
-        mat = flip_y @ mat
-        poses[int(path.stem)] = mat  # world->cam (extrinsic)
+        # head_pos gives world->head. Convert to world->cam by flipping Y axis, then apply tcp->zed.
+        mat = mat @ flip_y @ T_tcp_zed # if headpos is converted in ros, dont need flip_y
+        poses[int(path.stem)] = mat  # world->zed (extrinsic)
 
-    # Normalize so the first camera frame becomes world: cam_i->world = E0 @ inv(Ei)
+    # Normalize so the first camera frame becomes world: cam_i<-cam0 = inv(Ei) @ E0
     first_key = min(poses.keys())
     E0 = poses[first_key]
-    return {k: E0 @ np.linalg.inv(pose) for k, pose in poses.items()}
+    inv_E0 = np.linalg.inv(E0)
+    return {k: inv_E0 @ pose for k, pose in poses.items()}  # cam_i <- cam0
 
 
 def load_intrinsics(path: Path) -> np.ndarray:
@@ -85,11 +86,11 @@ def load_depth(depth_path: Path, depth_scale: float) -> np.ndarray:
     return depth_m
 
 
-def backproject_mask_to_world(
+def backproject_mask_to_ref(
     depth_m: np.ndarray,
     mask: np.ndarray,
     intrinsic: np.ndarray,
-    cam_to_world: np.ndarray,
+    cam_from_cam0: np.ndarray,
     rgb: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, Optional[np.ndarray]]:
     if depth_m.shape[:2] != mask.shape[:2]:
@@ -107,10 +108,10 @@ def backproject_mask_to_world(
     y = (ys - cy) * z / fy
     cam_points = np.stack([x, y, z, np.ones_like(z)], axis=1)
 
-    world_points = (cam_to_world @ cam_points.T).T[:, :3]
+    # cam_from_cam0 transforms current cam points into reference cam0 frame
+    ref_points = (cam_from_cam0 @ cam_points.T).T[:, :3]
     colors = rgb[ys, xs] if rgb is not None else None
-    return world_points.astype(np.float32), colors
-
+    return ref_points.astype(np.float32), colors
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Reproject masked object points using head_pos poses for all frames.")
@@ -120,6 +121,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rgb-dir", type=Path, default=None, help="Defaults to <episode-dir>/rgb (for colors)")
     parser.add_argument("--depth-dir", type=Path, default=None, help="Defaults to <episode-dir>/depth")
     parser.add_argument("--intrinsic", type=Path, default=None, help="Defaults to <episode-dir>/cam_K.txt")
+    parser.add_argument(
+        "--T_tcp_zed",
+        type=Path,
+        default=Path("glasses_hardware/calib/T_tcp_zed.npy"),
+        help="Path to tcp->zed transform (camera extrinsic).",
+    )
     parser.add_argument(
         "--depth-scale",
         type=float,
@@ -145,14 +152,15 @@ def main():
     depth_dir = args.depth_dir or (episode_dir / "depth")
     intrinsic_path = args.intrinsic or (episode_dir / "cam_K.txt")
     output_dir = args.output_dir or (episode_dir / "vggt_output" / "object_masks_headpos")
+    T_tcp_zed = np.load(args.T_tcp_zed).astype(np.float32)
 
     intr = load_intrinsics(intrinsic_path)
-    poses = load_head_poses(head_dir)
+    poses = load_head_poses(head_dir, T_tcp_zed)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     written = 0
 
-    for frame_id, cam_to_world in poses.items():
+    for frame_id, camref_from_cam in poses.items():
         mask_path = mask_dir / f"{frame_id:06d}.png"
         rgb_path = rgb_dir / f"{frame_id:06d}.png"
         depth_path = depth_dir / f"{frame_id:06d}.png"
@@ -167,7 +175,7 @@ def main():
                 continue
             raise
 
-        pts, cols = backproject_mask_to_world(depth_m, mask, intr, cam_to_world, rgb)
+        pts, cols = backproject_mask_to_ref(depth_m, mask, intr, camref_from_cam, rgb)
         if pts.size == 0:
             print(f"[INFO] Frame {frame_id:06d}: no masked points, skipping save.")
             continue
