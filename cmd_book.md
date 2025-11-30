@@ -62,6 +62,3 @@ python src/egodata_eval/vis_pointcloud_sequence.py     --data_path data/moving -
 python vggt/glass_demo.py --episode-dir data/20251112_142342
 
 python src/egodata_eval/visualize_scripts/vis_tsdf.py
-
-# obtain obj mask
-python scripts_data_processing/obj_mask2pointcloud.py --episode-dir data/20251112_142342

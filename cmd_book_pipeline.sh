@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_ROOT="$SCRIPT_DIR"
 FOUNDATION_STEREO_DIR="${PROJECT_ROOT}/src/FoundationStereo"
+BALL_PIPELINE="${PROJECT_ROOT}/scripts_calib_balls/run_ball_pipeline.sh"
 DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data"
 DATA_ROOT="$DEFAULT_DATA_ROOT"
 INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
@@ -110,6 +111,19 @@ if [ "${#K_VALUES[@]}" -ne 9 ]; then
   echo "❌ Expected 9 values for camera intrinsics, got ${#K_VALUES[@]}" >&2
   exit 1
 fi
+
+write_intrinsics() {
+  local episode_dir="$1"
+  local intrinsics_out="${episode_dir}/cam_K.txt"
+  local camera_intrinsics_out="${episode_dir}/camera_intrinsics.txt"
+  {
+    printf "%s %s %s\n" "${K_VALUES[0]}" "${K_VALUES[1]}" "${K_VALUES[2]}"
+    printf "%s %s %s\n" "${K_VALUES[3]}" "${K_VALUES[4]}" "${K_VALUES[5]}"
+    printf "%s %s %s\n" "${K_VALUES[6]}" "${K_VALUES[7]}" "${K_VALUES[8]}"
+  } >"$intrinsics_out"
+  cp "$intrinsics_out" "$camera_intrinsics_out"
+  echo "📐 Wrote camera intrinsics to ${intrinsics_out} (and ${camera_intrinsics_out})"
+}
 
 fill_head_pose_nans() {
   local head_dir="$1"
@@ -312,28 +326,93 @@ else
   echo "⏭️  All episodes already have SAM masks; skipping SAM segmentation."
 fi
 
-echo "=============================="
-echo "🖐️  Generating hand masks with Grounded-SAM 2..."
+# Ensure intrinsics are present before ball processing.
 for episode in "${READY_EPISODES[@]}"; do
   episode_dir="${DATA_ROOT}/${episode}"
-  jpg_dir="${episode_dir}/jpg"
-  output_dir="${episode_dir}/mask_hand"
-
-  if [ ! -d "$jpg_dir" ] || ! find "$jpg_dir" -maxdepth 1 -name '*.jpg' -print -quit >/dev/null; then
-    echo "⚠️  JPG frames missing for ${episode}; skipping hand mask export." >&2
-    continue
-  fi
-
-  if [ -d "$output_dir" ] && find "$output_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
-    echo "⏭️  Hand masks already exist for $episode; skipping Grounded-SAM2 export."
-    continue
-  fi
-
-  conda run --no-capture-output -n foundation_stereo python -u \
-    "${FOUNDATION_STEREO_DIR}/Grounded-SAM-2/grounded_sam2_mask_export.py" \
-    --video_dir "$jpg_dir" \
-    --output_dir "$output_dir"
+  write_intrinsics "$episode_dir"
 done
+
+# === Ball masks (interactive) and downstream ball pipeline ===
+declare -a BALL_EPISODES=()
+for episode in "${READY_EPISODES[@]}"; do
+  episode_dir="${DATA_ROOT}/${episode}"
+  mask_balls_dir="${episode_dir}/masks_balls"
+  if [ -d "$mask_balls_dir" ] && find "$mask_balls_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Ball masks already exist for $episode; skipping ball SAM."
+    continue
+  fi
+  BALL_EPISODES+=("$episode")
+done
+
+if [ "${#BALL_EPISODES[@]}" -gt 0 ]; then
+  BALL_TEMP_ROOT=$(mktemp -d)
+  cleanup_ball() {
+    rm -rf "$BALL_TEMP_ROOT"
+  }
+  trap cleanup_ball EXIT
+
+  for episode in "${BALL_EPISODES[@]}"; do
+    ln -s "${DATA_ROOT}/${episode}" "${BALL_TEMP_ROOT}/${episode}"
+  done
+
+  echo "=============================="
+  echo "🟢 Launching SAM for balls (3 objects) ..."
+  conda run --no-capture-output -n foundation_stereo python -u \
+    "${FOUNDATION_STEREO_DIR}/scripts/multi_object_sam_segmentation.py" \
+    --data_root "$BALL_TEMP_ROOT" \
+    --num_objects 3 \
+    --output_dirname masks_balls
+
+  cleanup_ball
+  trap - EXIT
+
+else
+  echo "⏭️  All episodes already have ball masks; skipping ball sam."
+fi
+
+# Decide which episodes still need ball pipeline based on cam_to_base.txt presence.
+declare -a BALL_PIPELINE_EPISODES=()
+for episode in "${READY_EPISODES[@]}"; do
+  episode_dir="${DATA_ROOT}/${episode}"
+  if [ -f "${episode_dir}/cam_to_base.txt" ]; then
+    echo "⏭️  cam_to_base.txt already exists for $episode; skipping ball pipeline."
+    continue
+  fi
+  BALL_PIPELINE_EPISODES+=("$episode")
+done
+
+for episode in "${READY_EPISODES[@]}"; do
+  echo "=============================="
+  echo "🔄 Generating depth with FoundationStereo for $episode..."
+
+  episode_dir="${DATA_ROOT}/${episode}"
+  depth_dir="${episode_dir}/depth"
+  if [ -d "$depth_dir" ] && find "$depth_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Depth already exists in ${depth_dir}; skipping generation."
+  else
+    pushd "$FOUNDATION_STEREO_DIR" >/dev/null
+    ./scripts/zed2depth.sh --data-root "$DATA_ROOT" "$episode"
+    popd >/dev/null
+  fi
+done
+
+if [ "${#BALL_PIPELINE_EPISODES[@]}" -gt 0 ]; then
+  echo "=============================="
+  echo "🎯 Running ball post-processing pipeline (masks -> centers -> cam_to_base)..."
+  for episode in "${BALL_PIPELINE_EPISODES[@]}"; do
+    conda run --no-capture-output -n foundation_stereo bash "$BALL_PIPELINE" --data-dir "${DATA_ROOT}/${episode}"
+  done
+
+  echo "=============================="
+  echo "📐 Computing aligned cam poses (base frame) from head_pos..."
+  for episode in "${BALL_PIPELINE_EPISODES[@]}"; do
+    conda run --no-capture-output -n foundation_stereo python -u \
+      "${PROJECT_ROOT}/scripts_calib_balls/compute_aligned_cam_pose.py" \
+      --episode_dir "${DATA_ROOT}/${episode}"
+  done
+else
+  echo "⏭️  cam_to_base.txt already present for all episodes; skipping ball pipeline/alignment."
+fi
 
 for episode in "${READY_EPISODES[@]}"; do
   echo "=============================="
@@ -342,21 +421,6 @@ for episode in "${READY_EPISODES[@]}"; do
   episode_dir="${DATA_ROOT}/${episode}"
   depth_dir="${episode_dir}/depth"
   masks_dir="${episode_dir}/masks"
-
-  echo "🔄 Generating depth with FoundationStereo for $episode..."
-  pushd "$FOUNDATION_STEREO_DIR" >/dev/null
-  ./scripts/zed2depth.sh --data-root "$DATA_ROOT" "$episode"
-  popd >/dev/null
-
-  intrinsics_out="${episode_dir}/cam_K.txt"
-  camera_intrinsics_out="${episode_dir}/camera_intrinsics.txt"
-  {
-    printf "%s %s %s\n" "${K_VALUES[0]}" "${K_VALUES[1]}" "${K_VALUES[2]}"
-    printf "%s %s %s\n" "${K_VALUES[3]}" "${K_VALUES[4]}" "${K_VALUES[5]}"
-    printf "%s %s %s\n" "${K_VALUES[6]}" "${K_VALUES[7]}" "${K_VALUES[8]}"
-  } >"$intrinsics_out"
-  cp "$intrinsics_out" "$camera_intrinsics_out"
-  echo "📐 Wrote camera intrinsics to ${intrinsics_out} (and ${camera_intrinsics_out})"
 
   if [ ! -d "$masks_dir" ] || ! find "$masks_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
     echo "⚠️  Masks not found for $episode, skipping FoundationPose." >&2
