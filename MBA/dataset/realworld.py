@@ -11,7 +11,11 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from .constants import *
-from ..utils.transformation import xyz_rot_transform
+# Use absolute import to allow running when MBA is on PYTHONPATH as a top-level module.
+from utils.transformation import xyz_rot_transform
+
+# Default rotation noise (radians) applied to cam_to_base when requested.
+CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(1.0)
 
 class RealWorldDataset(Dataset):
     """
@@ -35,6 +39,7 @@ class RealWorldDataset(Dataset):
         aug_jitter_prob = 0.2,
         with_cloud = False,
         with_obj_action = False,
+        cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
     ):
         assert split in ['train', 'eval', 'all']
 
@@ -57,6 +62,7 @@ class RealWorldDataset(Dataset):
         self.aug_jitter_prob = aug_jitter_prob
         self.with_cloud = with_cloud
         self.with_obj_action = with_obj_action
+        self.cam_to_base_rot_noise_std = float(cam_to_base_rot_noise_std)
 
         if not os.path.isdir(self.data_path):
             raise FileNotFoundError(f"Data path {self.data_path} does not exist.")
@@ -83,6 +89,7 @@ class RealWorldDataset(Dataset):
         self.seq_num_frames = {}
         self.seq_last_frame_id = {}
         self.seq_terminal_frame_ids = {}
+        self.seq_cam_to_base = {}
 
         for demo in self.all_demos:
             demo_path = os.path.join(self.data_path, demo)
@@ -108,6 +115,9 @@ class RealWorldDataset(Dataset):
             cam_K = cam_K.reshape(3, 3)
             self.seq_intrinsics[demo] = cam_K
 
+            cam_to_base_map = self._load_cam_to_base(demo_path)
+            self.seq_cam_to_base[demo] = cam_to_base_map
+
             extr_dir = os.path.join(demo_path, "head_pos")
             if os.path.isdir(extr_dir):
                 extr_map = self._load_camera_extrinsics_from_dir(extr_dir)
@@ -118,7 +128,7 @@ class RealWorldDataset(Dataset):
             self.seq_ref_frame[demo] = int(frame_ids[0])
             self.seq_num_frames[demo] = len(frame_ids)
             self.seq_last_frame_id[demo] = frame_ids[-1]
-            terminal_ids = set(int(fid) for fid in frame_ids[-10:]) if len(frame_ids) >= 10 else set(int(fid) for fid in frame_ids)
+            terminal_ids = set(int(fid) for fid in frame_ids[-5:]) if len(frame_ids) >= 5 else set(int(fid) for fid in frame_ids)
             self.seq_terminal_frame_ids[demo] = terminal_ids
 
             obs_frame_ids_list = []
@@ -147,6 +157,23 @@ class RealWorldDataset(Dataset):
 
         if len(self.data_paths) == 0:
             raise RuntimeError(f"No valid samples constructed from {self.data_path}.")
+
+    def _get_cam_to_base(self, seq_id, frame_id_str):
+        """Fetch T_base_cam for a frame; identity if missing."""
+        cam_to_base_map = self.seq_cam_to_base.get(seq_id, {})
+        if not cam_to_base_map:
+            return np.eye(4, dtype=np.float32)
+        if frame_id_str in cam_to_base_map:
+            return cam_to_base_map[frame_id_str]
+        try:
+            frame_int = int(frame_id_str)
+            fallback_key = f"{frame_int}"
+        except ValueError:
+            fallback_key = None
+        if fallback_key and fallback_key in cam_to_base_map:
+            return cam_to_base_map[fallback_key]
+        warnings.warn(f"[dataset] Missing cam_to_base for seq={seq_id} frame={frame_id_str}; using identity.")
+        return np.eye(4, dtype=np.float32)
         
     def __len__(self):
         return len(self.obs_frame_ids)
@@ -215,6 +242,67 @@ class RealWorldDataset(Dataset):
             extr_map[key] = mat.astype(np.float32)
         return extr_map
 
+    def _load_cam_to_base(self, demo_path):
+        """Load camera->base transforms (per-frame T_base_cam) from cam_to_base.npy or cam_to_base.txt."""
+        cam_to_base_map = {}
+        npy_path = os.path.join(demo_path, "cam_to_base.npy")
+        txt_path = os.path.join(demo_path, "cam_to_base.txt")
+        if os.path.exists(npy_path):
+            data = np.load(npy_path, allow_pickle=True).item()
+            frame_ids = data.get("frame_ids")
+            transforms = data.get("transforms")
+            if frame_ids is None or transforms is None:
+                warnings.warn(f"[RealWorldDataset] cam_to_base.npy missing expected keys in {demo_path}; using identity.")
+                return cam_to_base_map
+            for fid, mat in zip(frame_ids, transforms):
+                cam_to_base_map[f"{int(fid):06d}"] = mat.astype(np.float32)
+            return cam_to_base_map
+        if os.path.exists(txt_path):
+            try:
+                with open(txt_path, "r") as f:
+                    lines = f.readlines()
+                for line in lines[1:]:
+                    parts = line.strip().split()
+                    if len(parts) != 13:
+                        continue
+                    fid = int(parts[0])
+                    vals = list(map(float, parts[1:]))
+                    R = np.array(vals[:9], dtype=np.float32).reshape(3, 3)
+                    t = np.array(vals[9:], dtype=np.float32)
+                    T = np.eye(4, dtype=np.float32)
+                    T[:3, :3] = R
+                    T[:3, 3] = t
+                    cam_to_base_map[f"{fid:06d}"] = T
+            except Exception as exc:
+                warnings.warn(f"[RealWorldDataset] Failed to load cam_to_base.txt in {demo_path}: {exc}")
+        else:
+            warnings.warn(f"[RealWorldDataset] cam_to_base not found in {demo_path}; using identity.")
+        # Optional rotation noise
+        if self.cam_to_base_rot_noise_std > 0.0:
+            def _rand_rot(std: float) -> np.ndarray:
+                vec = np.random.normal(0.0, std, size=3)
+                theta = np.linalg.norm(vec)
+                if theta < 1e-12:
+                    return np.eye(3, dtype=np.float32)
+                k = vec / theta
+                kx, ky, kz = k
+                K = np.array(
+                    [
+                        [0, -kz, ky],
+                        [kz, 0, -kx],
+                        [-ky, kx, 0],
+                    ],
+                    dtype=np.float32,
+                )
+                sn, cs = np.sin(theta), np.cos(theta)
+                return (np.eye(3, dtype=np.float32) + sn * K + (1 - cs) * (K @ K)).astype(np.float32)
+            for key, T in list(cam_to_base_map.items()):
+                R_noise = _rand_rot(self.cam_to_base_rot_noise_std)
+                T_noisy = T.copy()
+                T_noisy[:3, :3] = R_noise @ T[:3, :3]
+                cam_to_base_map[key] = T_noisy
+        return cam_to_base_map
+
     def get_camera_extrinsic(self, seq_id, frame_idx, warn_prefix="dataset"):
         extr_map = self.seq_camera_extrinsics.get(seq_id, {})
         if not extr_map:
@@ -255,10 +343,6 @@ class RealWorldDataset(Dataset):
         obj_dir = os.path.join(data_path, "ob_in_cam")
 
         cam_intrinsic = self.seq_intrinsics[seq_id]
-        extr_map = self.seq_camera_extrinsics.get(seq_id, {})
-        ref_frame_id = self.seq_ref_frame[seq_id]
-        ref_extr = self.get_camera_extrinsic(seq_id, ref_frame_id, warn_prefix="dataset(ref)")
-        ref_extr_inv = np.linalg.inv(ref_extr)
 
         # create color jitter
         if self.split == 'train' and self.aug_jitter:
@@ -295,6 +379,10 @@ class RealWorldDataset(Dataset):
         clouds = []
         for i, frame_id in enumerate(obs_frame_ids):
             points, colors = self.load_point_cloud(colors_list[i], depths_list[i], cam_intrinsic)
+            T_base_cam = self._get_cam_to_base(seq_id, frame_id)
+            ones = np.ones((points.shape[0], 1), dtype=np.float32)
+            homo = np.concatenate([points, ones], axis=1)
+            points_base = (T_base_cam @ homo.T).T[:, :3]
             # x_mask = ((points[:, 0] >= WORKSPACE_MIN[0]) & (points[:, 0] <= WORKSPACE_MAX[0]))
             # y_mask = ((points[:, 1] >= WORKSPACE_MIN[1]) & (points[:, 1] <= WORKSPACE_MAX[1]))
             # z_mask = ((points[:, 2] >= WORKSPACE_MIN[2]) & (points[:, 2] <= WORKSPACE_MAX[2]))
@@ -303,7 +391,7 @@ class RealWorldDataset(Dataset):
             # colors = colors[mask]
             # apply imagenet normalization
             colors = (colors - IMG_MEAN) / IMG_STD
-            cloud = np.concatenate([points, colors], axis = -1)
+            cloud = np.concatenate([points_base, colors], axis = -1)
             clouds.append(cloud)
 
         # make voxel input
@@ -344,14 +432,9 @@ class RealWorldDataset(Dataset):
                     pose_mat = np.vstack([pose_mat, np.array([0, 0, 0, 1], dtype=np.float32)])
                 if pose_mat.shape != (4, 4):
                     raise ValueError(f"Invalid SE3 matrix shape {pose_mat.shape} in {pose_path}")
-                frame_id_int = int(frame_id_str)
-                cam_extr = self.get_camera_extrinsic(seq_id, frame_id_int, warn_prefix="dataset")
-                pose_world = ref_extr_inv @ cam_extr @ pose_mat
-                return xyz_rot_transform(
-                    pose_world,
-                    from_rep="matrix",
-                    to_rep="rotation_6d"
-                )
+                T_base_cam = self._get_cam_to_base(seq_id, frame_id_str)
+                pose_base = T_base_cam @ pose_mat
+                return xyz_rot_transform(pose_base, from_rep="matrix", to_rep="rotation_6d")
 
             action_objs = []
             obj_frame_ids = self.obj_frame_ids[index]
