@@ -10,12 +10,12 @@ Coordinates are in the current frame camera coordinate system.
 
 Example:
     python src/egodata_eval/vis_single_frame_balls.py \
-        --data-dir data/train/20251125_210453 \
+        --data-dir data/20251128_143254 \
         --frame-id 0
     
     python src/egodata_eval/vis_single_frame_balls.py \
-        --data-dir /home/akihi/code/GlassesRobot/data/train/20251125_210453 \
-        --cam-to-base-npy /home/akihi/code/GlassesRobot/data/train/20251125_210453/cam_to_base.npy \
+        --data-dir data/20251128_143254 \
+        --cam-to-base-npy data/20251128_143254/cam_to_base.npy \
         --frame-id 200
 """
 
@@ -168,6 +168,7 @@ def visualize_single_frame(
     point_radius: float,
     spawn_viewer: bool,
     stride: int,
+    robot_to_cam: dict[int, np.ndarray] | None = None,
     cam_to_base: dict[int, np.ndarray] | None = None,
 ) -> None:
     """Visualize a single frame point cloud and ball masks in Rerun."""
@@ -206,7 +207,7 @@ def visualize_single_frame(
         colors = np.full((points.shape[0], 3), 200, dtype=np.uint8)
 
     # Load ball masks and compute their 3D points
-    mask_balls_dir = data_dir / "mask_balls"
+    mask_balls_dir = data_dir / "masks_balls"
     if not mask_balls_dir.exists():
         print(f"[WARN] mask_balls directory not found at {mask_balls_dir}, no balls will be visualized.")
         ball_points = {}
@@ -249,17 +250,38 @@ def visualize_single_frame(
 
     vis.set_frame(frame_id)
 
-    # Log base coordinate frame if cam_to_base transform is provided
+    # Always log camera frame at origin (point cloud is in camera coordinates)
+    vis.log_coordinate_frame(
+        entity="camera_frame",
+        pose=np.eye(4, dtype=np.float32),
+        axis_len=max(point_radius * 50.0, 0.05),
+    )
+
+    # Log robot frame if provided
+    if robot_to_cam is not None:
+        try:
+            frame_id_int = int(frame_id)
+            T_robot_cam = robot_to_cam.get(frame_id_int)
+        except ValueError:
+            T_robot_cam = None
+        if T_robot_cam is not None:
+            # Stored as robot->cam; invert to place robot frame in camera coordinates.
+            T_cam_robot = np.linalg.inv(T_robot_cam).astype(np.float32)
+            vis.log_coordinate_frame(
+                entity="robot_frame",
+                pose=T_cam_robot,
+                axis_len=max(point_radius * 50.0, 0.05),
+            )
+
+    # Log base coordinate frame if provided
     if cam_to_base is not None:
         try:
             frame_id_int = int(frame_id)
-            T_base_cam = cam_to_base.get(frame_id_int)
+            T_cam_base = cam_to_base.get(frame_id_int)
         except ValueError:
-            T_base_cam = None
-        if T_base_cam is not None:
-            # We have T_base_cam (camera -> base). To visualize the base frame
-            # in the camera/world coordinates, we need T_cam_base = inverse(T_base_cam).
-            T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
+            T_cam_base = None
+        if T_cam_base is not None:
+            # Stored as base->cam; invert to place base frame in camera coordinates.
             vis.log_coordinate_frame(
                 entity="base_frame",
                 pose=T_cam_base,
@@ -341,11 +363,16 @@ def parse_args() -> argparse.Namespace:
         help="Do not spawn a separate Rerun viewer window.",
     )
     parser.add_argument(
+        "--robot-to-cam-npy",
+        type=Path,
+        default=None,
+        help="Optional path to robot_to_cam.npy to visualize robot frame.",
+    )
+    parser.add_argument(
         "--cam-to-base-npy",
         type=Path,
         default=None,
-        help="Optional path to cam_to_base.npy (from compute_base_from_ball_centers.py) "
-             "to visualize the base coordinate frame.",
+        help="Optional path to cam_to_base.npy (cam->base); will be inverted to base->cam.",
     )
     return parser.parse_args()
 
@@ -361,23 +388,49 @@ def main() -> None:
     if frame_id.isdigit():
         frame_id = f"{int(frame_id):06d}"
 
-    # Load cam_to_base transforms if provided
-    cam_to_base: dict[int, np.ndarray] | None = None
+    def _load_transform_map(path: Path, invert: bool = False, frame_start: int = 1) -> dict[int, np.ndarray]:
+        """Load transform map from .npy (dict with frame_ids/transforms, single 4x4, or sequence)."""
+        data_raw = np.load(path, allow_pickle=True)
+        transform_map: dict[int, np.ndarray] = {}
+        if data_raw.ndim == 0 and isinstance(data_raw.item(), dict):
+            data = data_raw.item()
+            frame_ids_arr = data.get("frame_ids", None)
+            transforms_arr = data.get("transforms", None)
+            if frame_ids_arr is None or transforms_arr is None:
+                raise ValueError(f"{path} does not contain expected keys.")
+            if frame_ids_arr.shape[0] != transforms_arr.shape[0]:
+                raise ValueError(f"Mismatch between number of frame_ids and transforms in {path}.")
+            for idx, fid in enumerate(frame_ids_arr):
+                T = transforms_arr[idx].astype(np.float32)
+                transform_map[int(fid)] = np.linalg.inv(T) if invert else T
+        elif data_raw.shape == (4, 4):
+            fid = frame_start
+            T = data_raw.astype(np.float32)
+            transform_map[fid] = np.linalg.inv(T) if invert else T
+        elif data_raw.ndim == 3 and data_raw.shape[1:] == (4, 4):
+            for i in range(data_raw.shape[0]):
+                fid = frame_start + i
+                T = data_raw[i].astype(np.float32)
+                transform_map[fid] = np.linalg.inv(T) if invert else T
+        else:
+            raise ValueError(f"Unexpected shape for {path}: {data_raw.shape}")
+        return transform_map
+
+    # Load robot_to_cam transforms if provided
+    robot_to_cam: dict[int, np.ndarray] | None = None
+    if args.robot_to_cam_npy is not None:
+        robot_to_cam_path: Path = args.robot_to_cam_npy
+        if not robot_to_cam_path.exists():
+            raise FileNotFoundError(f"robot_to_cam.npy not found at {robot_to_cam_path}")
+        robot_to_cam = _load_transform_map(robot_to_cam_path, invert=False, frame_start=1)
+
+    # Load base->cam either directly or by inverting cam->base
     if args.cam_to_base_npy is not None:
         cam_to_base_path: Path = args.cam_to_base_npy
         if not cam_to_base_path.exists():
             raise FileNotFoundError(f"cam_to_base.npy not found at {cam_to_base_path}")
-        data = np.load(cam_to_base_path, allow_pickle=True).item()
-        frame_ids_arr = data.get("frame_ids", None)
-        transforms_arr = data.get("transforms", None)
-        if frame_ids_arr is None or transforms_arr is None:
-            raise ValueError(f"cam_to_base.npy at {cam_to_base_path} does not contain expected keys.")
-        if frame_ids_arr.shape[0] != transforms_arr.shape[0]:
-            raise ValueError("Mismatch between number of frame_ids and transforms in cam_to_base.npy.")
-        cam_to_base = {
-            int(fid): transforms_arr[idx].astype(np.float32)
-            for idx, fid in enumerate(frame_ids_arr)
-        }
+        # invert cam->base to base->cam
+        cam_to_base = _load_transform_map(cam_to_base_path, invert=True, frame_start=1)
 
     visualize_single_frame(
         data_dir=data_dir,
@@ -386,11 +439,10 @@ def main() -> None:
         point_radius=args.point_radius,
         spawn_viewer=not args.no_spawn,
         stride=args.stride,
-        cam_to_base=cam_to_base,
+        robot_to_cam=robot_to_cam,
+        cam_to_base=cam_to_base if args.cam_to_base_npy is not None else None,
     )
 
 
 if __name__ == "__main__":
     main()
-
-
