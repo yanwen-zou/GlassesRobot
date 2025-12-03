@@ -221,8 +221,8 @@ def main(data_root: Path, num_objects: int, output_dirname: str):
             device=device,
         )
 
-    # Collect valid episodes first
-    episodes: List[Tuple[Path, Path, List[str]]] = []
+    # 先收集所有 episode 的点击，再统一处理
+    episodes_info: List[Tuple[Path, Path, List[str], List[Tuple[np.ndarray, np.ndarray]]]] = []
     for episode_dir in sorted(data_root.iterdir()):
         if not episode_dir.is_dir() or episode_dir.name == output_dirname:
             continue
@@ -236,25 +236,18 @@ def main(data_root: Path, num_objects: int, output_dirname: str):
             if episode_dir.name.lower() not in {"depth"}:
                 print(f"⚠️ 跳过 {episode_dir.name}: 未找到可用帧")
             continue
-        episodes.append((episode_dir, frame_dir, frame_names))
 
-    # If no episode subdirs were found, try treating data_root itself as an episode.
-    if not episodes:
-        frame_dir, frame_names = load_frames_for_episode(data_root)
-        if frame_names:
-            episodes.append((data_root, frame_dir, frame_names))
+        # 仅记录点击，不立即运行推理
+        first_frame = frame_dir / frame_names[0]
+        obj_prompts = prompt_objects(first_frame, num_objects=num_objects)
+        episodes_info.append((episode_dir, frame_dir, frame_names, obj_prompts))
 
-    if not episodes:
+    if not episodes_info:
         print(f"⚠️ 未在 {data_root} 找到可处理的 episode 目录")
         return
 
-    # Collect prompts once on the first episode's first frame
-    first_episode_dir, first_frame_dir, first_frame_names = episodes[0]
-    first_frame = first_frame_dir / first_frame_names[0]
-    obj_prompts = prompt_objects(first_frame, num_objects=num_objects)
-
     processed = 0
-    for episode_dir, frame_dir, frame_names in episodes:
+    for episode_dir, frame_dir, frame_names, obj_prompts in episodes_info:
         segment_episode(
             predictor=predictor,
             episode_dir=episode_dir,

@@ -15,7 +15,9 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple, Optional
+import math
+import importlib.util
 
 import numpy as np
 import open3d as o3d
@@ -23,9 +25,12 @@ from PIL import Image
 
 
 HERE = Path(__file__).resolve()
-PROJECT_ROOT = HERE.parents[2]
+PROJECT_ROOT = HERE.parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+SAM_CALIB_DIR = PROJECT_ROOT / "scripts_calib_balls"
+if str(SAM_CALIB_DIR) not in sys.path:
+    sys.path.insert(0, str(SAM_CALIB_DIR))
 
 DEPTH_SCALE_DEFAULT = 1000.0  # Depth units -> meters
 
@@ -36,6 +41,25 @@ def _import_rerun():
     except Exception as exc:  # pragma: no cover - rerun is optional at install time
         raise RuntimeError("Rerun package is required. Install with `pip install rerun-sdk`.") from exc
     return rr
+
+
+def quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    """Quaternion (x, y, z, w) to rotation matrix."""
+    q = np.array([qx, qy, qz, qw], dtype=np.float64)
+    norm = np.linalg.norm(q)
+    if norm < 1e-9:
+        return np.eye(3, dtype=np.float64)
+    q /= norm
+    x, y, z, w = q
+    R = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    return R
 
 
 def list_frames(seq_path: Path) -> List[str]:
@@ -440,6 +464,7 @@ def visualize_sequence(
     camera_poses: Sequence[Tuple[str, np.ndarray]] | None = None,
     anchor_frames: Sequence[Tuple[str, np.ndarray]] | None = None,
     ball_centers: Dict[str, Dict[int, np.ndarray]] | None = None,
+    path_positions: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     """Visualize point cloud sequence in Rerun."""
     if not frame_clouds:
@@ -517,7 +542,11 @@ def visualize_sequence(
         # Log camera pose
         pose = cam_pose_map.get(frame_id)
         if pose is not None:
-            rr.log(cam_entity, rr.Transform3D(translation=pose[:3, 3], mat3x3=pose[:3, :3]))
+            trans = pose[:3, 3]
+            # Override translation with aligned path if provided
+            if path_positions is not None and frame_id in path_positions:
+                trans = path_positions[frame_id]
+            rr.log(cam_entity, rr.Transform3D(translation=trans.astype(np.float32), mat3x3=pose[:3, :3]))
             rr.log(
                 f"{cam_entity}/axes",
                 rr.Arrows3D(
@@ -533,7 +562,7 @@ def visualize_sequence(
                     ),
                 ),
             )
-            cam_points.append(pose[:3, 3].astype(np.float32))
+            cam_points.append(trans.astype(np.float32))
             rr.log(
                 cam_path_entity,
                 rr.LineStrips3D(
@@ -679,6 +708,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=15.0, help="Playback speed for stepping through frames.")
     parser.add_argument("--point_radius", type=float, default=0.002, help="Point radius (meters) for Rerun markers.")
     parser.add_argument("--no_spawn", action="store_true", help="Do not spawn a separate Rerun viewer window.")
+    parser.add_argument("--tcp_to_zed", type=str, default="glasses_hardware/calib/T_tcp_zed.npy", help="Path to tcp->zed transform npy.")
     return parser.parse_args()
 
 
@@ -722,6 +752,26 @@ def main():
         for idx, fid in enumerate(frame_ids_arr)
     }
     print(f"[INFO] Loaded cam_to_base transforms from {cam_to_base_path} ({len(cam_to_base)} frames)")
+
+    # Load precomputed aligned cam poses (cam in ball/base frame) if available
+    aligned_cam_pose_dir = seq_path / "cam_pose_in_ball"
+    aligned_head_in_base: Dict[str, np.ndarray] = {}
+    if aligned_cam_pose_dir.exists():
+        for path in sorted(aligned_cam_pose_dir.glob("*.txt")):
+            try:
+                fid = f"{int(path.stem):06d}"
+            except ValueError:
+                continue
+            vals = np.loadtxt(path, dtype=np.float64).reshape(-1)
+            if vals.size < 3:
+                continue
+            aligned_head_in_base[fid] = vals[:3].astype(np.float32)
+        if aligned_head_in_base:
+            print(f"[INFO] Loaded {len(aligned_head_in_base)} aligned cam poses from {aligned_cam_pose_dir}")
+        else:
+            print(f"[WARN] No valid poses found in {aligned_cam_pose_dir}")
+    else:
+        print(f"[WARN] {aligned_cam_pose_dir} not found; using cam_to_base poses only.")
 
     # Transform point clouds from camera to base coordinates
     print("[INFO] Transforming point clouds from camera to base coordinate system using cam_to_base.npy")
@@ -783,6 +833,7 @@ def main():
         camera_poses=camera_poses,
         anchor_frames=anchor_frames,
         ball_centers=ball_centers_data,
+        path_positions=aligned_head_in_base if aligned_head_in_base else None,
     )
 
 
