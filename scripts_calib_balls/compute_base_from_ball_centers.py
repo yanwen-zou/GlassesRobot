@@ -23,8 +23,8 @@ of the camera origin expressed in the base frame.
 
 Example:
     python scripts_calib_balls/compute_base_from_ball_centers.py \
-        --ball-centers data/train/20251125_210453/ball_centers.txt \
-        --npy-output data/train/20251125_210453/cam_to_base.npy
+        --ball-centers data/20251130_150031/ball_centers.txt \
+        --npy-output data/20251130_150031/cam_to_base.npy
 """
 
 from __future__ import annotations
@@ -132,6 +132,7 @@ def compute_cam_to_base_transforms(
     When head_cam_poses is provided, frames that miss any ball are tracked using
     head_pos relative transforms until balls are detected again.
     """
+    # T_cam^base: convert point in camera frame to base frame
     def build_transform_from_balls(frame_id: int, balls: Dict[int, np.ndarray]) -> Optional[np.ndarray]:
         if not all(b in balls for b in (1, 2, 3)):
             return None
@@ -147,6 +148,7 @@ def compute_cam_to_base_transforms(
         return T
 
     if head_cam_poses is None:
+        print("[INFO] No head_pos provided; computing transforms only for frames with all three balls.")
         transforms: Dict[int, np.ndarray] = {}
         for frame_id, balls in centers.items():
             T = build_transform_from_balls(frame_id, balls)
@@ -167,7 +169,7 @@ def compute_cam_to_base_transforms(
     for frame_id in sorted_frames:
         if frame_id not in head_cam_poses_np:
             continue
-        T = build_transform_from_balls(frame_id, centers[frame_id])
+        T = build_transform_from_balls(frame_id, centers[frame_id]) 
         if T is not None:
             anchor_frame = frame_id
             anchor_transform = T.astype(np.float64)
@@ -188,10 +190,15 @@ def compute_cam_to_base_transforms(
     current_T_base_cam = anchor_transform
     anchor_tcp_pose, anchor_cam_pose = head_cam_poses_np[anchor_frame]
     last_tcp_pose = anchor_tcp_pose
+    last_cam_pose = anchor_cam_pose
+    print(f"[INFO] Anchor frame for tracking: {anchor_frame}")
 
     # Fixed glasses->ball transform from anchor frame: T_glass^ball = T_glass^anchor T_anchor^cam T_cam^ball
-    T_glass_ball = anchor_cam_pose @ anchor_transform
+    # anchor_cam_pose: point in anchor frame -> point in glass frame
+    T_glass_ball = anchor_cam_pose @ np.linalg.inv(anchor_transform)
     T_ball_glass = np.linalg.inv(T_glass_ball)
+    # T_ball_glass = anchor_cam_pose @ np.linalg.inv(anchor_transform)
+    # T_glass_ball = np.linalg.inv(T_ball_glass)
 
     # Track forward using head_pos when balls are missing; reset when balls return.
     all_frames = [fid for fid in sorted(set(centers.keys()) | set(head_cam_poses_np.keys())) if fid >= anchor_frame]
@@ -209,6 +216,9 @@ def compute_cam_to_base_transforms(
                 continue
             transforms[frame_id] = T
             current_T_base_cam = T.astype(np.float64)
+            t_dbg = current_T_base_cam[:3, 3]
+            print(f"[DEBUG] t_base_cam (balls) frame {frame_id}: x={t_dbg[0]:.3f} y={t_dbg[1]:.3f} z={t_dbg[2]:.3f}")
+            # print(f"[INFO] Frame {frame_id}: balls detected\n{current_T_base_cam}")
             if head_tcp_cam is not None:
                 last_tcp_pose, last_cam_pose = head_tcp_cam
             else:
@@ -225,10 +235,18 @@ def compute_cam_to_base_transforms(
             print(f"[WARN] Frame {frame_id}: no previous head_pos to track from; waiting for next frame.")
             continue
 
+        print(f"[INFO] Frame {frame_id}: tracking using head_pos relative motion.")
         _, curr_cam_pose = head_tcp_cam
         rel_glass = np.linalg.inv(last_cam_pose) @ curr_cam_pose  # glass_prev <- glass_curr
-        rel_in_ball = T_ball_glass @ rel_glass @ T_glass_ball
+        rel_glass_str = np.array2string(rel_glass, formatter={"float_kind": lambda x: f"{x:.2f}"})
+        print(f"[DEBUG] rel_glass:\n{rel_glass_str}")
+        rel_in_ball = T_ball_glass @ rel_glass @ T_glass_ball # original
+        # rel_in_ball = T_glass_ball @ rel_glass @ T_ball_glass
+        rel_in_ball_str = np.array2string(rel_in_ball, formatter={"float_kind": lambda x: f"{x:.2f}"})
+        print(f"[DEBUG] rel_in_ball:\n{rel_in_ball_str}")
         current_T_base_cam = current_T_base_cam @ rel_in_ball
+        t_dbg = current_T_base_cam[:3, 3]
+        print(f"[DEBUG] t_base_cam (tracked) frame {frame_id}: x={t_dbg[0]:.3f} y={t_dbg[1]:.3f} z={t_dbg[2]:.3f}")
         transforms[frame_id] = current_T_base_cam.astype(np.float32)
         last_tcp_pose, last_cam_pose = head_tcp_cam
 

@@ -29,8 +29,7 @@ python MBA/train_obj.py \
   --enable_mba \
   --obj_pose_mode delta
 
-  We put all prediction at the coordinate of the first frame as reference.
-  When doing inference, we transform the traj back using the cam extrinsics.
+  We put all prediction at the coordinate of ball, as well as eval.
   
   # Eval Preview
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """Apply ball masks onto original images and save visualizations.
 
 This script reads `mask_balls` and the corresponding original images
@@ -177,5 +179,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """Calculate 3D centroids of balls from masks and depth information.
 
 This script processes mask_balls data to extract 3 separate masks (id1, id2, id3) for each frame,
@@ -6,8 +8,8 @@ calculates 3D centroids using depth information in the current frame camera coor
 
 Example:
     python scripts_calib_balls/calculate_ball_centers.py \
-        --data-dir data/train/20251125_210453 \
-        --output ball_centers.txt
+        --data-dir data/20251130_150031 \
+        --output data/20251130_150031/ball_centers.txt
 """
 import argparse
 from pathlib import Path
@@ -17,6 +19,7 @@ from PIL import Image
 
 
 DEPTH_SCALE_DEFAULT = 1000.0  # RealSense depth units -> meters
+DEFAULT_MAX_RADIUS_STD_RATIO = 0.3  # max std(r) / mean(r) for boundary radii
 
 
 def load_intrinsics(path: Path) -> np.ndarray:
@@ -47,10 +50,37 @@ def load_depth(depth_path: Path, depth_scale: float) -> np.ndarray:
     return depth_m
 
 
+def save_invalid_mask_debug(
+    mask: np.ndarray,
+    boundary: np.ndarray,
+    out_dir: Path,
+    frame_id: int | None,
+    ball_id: int | None,
+    reason: str,
+) -> Path:
+    """Save an RGB visualization of an invalid mask for manual inspection."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    h, w = mask.shape[:2]
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    rgb[mask] = (0, 255, 0)  # green mask interior
+    rgb[boundary] = (255, 0, 0)  # red boundary pixels
+    frame_str = f"{frame_id:06d}" if frame_id is not None else "frame"
+    ball_str = f"id{ball_id}" if ball_id is not None else "ball"
+    filename = f"{frame_str}_{ball_str}_invalid.png"
+    out_path = out_dir / filename
+    Image.fromarray(rgb).save(out_path)
+    print(f"[WARN] Saved invalid mask debug image ({reason}) to {out_path}")
+    return out_path
+
+
 def calculate_ball_centroid(
     depth_m: np.ndarray,
     mask: np.ndarray,
     intrinsic: np.ndarray,
+    max_radius_std_ratio: float,
+    invalid_mask_output_dir: Path | None = None,
+    frame_id: int | None = None,
+    ball_id: int | None = None,
 ) -> np.ndarray | None:
     """Calculate 3D centroid of a ball from mask and depth in current frame camera coordinate system.
     
@@ -58,12 +88,54 @@ def calculate_ball_centroid(
         depth_m: Depth image in meters (H, W)
         mask: Boolean mask (H, W)
         intrinsic: Camera intrinsic matrix (3x3)
+        max_radius_std_ratio: Maximum allowed std(radius) / mean(radius) for boundary points
+        invalid_mask_output_dir: If provided, save debug PNGs for masks failing the shape check
+        frame_id: Frame identifier used in debug filenames
+        ball_id: Ball identifier used in debug filenames
         
     Returns:
         3D centroid in current frame camera coordinate system, or None if no valid points
     """
     if depth_m.shape[:2] != mask.shape[:2]:
         raise ValueError(f"Depth shape {depth_m.shape} and mask shape {mask.shape} must match.")
+
+    ys_all, xs_all = np.nonzero(mask)
+    if ys_all.size == 0 or xs_all.size == 0:
+        return None
+
+    # Boundary-based circularity check: std(radius)/mean(radius) should be small
+    padded = np.pad(mask.astype(np.uint8), 1, mode="constant", constant_values=0)
+    ksum = (
+        padded[0:-2, 0:-2] + padded[0:-2, 1:-1] + padded[0:-2, 2:] +
+        padded[1:-1, 0:-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:] +
+        padded[2:, 0:-2] + padded[2:, 1:-1] + padded[2:, 2:]
+    )
+    boundary = mask & (ksum < 9)
+    bys, bxs = np.nonzero(boundary)
+    if bys.size == 0 or bxs.size == 0:
+        return None
+    cx, cy = bxs.mean(), bys.mean()
+    radii = np.sqrt((bxs - cx) ** 2 + (bys - cy) ** 2)
+    mean_r = float(radii.mean())
+    std_r = float(radii.std())
+    if mean_r <= 1e-6:
+        return None
+    radius_ratio = std_r / mean_r
+    if radius_ratio > max_radius_std_ratio:
+        reason = (
+            f"shape_check_failed ratio={radius_ratio:.3f} "
+            f"mean_r={mean_r:.2f} std_r={std_r:.2f} boundary_pixels={bxs.size}"
+        )
+        if invalid_mask_output_dir is not None:
+            save_invalid_mask_debug(
+                mask=mask,
+                boundary=boundary,
+                out_dir=invalid_mask_output_dir,
+                frame_id=frame_id,
+                ball_id=ball_id,
+                reason=reason,
+            )
+        return None
 
     valid_mask = mask & np.isfinite(depth_m) & (depth_m > 0)
     ys, xs = np.nonzero(valid_mask)
@@ -108,6 +180,18 @@ def parse_args() -> argparse.Namespace:
         "--skip-missing",
         action="store_true",
         help="Skip frames if mask/depth is missing instead of failing.",
+    )
+    parser.add_argument(
+        "--max-radius-std-ratio",
+        type=float,
+        default=DEFAULT_MAX_RADIUS_STD_RATIO,
+        help="Maximum std(radius)/mean(radius) for boundary points; higher values are treated as broken masks (default: 0.25).",
+    )
+    parser.add_argument(
+        "--invalid-mask-output-dir",
+        type=Path,
+        default=None,
+        help="If set, save PNG debug images for masks invalidated by the shape check to this directory.",
     )
     return parser.parse_args()
 
@@ -175,12 +259,37 @@ def main():
                     continue
                 raise
 
-            centroid = calculate_ball_centroid(depth_m, mask, intrinsic)
+            mask_pixels = int(mask.sum())
+            ys_all, xs_all = np.nonzero(mask)
+            if ys_all.size and xs_all.size:
+                y_min, y_max = ys_all.min(), ys_all.max()
+                x_min, x_max = xs_all.min(), xs_all.max()
+                bbox_h = y_max - y_min + 1
+                bbox_w = x_max - x_min + 1
+                bbox_area = bbox_h * bbox_w
+            else:
+                bbox_h = bbox_w = bbox_area = 0
+            print(
+                f"[INFO] Frame {frame_id:06d} ball {ball_id} mask pixels: {mask_pixels}, "
+                f"bbox: {bbox_w}x{bbox_h} area={bbox_area}"
+            )
+
+            centroid = calculate_ball_centroid(
+                depth_m,
+                mask,
+                intrinsic,
+                max_radius_std_ratio=args.max_radius_std_ratio,
+                invalid_mask_output_dir=args.invalid_mask_output_dir,
+                frame_id=frame_id,
+                ball_id=ball_id,
+            )
             if centroid is not None:
                 results.append((frame_id, ball_id, centroid[0], centroid[1], centroid[2]))
             else:
                 if not args.skip_missing:
-                    print(f"[WARN] No valid points for ball {ball_id} in frame {frame_id:06d}")
+                    print(
+                        f"[WARN] No valid points or mask invalid for ball {ball_id} in frame {frame_id:06d}"
+                    )
         
         processed += 1
         if processed % 50 == 0:
@@ -199,4 +308,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
