@@ -22,9 +22,7 @@ python scripts_calib_balls/calculate_ball_centers.py \
 # calculate robot to base transform
 ```bash
 # change data path
-python scripts_calib_balls/calc_robot_to_base.py \ 
-        --cam_pose data/20251128_143254/robot_to_cam.npy \ 
-        --cam_to_base data/20251128_143254/cam_to_base.npy
+python scripts_calib_balls/calc_robot_to_base.py --cam_pose data/20251128_143254/robot_to_cam.npy --cam_to_base data/20251128_143254/cam_to_base.npy
 ```
 
 # visualize

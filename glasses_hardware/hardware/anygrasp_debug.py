@@ -203,7 +203,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--z_min", type=float, default=0.0, help="Minimum Z (meters) for workspace filtering")
     parser.add_argument("--z_max", type=float, default=1.5, help="Maximum Z (meters) for workspace filtering")
     parser.add_argument("--debug", action="store_true", help="Enable AnyGrasp debug visualization")
-    parser.add_argument("--lift_distance", type=float, default=0.2, help="Retract distance (m) after closing gripper")
+    parser.add_argument("--lift_distance", type=float, default=0.1, help="Retract distance (m) after closing gripper")
     parser.add_argument("--grasp_index", type=int, default=0, help="Index of grasp candidate to execute after sorting")
     parser.add_argument(
         "--cam_to_tcp",

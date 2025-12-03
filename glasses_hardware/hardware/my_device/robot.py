@@ -68,7 +68,7 @@ class FlexivRobot:
     """
     logger_name = "FlexivRobot"
 
-    def __init__(self, robot_ip_address='192.168.2.100', pc_ip_address=None, default_pose=[0.6,0,0.2,0,0,1,0], home = True):
+    def __init__(self, robot_ip_address='192.168.2.100', pc_ip_address=None, default_pose=[0.45,0,0.35,0,0,1,0], home = True):
         if pc_ip_address is None:
             pc_ip_address = get_local_ip(robot_ip_address)
         
@@ -326,7 +326,7 @@ class FlexivGripper:
         return self.gripper_state.width  
     
 if __name__ == "__main__":
-    robot = FlexivRobot(home=True)
+    robot = FlexivRobot()
     gripper = FlexivGripper(robot)
 
     # 获取初始位姿，作为运动中心点

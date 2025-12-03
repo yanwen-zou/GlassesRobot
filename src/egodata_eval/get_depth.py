@@ -43,7 +43,8 @@ class DepthEstimator:
         # Real-time leaning defaults
         cfg["valid_iters"] = int(cfg.get("valid_iters", 24))
         cfg["hiera"] = int(cfg.get("hiera", 0))
-        cfg["scale"] = float(cfg.get("scale", 1.0))
+        cfg["scale"] = float(cfg.get("scale", 1))
+        print(f"[INFO] FoundationStereo config: scale={cfg['scale']}")
         cfg["mixed_precision"] = True
 
         self.args = OmegaConf.create(cfg)

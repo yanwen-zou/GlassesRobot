@@ -64,8 +64,8 @@ class TrajectoryPredictor:
         state = torch.load(str(ckpt_path), map_location=self.device)
         self.model.load_state_dict(state, strict=False)
 
-    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
-        # Backproject depth to camera xyz
+    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: np.ndarray | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Backproject depth to xyz and optionally convert to base (ball) frame."""
         h, w = depth_m.shape
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
@@ -79,7 +79,13 @@ class TrajectoryPredictor:
         zs = zs[valid].astype(np.float32)
         xs3 = (xs - cx) * zs / fx
         ys3 = (ys - cy) * zs / fy
-        xyz = np.stack([xs3, ys3, zs], axis=-1)
+        xyz_cam = np.stack([xs3, ys3, zs], axis=-1)
+        if T_base_cam is not None:
+            R = T_base_cam[:3, :3].astype(np.float32)
+            t = T_base_cam[:3, 3].astype(np.float32)
+            xyz = (R @ xyz_cam.T).T + t
+        else:
+            xyz = xyz_cam
         # Colors to [0,1]
         rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
         colors = rgb[ys.astype(int), xs.astype(int)].astype(np.float32) / 255.0
@@ -141,10 +147,16 @@ class TrajectoryPredictor:
             delta_full = np.concatenate([delta_xyz, delta_r6], axis=1)
         return delta_full.astype(np.float32)
 
-    def predict_and_overlay(self, image_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, pose_cam_ob: np.ndarray) -> np.ndarray:
-        feats, coords = self._make_sparse_input(image_bgr, depth_m, K)
+    def predict_and_overlay(self, image_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, pose_cam_ob: np.ndarray, T_base_cam: np.ndarray | None = None) -> np.ndarray:
+        # Convert object pose to base frame if provided
+        if T_base_cam is not None:
+            pose_base_ob = T_base_cam @ pose_cam_ob
+        else:
+            pose_base_ob = pose_cam_ob
+
+        feats, coords = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
         st = ME.SparseTensor(feats, coords)
-        cur_obj = self._current_obj_vec(pose_cam_ob)
+        cur_obj = self._current_obj_vec(pose_base_ob)
         with torch.no_grad():
             outputs = self.model(st, actions=None, batch_size=1, current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device))
         if "obj_pred" not in outputs:
@@ -157,14 +169,22 @@ class TrajectoryPredictor:
         # Deltas are not used in current execution path; keep only absolute trajectory
 
         # Debug prints to compare current FP pose and first predicted absolute pose
-        fp_xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
+        # fp_xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
+        fp_xyz6d = mat_to_xyz_rot(pose_base_ob, rotation_rep="rotation_6d").astype(np.float32)
         traj_first_xyz6d = obj_traj_ref[0, :9].astype(np.float32)
         np.set_printoptions(precision=4, suppress=True)
         print("[DEBUG] FP xyz6d:", fp_xyz6d)
         print("[DEBUG] Traj first xyz6d:", traj_first_xyz6d)
 
         pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3+6])
-        points_cam = pose_mats_ref[:, :3, 3]
+        predicted_points = pose_mats_ref[:, :3, 3]  # (N,3)
+        if T_base_cam is not None:
+            T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
+            R = T_cam_base[:3, :3].astype(np.float32)
+            t = T_cam_base[:3, 3].astype(np.float32)
+            points_cam = (R @ predicted_points.T).T + t
+        else:
+            points_cam = predicted_points
         self._cached_points_cam = points_cam.copy()
         overlay = _project_points_with_gradient(image_bgr, K, points_cam,
                                                 color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
@@ -196,6 +216,7 @@ def run():
     import argparse
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
+    ap.add_argument("--base-to-robot-npy", type=str, default='glasses_hardware/calib/T_robot_base.npy', help="Path to T_robot_base.npy (maps base->robot). Default: identity.")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = 10
@@ -205,35 +226,138 @@ def run():
     out_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "stream.mp4"
     ZEDCamera = _import_zed_class()
+    cam = ZEDCamera(resolution="WVGA", fps=30)
     # Initialize depth estimator and load model at start
     print("[INFO] Loading FoundationStereo depth model...")
     depth_est = DepthEstimator()
     
-    # One-time ArUco calibration to compute T_base_cam
+    # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'
     calib_dir.mkdir(parents=True, exist_ok=True)
     T_base_cam = None
+    # Optional base->robot transform (default identity)
+    T_robot_base = np.eye(4, dtype=np.float32)
+    if args.base_to_robot_npy:
+        loaded = _load_calib_mat_safe(Path(args.base_to_robot_npy))
+        if loaded is not None:
+            T_robot_base = loaded.astype(np.float32)
+            print(f"[INFO] Loaded T_robot_base from {args.base_to_robot_npy}")
+        else:
+            print(f"[WARN] Failed to load T_robot_base from {args.base_to_robot_npy}; using identity.")
 
-    T_base_aruco = _load_calib_mat_safe(calib_dir / 'T_base_aruco.npy')
+    def move_piper_to_init_angles():
+        """Move Piper arm to a known joint pose before ball calibration."""
+        try:
+            from piper_sdk import C_PiperInterface_V2
+        except Exception as exc:
+            print(f"[WARN] piper_sdk not available; skip Piper init. ({exc})")
+            return
+        try:
+            piper = C_PiperInterface_V2("can0")
+            piper.ConnectPort()
+            while not piper.EnablePiper():
+                time.sleep(0.01)
+            # target angles in degrees
+            target_deg = [-30.0, 18.0, -10.0, 0.0, -2.0, 0.0]
+            factor = 57295.7795  # rad -> scaled int (1000 * deg)
+            rad = np.deg2rad(target_deg)
+            joints = [int(r * factor) for r in rad]
+            piper.MotionCtrl_2(0x01, 0x01, 60, 0x00)
+            piper.JointCtrl(*joints)
+            print(f"[INFO] Moved Piper joints to deg {target_deg}")
+        except Exception as exc:
+            print(f"[WARN] Piper init move failed: {exc}")
 
-    print("[INFO] Detecting ArUco once for T_cam_aruco...")
-    calibrator = piper_calib.ArucoCalibrator(marker_length_m=0.045, K=depth_est.K.astype(np.float32))
+    # 1) Try ball-based calibration: ask the user to click three balls once
+    #    (ball order: id1, id2, id3). Ball 2 is origin, 2->3 defines X, 2->1 defines Y.
+    def calibrate_from_three_balls(cam_handle) -> np.ndarray | None:
+        move_piper_to_init_angles()
+        print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
+        first = cam_handle.read_stereo()
+        if first is None:
+            print("[WARN] Could not grab frame for ball calibration.")
+            return None
+        frame, frame_right = first
+        K_rs = depth_est.K.astype(np.float32)
+        pts: list[tuple[float, float]] = []
 
-    T_cam_aruco = calibrator.detect_and_cache(calib_dir / 'T_zed_aruco.npy', timeout_s=5.0, show=True)
-    T_base_cam = T_base_aruco @ np.linalg.inv(T_cam_aruco)
-    print("[OK] Computed T_base_cam from T_base_aruco and T_cam_aruco")
+        click_state = {"done": False}
 
-    calibrator.close()
+        def _on_mouse(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 3:
+                pts.append((float(x), float(y)))
+                print(f"[INFO] Clicked point {len(pts)}: ({x}, {y})")
+                if len(pts) == 3:
+                    click_state["done"] = True
 
+        win_calib = "Ball Calibration"
+        cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(win_calib, _on_mouse)
+        disp = frame.copy()
+        while True:
+            cv2.imshow(win_calib, disp)
+            k = cv2.waitKey(10) & 0xFF
+            if click_state["done"] or k in (27, ord('q')):
+                break
+        cv2.destroyWindow(win_calib)
+        if len(pts) != 3:
+            print("[WARN] Need exactly 3 clicks for ball calibration; fallback to ArUco.")
+            return None
 
-    # Open ZED for main loop
-    cam = ZEDCamera(resolution="WVGA", fps=30)
+        # Depth for clicked points + mask-based centroid refinement
+        depth_m = depth_est.depth(frame, frame_right)
+        fx, fy = K_rs[0, 0], K_rs[1, 1]
+        cx, cy = K_rs[0, 2], K_rs[1, 2]
+        print(f"[INFO] intrinsics fx={fx}, fy={fy}, cx={cx}, cy={cy}")
+
+        frame_rgb = frame[..., ::-1].copy()
+
+        def centroid_from_mask(mask: np.ndarray) -> np.ndarray | None:
+            valid = (mask.astype(bool)) & np.isfinite(depth_m) & (depth_m > 1e-6)
+            if valid.sum() < 10:
+                return None
+            vs, us = np.nonzero(valid)
+            zs = depth_m[valid]
+
+            x = (us - cx) * zs / fx
+            y = (vs - cy) * zs / fy
+            xyz = np.stack([x, y, zs], axis=-1)
+            return xyz.mean(axis=0).astype(np.float32)
+
+        cam_pts = []
+        for idx, (u, v) in enumerate(pts, start=1):
+            mask = None
+            try:
+                mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
+                if isinstance(mask, list):
+                    mask = mask[0]
+            except Exception as exc:
+                print(f"[WARN] SAM mask failed for point {idx}: {exc}")
+
+            centroid = centroid_from_mask(mask) if mask is not None else None
+            if centroid is not None:
+                cam_pts.append(centroid)
+                print(f"[INFO] Mask centroid for p{idx}: {centroid}")
+                continue
+
+        p1, p2, p3 = cam_pts
+        from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+
+        R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
+        T = np.eye(4, dtype=np.float32)
+        T[:3, :3] = R_base_cam
+        T[:3, 3] = t_base_cam
+        print("[OK] Ball calibration produced T_base_cam:")
+        print(T)
+        return T
+
+    T_base_cam = calibrate_from_three_balls(cam)
 
     # Initialize robot and gripper
     print("[INFO] Initializing robot and gripper...")
     robot = FlexivRobot(home=False)
-    gripper = FlexivGripper(robot,home=False)
+    gripper = FlexivGripper(robot)
 
     disp_w, disp_h = 640, 360 # target working/display size
     win = "ZED Stream (click to segment)"
@@ -353,10 +477,12 @@ def run():
                         if (frame_idx % update_interval == 0):
                             print("[INFO] Running trajectory prediction...")
                             frame = traj_pred.predict_and_overlay(
-                                frame, depth_m, K_rs,
-                                pose_est.pose_cam_ob.astype(np.float32)
+                                frame,
+                                depth_m,
+                                K_rs,
+                                pose_est.pose_cam_ob.astype(np.float32),
+                                T_base_cam=T_base_cam,
                             )
-
                             # Execute first N steps relative to current TCP using robot_replay logic
                             if traj_pred.last_traj_denorm is not None:
                                 if T_base_cam is None:
@@ -376,32 +502,37 @@ def run():
                                             p0_cam = xyz_abs_cam[0]
                                             # Relative-to-first in base frame
                                             base_rel_pts = (R_base_cam @ (xyz_abs_cam - p0_cam).T).T  # (N,3)
+                                            # Convert relative steps into robot frame if a mapping is provided
+                                            if T_robot_base is not None:
+                                                R_robot_base = T_robot_base[:3, :3].astype(np.float32)
+                                                steps_pts_robot = (R_robot_base @ base_rel_pts[1:1+int(steps_to_execute), :].T).T
+                                            else:
+                                                steps_pts_robot = base_rel_pts[1:1+int(steps_to_execute), :]
                                             # Take the first `steps_to_execute` non-zero steps starting from index 1
-                                            steps_pts = base_rel_pts[1:1+int(steps_to_execute), :]
                                             steps_grip = None
                                             if grip_seq is not None:
                                                 steps_grip = grip_seq[1:1+int(steps_to_execute)]
-                                            if steps_pts.size > 0:
+                                            if steps_pts_robot.size > 0:
                                                 # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
                                                 curr_pose7 = robot.get_tcp_pose().astype(np.float32)
                                                 start_xyz = curr_pose7[:3].astype(np.float32)
                                                 start_quat = curr_pose7[3:7].astype(np.float32)
                                                 open_width = getattr(gripper, 'max_width', 0.085)
                                                 open_thresh = 0.8
-                                                for i in range(steps_pts.shape[0]):
-                                                    xyz = start_xyz + steps_pts[i]
+                                                for i in range(steps_pts_robot.shape[0]):
+                                                    xyz = start_xyz + steps_pts_robot[i]
                                                     pose7 = np.concatenate([xyz, start_quat], axis=0).astype(np.float32)
                                                     # Gripper control if grip available
                                                     if steps_grip is not None and i < len(steps_grip):
                                                         grip_val = float(steps_grip[i])
                                                         width_cmd = open_width if grip_val > open_thresh else 0.0
-                                                        print(f"[EVAL] step {i+1}/{steps_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
+                                                        print(f"[EVAL] step {i+1}/{steps_pts_robot.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
                                                         try:
                                                             gripper.move(width_cmd)
                                                         except Exception:
                                                             pass
-                                                    print(f"[EVAL] send step {i+1}/{steps_pts.shape[0]} pose7=", np.round(pose7, 6))
-                                                    robot.send_tcp_pose(pose7)
+                                                    print(f"[EVAL] send step {i+1}/{steps_pts_robot.shape[0]} pose7=", np.round(pose7, 6))
+                                                    # robot.send_tcp_pose(pose7)
                                                     time.sleep(0.05)
                                         else:
                                             print("[INFO] Predicted traj has <2 points; skip execution.")

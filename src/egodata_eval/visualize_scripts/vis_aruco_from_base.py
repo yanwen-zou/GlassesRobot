@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-Visualize the ArUco marker pose relative to the robot/world base frame.
+Load a single transform T_robot_base (4x4) and visualize it with rerun.
 
-This recreates the same transform composition used in
-`glasses_hardware/calib/move_tcp_to_aruco_offset.py` (minus any target offset):
-
-    T_world_aruco = T_world_tcp @ T_tcp_cam @ T_cam_aruco
-
-where T_world_tcp is the TCP pose in world coordinates, T_tcp_cam is `eih_camT`
-(tcp -> cam), and T_cam_aruco is the camera -> ArUco pose.
+Interpretation:
+    - Input matrix maps points from base frame to robot frame.
+    - We display both frames: base at the origin, and the robot frame placed by T_robot_base.
 """
 from __future__ import annotations
 
@@ -18,27 +14,11 @@ from pathlib import Path
 import numpy as np
 
 
-RDF_TO_FRU = np.array(
-    [
-        [0.0, 0.0, 1.0],
-        [1.0, 0.0, 0.0],
-        [0.0, -1.0, 0.0],
-    ],
-    dtype=np.float32,
-)
-RDF_TO_FRU_H = np.eye(4, dtype=np.float32)
-RDF_TO_FRU_H[:3, :3] = RDF_TO_FRU
-
-
 def _load_transform(path: Path) -> np.ndarray:
     T = np.load(path)
     if T.shape != (4, 4):
         raise ValueError(f"Expected 4x4 SE3 matrix at {path}, got {T.shape}")
     return T.astype(np.float32)
-
-
-def _rdf_to_fru_transform(T_rdf: np.ndarray) -> np.ndarray:
-    return (RDF_TO_FRU_H @ T_rdf @ np.linalg.inv(RDF_TO_FRU_H)).astype(np.float32)
 
 
 def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
@@ -73,28 +53,18 @@ def _log_frame(rr, name: str, T: np.ndarray, axis_len: float) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize ArUco pose with the robot/world base as origin")
-    parser.add_argument("--spawn", action="store_true", help="Spawn a standalone Rerun viewer window")
+    parser = argparse.ArgumentParser(description="Visualize T_robot_base with rerun (base at origin).")
+    parser.add_argument(
+        "--T_robot_base",
+        type=Path,
+        default=Path("glasses_hardware/calib/T_robot_base.npy"),
+        help="4x4 SE3 mapping base frame -> robot frame.",
+    )
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length in meters")
-    parser.add_argument(
-        "--T_base_aruco",
-        type=Path,
-        default=Path("glasses_hardware/calib/T_base_aruco.npy"),
-        help="4x4 SE3 from base/world to ArUco (saved without offset)",
-    )
-    parser.add_argument(
-        "--T_zed_aruco",
-        type=Path,
-        default=Path("T_zed_aruco.npy"),
-        help="Cached 4x4 transform from ArUco to ZED",
-    )
+    parser.add_argument("--spawn", action="store_true", help="Spawn a standalone Rerun viewer window")
     args = parser.parse_args()
 
-    T_base_aruco = _load_transform(args.T_base_aruco)
-    T_zed_aruco_rdf = _load_transform(args.T_zed_aruco)
-
-    T_zed_aruco = (T_zed_aruco_rdf).astype(np.float32)
-    T_base_zed = T_base_aruco @ np.linalg.inv(T_zed_aruco)
+    T_robot_base = _load_transform(args.T_robot_base)
     T_base = np.eye(4, dtype=np.float32)
 
     try:
@@ -102,38 +72,27 @@ def main():
     except Exception as exc:
         raise RuntimeError("Rerun package is required. Install with `pip install rerun-sdk`.") from exc
 
-    rr.init("Base/Aruco Frames", spawn=args.spawn)
+    rr.init("T_robot_base Visualization", spawn=args.spawn)
     try:
         rr.log("world", rr.ViewCoordinates.FRU)
     except Exception:
         pass
 
-    _log_frame(rr, "base_origin", T_base, args.axis_len)
-    _log_frame(rr, "aruco", T_base_aruco, args.axis_len)
-    _log_frame(rr, "zed", T_base_zed.astype(np.float32), args.axis_len)
+    _log_frame(rr, "base", T_base, args.axis_len)
+    _log_frame(rr, "robot", T_robot_base, args.axis_len)
 
-    translation = T_base_aruco[:3, 3].astype(np.float32)
+    # Arrow from base to robot origin for quick spatial cue
     rr.log(
-        "frames/base_origin/aruco_offset",
+        "frames/base/robot_offset",
         rr.Arrows3D(
             origins=np.zeros((1, 3), dtype=np.float32),
-            vectors=translation[None, :],
+            vectors=T_robot_base[:3, 3][None, :].astype(np.float32),
             colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
             radii=np.full(1, args.axis_len * 0.03, dtype=np.float32),
         ),
     )
 
-    rr.log(
-        "frames/base_origin/zed_offset",
-        rr.Arrows3D(
-            origins=np.zeros((1, 3), dtype=np.float32),
-            vectors=T_base_zed[:3, 3][None, :].astype(np.float32),
-            colors=np.array([[0, 255, 255, 255]], dtype=np.uint8),
-            radii=np.full(1, args.axis_len * 0.03, dtype=np.float32),
-        ),
-    )
-
-    print("[INFO] Logged base origin, ZED, and ArUco frames to Rerun.")
+    print(f"[OK] Loaded {args.T_robot_base} and logged frames 'base' and 'robot'.")
 
 
 if __name__ == "__main__":

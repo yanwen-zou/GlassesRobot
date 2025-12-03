@@ -84,7 +84,9 @@ def _project_points_with_gradient(image: np.ndarray,
         return image
     overlay = image.copy()
     num_pts = len(points_cam)
+    # print(f"[DEBUG] camera_intrinstic: {cam_intr}")
     for idx, pt in enumerate(points_cam):
+        # print(f"[DEBUG] point {idx}: {pt}")
         z = float(pt[2])
         if z <= 1e-6:
             continue
