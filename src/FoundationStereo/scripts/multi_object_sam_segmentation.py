@@ -86,6 +86,7 @@ class WorkingDirectory:
 def load_frames_for_episode(episode_dir: Path) -> Tuple[Optional[Path], List[str]]:
     jpg_dir = episode_dir / "jpg"
     color_dir = episode_dir / "color"
+    rgb_dir = episode_dir / "rgb"
 
     if jpg_dir.is_dir():
         frame_dir = jpg_dir
@@ -93,6 +94,9 @@ def load_frames_for_episode(episode_dir: Path) -> Tuple[Optional[Path], List[str
     elif color_dir.is_dir():
         frame_dir = color_dir
         extensions = {".png", ".PNG"}
+    elif rgb_dir.is_dir():
+        frame_dir = rgb_dir
+        extensions = {".png", ".PNG", ".jpg", ".jpeg", ".JPG", ".JPEG"}
     else:
         return None, []
 
@@ -228,9 +232,17 @@ def main(data_root: Path, num_objects: int, output_dirname: str):
 
         frame_dir, frame_names = load_frames_for_episode(episode_dir)
         if not frame_names:
-            print(f"⚠️ 跳过 {episode_dir.name}: 未找到可用帧")
+            # Only warn on directories that look like episodes; silently skip others like depth/.
+            if episode_dir.name.lower() not in {"depth"}:
+                print(f"⚠️ 跳过 {episode_dir.name}: 未找到可用帧")
             continue
         episodes.append((episode_dir, frame_dir, frame_names))
+
+    # If no episode subdirs were found, try treating data_root itself as an episode.
+    if not episodes:
+        frame_dir, frame_names = load_frames_for_episode(data_root)
+        if frame_names:
+            episodes.append((data_root, frame_dir, frame_names))
 
     if not episodes:
         print(f"⚠️ 未在 {data_root} 找到可处理的 episode 目录")

@@ -363,7 +363,7 @@ def run():
                                     print("[WARN] T_base_cam unavailable; skipping execution.")
                                 else:
                                     try:
-                                        steps_to_execute = 5  # how many relative steps to send each update
+                                        steps_to_execute = 10  # how many relative steps to send each update
                                         # Absolute predicted points in camera (ZED) frame
                                         xyz_abs_cam = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
                                         # Gripper signal per step if available (10th channel)
