@@ -397,7 +397,7 @@ def run():
 
     # Try initialize trajectory predictor (optional)
 
-    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt))
+    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt)) # current traj pred is under base frame
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
 
     frame_idx = 0
@@ -490,24 +490,25 @@ def run():
                                 else:
                                     try:
                                         steps_to_execute = 10  # how many relative steps to send each update
-                                        # Absolute predicted points in camera (ZED) frame
-                                        xyz_abs_cam = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
+                                        # absolute predicted trajectory, currently under base frame 
+                                        xyz_abs_pts = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
                                         # Gripper signal per step if available (10th channel)
                                         grip_seq = None
                                         if traj_pred.last_traj_denorm.shape[1] > 9:
                                             grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
-                                        if xyz_abs_cam.shape[0] >= 2:
-                                            # Base<-cam rotation
-                                            R_base_cam = T_base_cam[:3, :3].astype(np.float32)
-                                            p0_cam = xyz_abs_cam[0]
+                                        if xyz_abs_pts.shape[0] >= 2:
+                                            p0_base = xyz_abs_pts[0]
                                             # Relative-to-first in base frame
-                                            base_rel_pts = (R_base_cam @ (xyz_abs_cam - p0_cam).T).T  # (N,3)
+                                            xyz_rel_pts = xyz_abs_pts - p0_base # (N,3)
                                             # Convert relative steps into robot frame if a mapping is provided
                                             if T_robot_base is not None:
+                                                T_base_robot = np.linalg.inv(T_robot_base).astype(np.float32)
                                                 R_robot_base = T_robot_base[:3, :3].astype(np.float32)
-                                                steps_pts_robot = (R_robot_base @ base_rel_pts[1:1+int(steps_to_execute), :].T).T
+                                                R_base_robot = T_base_robot[:3, :3].astype(np.float32)
+                                                steps_pts_robot = (R_robot_base @ xyz_rel_pts[1:1+int(steps_to_execute), :].T @ R_base_robot).T
+                                                print(f"[INFO] steps_pts_robot: {steps_pts_robot}")
                                             else:
-                                                steps_pts_robot = base_rel_pts[1:1+int(steps_to_execute), :]
+                                                raise ValueError("T_robot_base is required for robot execution.")
                                             # Take the first `steps_to_execute` non-zero steps starting from index 1
                                             steps_grip = None
                                             if grip_seq is not None:
