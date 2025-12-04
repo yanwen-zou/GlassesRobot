@@ -40,6 +40,7 @@ class RealWorldDataset(Dataset):
         with_cloud = False,
         with_obj_action = False,
         cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
+        head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed.npy",
     ):
         assert split in ['train', 'eval', 'all']
 
@@ -115,16 +116,16 @@ class RealWorldDataset(Dataset):
             cam_K = cam_K.reshape(3, 3)
             self.seq_intrinsics[demo] = cam_K
 
-            cam_to_base_map = self._load_cam_to_base(demo_path)
-            self.seq_cam_to_base[demo] = cam_to_base_map
-
-            extr_dir = os.path.join(demo_path, "head_pos")
-            if os.path.isdir(extr_dir):
-                extr_map = self._load_camera_extrinsics_from_dir(extr_dir)
+            head_pos_dir = os.path.join(demo_path, "head_pos")
+            if os.path.isdir(head_pos_dir):
+                extr_map = self._load_camera_extrinsics_from_dir(head_pos_dir, head_to_zed_path)
             else:
                 extr_map = {}
                 warnings.warn(f"[RealWorldDataset] Missing head_pos directory in {demo_path}; using identity extrinsics.")
             self.seq_camera_extrinsics[demo] = extr_map
+
+            cam_to_base_map = self._load_cam_to_base(demo_path, frame_ids, extr_map)
+            self.seq_cam_to_base[demo] = cam_to_base_map
             self.seq_ref_frame[demo] = int(frame_ids[0])
             self.seq_num_frames[demo] = len(frame_ids)
             self.seq_last_frame_id[demo] = frame_ids[-1]
@@ -189,7 +190,15 @@ class RealWorldDataset(Dataset):
         obj_list[:, :3] = (obj_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         return obj_list
 
-    def _load_camera_extrinsics_from_dir(self, directory):
+    def _load_camera_extrinsics_from_dir(self, directory, head_to_zed_path):
+        # Load head to zed transformation(from calibration)
+        if os.path.exists(head_to_zed_path):
+            T_head_zed = np.load(head_to_zed_path).astype(np.float32)
+            if T_head_zed.shape != (4, 4):
+                raise ValueError(f"Invalid head to zed transformation shape {T_head_zed.shape} in {head_to_zed_path}")
+        else:
+            raise FileNotFoundError(f"Head to zed calibration file missing: {head_to_zed_path}")
+        
         extr_map = {}
         files = [f for f in os.listdir(directory) if f.lower().endswith(".txt")]
         if not files:
@@ -239,44 +248,72 @@ class RealWorldDataset(Dataset):
                 raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {path}")
 
             key = sort_key(fname)
-            extr_map[key] = mat.astype(np.float32)
+            extr_map[key] = mat.astype(np.float32) @ T_head_zed # transform from head to zed
         return extr_map
 
-    def _load_cam_to_base(self, demo_path):
-        """Load camera->base transforms (per-frame T_base_cam) from cam_to_base.npy or cam_to_base.txt."""
-        cam_to_base_map = {}
-        npy_path = os.path.join(demo_path, "cam_to_base.npy")
-        txt_path = os.path.join(demo_path, "cam_to_base.txt")
-        if os.path.exists(npy_path):
-            data = np.load(npy_path, allow_pickle=True).item()
-            frame_ids = data.get("frame_ids")
-            transforms = data.get("transforms")
-            if frame_ids is None or transforms is None:
-                warnings.warn(f"[RealWorldDataset] cam_to_base.npy missing expected keys in {demo_path}; using identity.")
-                return cam_to_base_map
-            for fid, mat in zip(frame_ids, transforms):
-                cam_to_base_map[f"{int(fid):06d}"] = mat.astype(np.float32)
-            return cam_to_base_map
-        if os.path.exists(txt_path):
-            try:
-                with open(txt_path, "r") as f:
-                    lines = f.readlines()
-                for line in lines[1:]:
-                    parts = line.strip().split()
-                    if len(parts) != 13:
-                        continue
-                    fid = int(parts[0])
-                    vals = list(map(float, parts[1:]))
-                    R = np.array(vals[:9], dtype=np.float32).reshape(3, 3)
-                    t = np.array(vals[9:], dtype=np.float32)
-                    T = np.eye(4, dtype=np.float32)
-                    T[:3, :3] = R
-                    T[:3, 3] = t
-                    cam_to_base_map[f"{fid:06d}"] = T
-            except Exception as exc:
-                warnings.warn(f"[RealWorldDataset] Failed to load cam_to_base.txt in {demo_path}: {exc}")
+    def _load_cam_to_base(self, demo_path, frame_ids, extr_map):
+        """Load T_base_cam using first-frame anchor + head_pos relative motion.
+
+        The first cam_to_base is taken from cam_to_base.[npy|txt] at the
+        reference frame, and all other frames are derived by chaining the
+        relative head_pos change from that reference.
+        """
+
+        def _load_anchor_map():
+            cam_to_base_map_local = {}
+            npy_path = os.path.join(demo_path, "cam_to_base.npy")
+            if os.path.exists(npy_path):
+                data = np.load(npy_path, allow_pickle=True).item()
+                frame_ids_file = data.get("frame_ids")
+                transforms = data.get("transforms")
+                if frame_ids_file is None or transforms is None:
+                    warnings.warn(f"[RealWorldDataset] cam_to_base.npy missing expected keys in {demo_path}; using identity.")
+                    return cam_to_base_map_local
+                for fid, mat in zip(frame_ids_file, transforms):
+                    cam_to_base_map_local[f"{int(fid):06d}"] = mat.astype(np.float32)
+                return cam_to_base_map_local
+            else:
+                warnings.warn(f"[RealWorldDataset] cam_to_base not found in {demo_path}; using identity.")
+            return cam_to_base_map_local
+
+        file_map = _load_anchor_map()
+
+        if file_map:
+            anchor_key = sorted(file_map.keys())[0]
+            T_base_cam0 = file_map[anchor_key]
         else:
-            warnings.warn(f"[RealWorldDataset] cam_to_base not found in {demo_path}; using identity.")
+            anchor_key = f"{int(frame_ids[0]):06d}" if frame_ids else "000000"
+            T_base_cam0 = np.eye(4, dtype=np.float32)
+            warnings.warn(f"[RealWorldDataset] Using identity T_base_cam for {demo_path} (no cam_to_base file found).")
+
+        if not extr_map:
+            return {f"{int(fid):06d}": T_base_cam0.copy() for fid in frame_ids}
+
+        try:
+            anchor_int = int(anchor_key)
+        except Exception:
+            anchor_int = None
+
+        if anchor_int is None or anchor_int not in extr_map:
+            warnings.warn(f"[RealWorldDataset] Missing head_pos for anchor frame {anchor_key}; keeping anchor for all frames.")
+            return {f"{int(fid):06d}": T_base_cam0.copy() for fid in frame_ids}
+
+        T_world_cam0 = extr_map[anchor_int]
+        cam_to_base_map = {}
+        prev_T = T_base_cam0
+        for fid in frame_ids:
+            fid_int = int(fid)
+            fid_key = f"{fid_int:06d}"
+            if fid_int not in extr_map:
+                warnings.warn(f"[RealWorldDataset] Missing head_pos for frame {fid_key}; reusing previous cam_to_base.")
+                cam_to_base_map[fid_key] = prev_T.copy()
+                continue
+            T_world_cam = extr_map[fid_int]
+            T_cam0_cam = np.linalg.inv(T_world_cam0) @ T_world_cam # cam -> cam0
+            T_base_cam = T_base_cam0 @ T_cam0_cam
+            cam_to_base_map[fid_key] = T_base_cam.astype(np.float32)
+            prev_T = T_base_cam
+
         # Optional rotation noise
         if self.cam_to_base_rot_noise_std > 0.0:
             def _rand_rot(std: float) -> np.ndarray:
@@ -313,7 +350,7 @@ class RealWorldDataset(Dataset):
         warnings.warn(f"[{warn_prefix}] Missing camera extrinsic for seq={seq_id} frame={frame_idx}; using identity.")
         return np.eye(4, dtype=np.float32)
 
-    def load_point_cloud(self, colors, depths, cam_intrinsic, depth_scale=1000.0):
+    def load_point_cloud(self, colors, depths, cam_intrinsic, depth_scale=1000.0, T_base_cam=None):
         h, w = depths.shape
         fx, fy = cam_intrinsic[0, 0], cam_intrinsic[1, 1]
         cx, cy = cam_intrinsic[0, 2], cam_intrinsic[1, 2]
@@ -329,7 +366,15 @@ class RealWorldDataset(Dataset):
         cloud = cloud.voxel_down_sample(self.voxel_size)
         points = np.array(cloud.points)
         colors = np.array(cloud.colors)
-        return points.astype(np.float32), colors.astype(np.float32)
+        points = points.astype(np.float32)
+        colors = colors.astype(np.float32)
+
+        if T_base_cam is not None:
+            ones = np.ones((points.shape[0], 1), dtype=np.float32)
+            homo = np.concatenate([points, ones], axis=1)
+            points = (T_base_cam @ homo.T).T[:, :3]
+
+        return points, colors
 
     def __getitem__(self, index):
         data_path = self.data_paths[index]
@@ -378,17 +423,10 @@ class RealWorldDataset(Dataset):
         # point clouds
         clouds = []
         for i, frame_id in enumerate(obs_frame_ids):
-            points, colors = self.load_point_cloud(colors_list[i], depths_list[i], cam_intrinsic)
             T_base_cam = self._get_cam_to_base(seq_id, frame_id)
-            ones = np.ones((points.shape[0], 1), dtype=np.float32)
-            homo = np.concatenate([points, ones], axis=1)
-            points_base = (T_base_cam @ homo.T).T[:, :3]
-            # x_mask = ((points[:, 0] >= WORKSPACE_MIN[0]) & (points[:, 0] <= WORKSPACE_MAX[0]))
-            # y_mask = ((points[:, 1] >= WORKSPACE_MIN[1]) & (points[:, 1] <= WORKSPACE_MAX[1]))
-            # z_mask = ((points[:, 2] >= WORKSPACE_MIN[2]) & (points[:, 2] <= WORKSPACE_MAX[2]))
-            # mask = (x_mask & y_mask & z_mask)
-            # points = points[mask]
-            # colors = colors[mask]
+            points_base, colors = self.load_point_cloud(
+                colors_list[i], depths_list[i], cam_intrinsic, depth_scale=1000.0, T_base_cam=T_base_cam
+            )
             # apply imagenet normalization
             colors = (colors - IMG_MEAN) / IMG_STD
             cloud = np.concatenate([points_base, colors], axis = -1)
