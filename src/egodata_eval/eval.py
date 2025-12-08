@@ -48,6 +48,7 @@ class TrajectoryPredictor:
         self.voxel_size = voxel_size
         self._cached_points_cam: np.ndarray | None = None
         self.last_traj_denorm: np.ndarray | None = None
+        self.last_pose_mats_base: np.ndarray | None = None
         self.model = RISE(num_action=num_action,
                           input_dim=6,
                           obs_feature_dim=512,
@@ -165,7 +166,7 @@ class TrajectoryPredictor:
         obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
         # In delta mode, model already returns absolute poses relative to current pose; just denormalize translation.
         obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
-        self.last_traj_denorm = obj_traj_ref
+        self.last_traj_denorm = obj_traj_ref #in base frame
         # Deltas are not used in current execution path; keep only absolute trajectory
 
         # Debug prints to compare current FP pose and first predicted absolute pose
@@ -177,6 +178,7 @@ class TrajectoryPredictor:
         print("[DEBUG] Traj first xyz6d:", traj_first_xyz6d)
 
         pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3+6])
+        self.last_pose_mats_base = pose_mats_ref.astype(np.float32)
         predicted_points = pose_mats_ref[:, :3, 3]  # (N,3)
         if T_base_cam is not None:
             T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
@@ -259,7 +261,7 @@ def run():
             while not piper.EnablePiper():
                 time.sleep(0.01)
             # target angles in degrees
-            target_deg = [-30.0, 18.0, -10.0, 0.0, -2.0, 0.0]
+            target_deg = [-20.0, 24.0, -34.0, 0.0, 20.0, 0.0]
             factor = 57295.7795  # rad -> scaled int (1000 * deg)
             rad = np.deg2rad(target_deg)
             joints = [int(r * factor) for r in rad]
@@ -268,12 +270,18 @@ def run():
             print(f"[INFO] Moved Piper joints to deg {target_deg}")
         except Exception as exc:
             print(f"[WARN] Piper init move failed: {exc}")
+        # Initialize robot and gripper
+    print("[INFO] Initializing robot and gripper...")
+    robot = FlexivRobot(home=False)
+    gripper = FlexivGripper(robot)
+
 
     # 1) Try ball-based calibration: ask the user to click three balls once
     #    (ball order: id1, id2, id3). Ball 2 is origin, 2->3 defines X, 2->1 defines Y.
     def calibrate_from_three_balls(cam_handle) -> np.ndarray | None:
         move_piper_to_init_angles()
         print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
+        time.sleep(2.0)  # give user time to prepare
         first = cam_handle.read_stereo()
         if first is None:
             print("[WARN] Could not grab frame for ball calibration.")
@@ -353,11 +361,11 @@ def run():
         return T
 
     T_base_cam = calibrate_from_three_balls(cam)
+    if T_base_cam is not None:
+        base_cam_path = calib_dir / "T_base_cam_runtime.npy"
+        np.save(base_cam_path, T_base_cam.astype(np.float32))
+        print(f"[INFO] Saved T_base_cam to {base_cam_path}")
 
-    # Initialize robot and gripper
-    print("[INFO] Initializing robot and gripper...")
-    robot = FlexivRobot(home=False)
-    gripper = FlexivGripper(robot)
 
     disp_w, disp_h = 640, 360 # target working/display size
     win = "ZED Stream (click to segment)"
@@ -399,6 +407,10 @@ def run():
 
     traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt)) # current traj pred is under base frame
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
+    pose_records: list[dict[str, object]] = []
+    executed_poses: list[np.ndarray] = []
+    tcp_history: list[np.ndarray] = []
+    pose_records: list[dict[str, object]] = []
 
     frame_idx = 0
     try:
@@ -446,35 +458,34 @@ def run():
                     
 
             if depth_enabled:
-                # Run depth only every `update_interval` frames; reuse cached otherwise
-                if frame_idx % update_interval == 0:
+                do_update = (frame_idx % update_interval == 0)
+                print(f"[INFO] Frame {frame_idx}: depth/pred update={do_update}")
+                if do_update:
                     with torch.no_grad():
                         # Depth on resized stereo
                         last_depth_m = depth_est.depth(frame, frame_right)
                 depth_m = last_depth_m
+                if depth_m is None:
+                    continue
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
-                    # try:
+
                     mesh_path = Path(__file__).resolve().parents[2] / "data" / "book" / "mesh.obj"
                     if pose_est is None:
                         pose_est = PoseEstimatorFP(mesh_path)
                     pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
                     pose_ready = pose is not None
-                    print(f'pose_ready: {pose_ready}')
-                    # except Exception as e:
-                    #     print(f"FoundationPose init error: {e}")
-                    #     pose_ready = False
 
                 # Track every 10 frames; overlay every frame using last pose
                 if pose_ready and pose_est is not None:
                     # Use the same `update_interval` for pose tracking
-                    if (frame_idx % update_interval == 0) and (depth_m is not None):
+                    if do_update:
                         pose_est.track(frame, depth_m, K_rs)
                     frame = pose_est.draw_overlay(frame, K_rs)
 
                     # Overlay trajectory prediction; then execute a few steps on robot
-                    if traj_pred is not None and depth_m is not None and pose_est.pose_cam_ob is not None:
-                        if (frame_idx % update_interval == 0):
+                    if traj_pred is not None and pose_est.pose_cam_ob is not None:
+                        if do_update:
                             print("[INFO] Running trajectory prediction...")
                             frame = traj_pred.predict_and_overlay(
                                 frame,
@@ -484,86 +495,79 @@ def run():
                                 T_base_cam=T_base_cam,
                             )
                             # Execute first N steps relative to current TCP using robot_replay logic
-                            if traj_pred.last_traj_denorm is not None:
-                                if T_base_cam is None:
-                                    print("[WARN] T_base_cam unavailable; skipping execution.")
-                                else:
-                                    try:
-                                        steps_to_execute = 10  # how many relative steps to send each update
-                                        # absolute predicted trajectory, currently under base frame 
-                                        xyz_abs_pts = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
-                                        # Gripper signal per step if available (10th channel)
-                                        grip_seq = None
-                                        if traj_pred.last_traj_denorm.shape[1] > 9:
-                                            grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
-                                        if xyz_abs_pts.shape[0] >= 2:
-                                            p0_base = xyz_abs_pts[0]
-                                            # Relative-to-first in base frame
-                                            xyz_rel_pts = xyz_abs_pts - p0_base # (N,3)
-                                            # Convert relative steps into robot frame if a mapping is provided
-                                            if T_robot_base is not None:
-                                                T_base_robot = np.linalg.inv(T_robot_base).astype(np.float32)
-                                                R_robot_base = T_robot_base[:3, :3].astype(np.float32)
-                                                R_base_robot = T_base_robot[:3, :3].astype(np.float32)
-                                                steps_pts_robot = (R_robot_base @ xyz_rel_pts[1:1+int(steps_to_execute), :].T @ R_base_robot).T
-                                                print(f"[INFO] steps_pts_robot: {steps_pts_robot}")
-                                            else:
-                                                raise ValueError("T_robot_base is required for robot execution.")
-                                            # Take the first `steps_to_execute` non-zero steps starting from index 1
-                                            steps_grip = None
-                                            if grip_seq is not None:
-                                                steps_grip = grip_seq[1:1+int(steps_to_execute)]
-                                            if steps_pts_robot.size > 0:
-                                                # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
-                                                curr_pose7 = robot.get_tcp_pose().astype(np.float32)
-                                                start_xyz = curr_pose7[:3].astype(np.float32)
-                                                start_quat = curr_pose7[3:7].astype(np.float32)
-                                                open_width = getattr(gripper, 'max_width', 0.085)
-                                                open_thresh = 0.8
-                                                for i in range(steps_pts_robot.shape[0]):
-                                                    xyz = start_xyz + steps_pts_robot[i]
-                                                    pose7 = np.concatenate([xyz, start_quat], axis=0).astype(np.float32)
-                                                    # Gripper control if grip available
-                                                    if steps_grip is not None and i < len(steps_grip):
-                                                        grip_val = float(steps_grip[i])
-                                                        width_cmd = open_width if grip_val > open_thresh else 0.0
-                                                        print(f"[EVAL] step {i+1}/{steps_pts_robot.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
-                                                        try:
-                                                            gripper.move(width_cmd)
-                                                        except Exception:
-                                                            pass
-                                                    print(f"[EVAL] send step {i+1}/{steps_pts_robot.shape[0]} pose7=", np.round(pose7, 6))
-                                                    # robot.send_tcp_pose(pose7)
-                                                    time.sleep(0.05)
-                                        else:
-                                            print("[INFO] Predicted traj has <2 points; skip execution.")
-                                    except Exception as e:
-                                        print(f"[WARN] Execution error: {e}")
+                            steps_to_execute = 3  # how many relative steps to send each update
+                            # Gripper signal per step if available (10th channel)
+                            grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
+                            # Record current pose + predicted sequence in robot frame
+                            # First convert current object pose from FP to robot frame
+                            pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
+                            pose_base_ob = T_base_cam @ pose_cam_ob
+                            pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
+                            pose_seq_robot = None
 
+                            pose_seq_base = _build_pose_mats(
+                                traj_pred.last_traj_denorm[:, :3],
+                                traj_pred.last_traj_denorm[:, 3:3+6],
+                            )
+                            pose_seq_robot = np.einsum(
+                                'ij,njk->nik',
+                                T_robot_base.astype(np.float32),
+                                pose_seq_base.astype(np.float32),
+                            ) # [N,4,4], SE3 in robot frame
 
+                            pose_records.append(
+                                {
+                                    "timestamp": float(time.time()),
+                                    "frame_idx": int(frame_idx),
+                                    "object_pose_robot": pose_robot_ob.astype(np.float32),
+                                    "pred_seq_robot": None if pose_seq_robot is None else pose_seq_robot.astype(np.float32),
+                                }
+                            )
+
+                            # Take the first `steps_to_execute` non-zero steps starting from index 1
+                            steps_grip = None
+                            if grip_seq is not None:
+                                steps_grip = grip_seq[1:1+int(steps_to_execute)]
+                            if pose_seq_robot.size > 0:
+                                # convert pose to pts
+                                robot_rel_pts = pose_seq_robot[1:1+int(steps_to_execute), :3, 3] - pose_robot_ob[:3, 3][None, :]
+                                # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
+                                curr_pose7 = robot.get_tcp_pose().astype(np.float32)
+                                start_xyz = curr_pose7[:3].astype(np.float32)
+                                start_quat = curr_pose7[3:7].astype(np.float32)
+                                open_width = getattr(gripper, 'max_width', 0.085)
+                                open_thresh = 0.8
+                                for i in range(robot_rel_pts.shape[0]):
+                                    xyz = start_xyz + robot_rel_pts[i]
+                                    pose7 = np.concatenate([xyz, start_quat], axis=0).astype(np.float32)
+                                    # Gripper control if grip available
+                                    if steps_grip is not None and i < len(steps_grip):
+                                        grip_val = float(steps_grip[i])
+                                        width_cmd = open_width if grip_val > open_thresh else 0.0
+                                        print(f"[EVAL] step {i+1}/{robot_rel_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
+                                        gripper.move(width_cmd)
+
+                                    print(f"[EVAL] send step {i+1}/{robot_rel_pts.shape[0]} pose7=", np.round(pose7, 6))
+                                    robot.send_tcp_pose(pose7)
+                                    executed_poses.append(pose7.copy())
+
+                                    tcp_history.append(robot.get_tcp_pose().astype(np.float32))
+
+                                    time.sleep(0.05)
                         else:
-                            # Persist last predicted trajectory between updates
                             frame = traj_pred.overlay_cached(frame, K_rs)
-
-                # Visualize depth
-                # depth_vis = colorize_depth(depth_m, max_depth=5.0)
-                # depth_disp = cv2.resize(depth_vis, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-                # cv2.imshow(win_depth, depth_disp)
+                frame_idx += 1 # increment frame index only when depth is enabled
 
             # Refresh display from possibly overlaid frame
             disp = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, disp)
             # Write current display frame to video
-            try:
-                if writer is not None and writer.isOpened():
-                    writer.write(disp)
-            except Exception:
-                pass
-
+            if writer is not None and writer.isOpened():
+                writer.write(disp)
             key = cv2.waitKey(1) & 0xFF
             if interrupted["flag"] or key == ord('q') or key == 27:
                 break
-            frame_idx += 1
+            
             del frame, frame_right
             torch.cuda.empty_cache()
     finally:
@@ -572,6 +576,21 @@ def run():
         if writer is not None:
             writer.release()
             print(f"[INFO] Saved video to: {video_path}")
+
+        if pose_records:
+            pose_log_path = out_dir / "robot_pose_records.npy"
+            np.save(pose_log_path, np.array(pose_records, dtype=object))
+            print(f"[INFO] Saved robot-frame pose log to: {pose_log_path}")
+
+        if executed_poses:
+            executed_path = out_dir / "robot_executed_poses.npy"
+            np.save(executed_path, np.stack(executed_poses, axis=0))
+            print(f"[INFO] Saved executed robot poses to: {executed_path}")
+
+        if tcp_history:
+            tcp_path = out_dir / "robot_tcp_history.npy"
+            np.save(tcp_path, np.stack(tcp_history, axis=0))
+            print(f"[INFO] Saved robot TCP history to: {tcp_path}")
 
         cv2.destroyAllWindows()
 
