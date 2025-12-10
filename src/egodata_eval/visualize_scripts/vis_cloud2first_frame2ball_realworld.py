@@ -34,6 +34,30 @@ def iter_frames(frame_ids: Iterable[str]) -> Iterable[int]:
         yield int(fid)
 
 
+def _load_pose_matrix(path: Path) -> np.ndarray | None:
+    """Load a 4x4 pose matrix from txt/npy supporting 16/12 vector forms."""
+    if not path.exists():
+        return None
+    if path.suffix.lower() == ".npy":
+        vals = np.load(path).astype(np.float32)
+    else:
+        vals = np.loadtxt(path).astype(np.float32)
+    if vals.ndim == 1:
+        if vals.size == 16:
+            mat = vals.reshape(4, 4)
+        elif vals.size == 12:
+            mat = np.vstack([vals.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
+        else:
+            return None
+    else:
+        mat = vals
+    if mat.shape == (3, 4):
+        mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
+    if mat.shape != (4, 4):
+        return None
+    return mat
+
+
 def main():
     parser = argparse.ArgumentParser(description="Stream per-frame point clouds (base frame) using RealWorldDataset.")
     parser.add_argument("--data_path", type=Path, default=Path("data"), help="Root dataset path (contains train/eval splits).")
@@ -43,6 +67,7 @@ def main():
     parser.add_argument("--fps", type=float, default=5.0, help="Playback speed (frames per second).")
     parser.add_argument("--point-radius", type=float, default=0.002, help="Point radius for Rerun markers.")
     parser.add_argument("--no-spawn", action="store_true", help="Do not spawn a separate Rerun viewer window.")
+    parser.add_argument("--show-objects", action="store_true", help="Visualize ob_in_cam poses transformed to base frame.")
 
     args = parser.parse_args()
 
@@ -76,6 +101,8 @@ def main():
 
     cam_path_pts: list[np.ndarray] = []
     T_base_cam0: np.ndarray | None = None
+    obj_dir = episode_dir / "ob_in_cam"
+    obj_positions_base: list[np.ndarray] = []
 
     for fid in iter_frames(frame_ids):
         fid_key = f"{fid:06d}"
@@ -87,7 +114,7 @@ def main():
         depth_m = load_depth(depth_path)
         rgb = load_rgb(rgb_path)
 
-        T_base_cam = ds._get_cam_to_base(seq_id, fid_key)  # noqa: SLF001
+        T_base_cam = ds._get_cam_to_base(seq_id, fid_key)
         if T_base_cam0 is None:
             T_base_cam0 = T_base_cam
         translation = T_base_cam[:3, 3].astype(np.float32)
@@ -120,7 +147,7 @@ def main():
             ),
         )
         rr.set_time("frame", sequence=fid)
-        
+
         full_pts, full_cols = ds.load_point_cloud(
             (rgb * 255).astype(np.uint8),
             depth_m,
@@ -147,6 +174,41 @@ def main():
                     radii=args.point_radius,
                 ),
             )
+
+        # Visualize ob_in_cam transformed into base frame
+        if args.show_objects and obj_dir.exists():
+            pose_path_txt = obj_dir / f"{fid_key}.txt"
+            pose_path_npy = obj_dir / f"{fid_key}.npy"
+            pose_cam = _load_pose_matrix(pose_path_txt)
+            if pose_cam is None:
+                pose_cam = _load_pose_matrix(pose_path_npy)
+            if pose_cam is not None:
+                pose_base = T_base_cam @ pose_cam
+                obj_positions_base.append(pose_base[:3, 3].astype(np.float32))
+                rr.log(
+                    "world/object",
+                    rr.Transform3D(translation=pose_base[:3, 3].astype(np.float32), mat3x3=pose_base[:3, :3].astype(np.float32)),
+                )
+                rr.log(
+                    "world/object/axes",
+                    rr.Arrows3D(
+                        origins=np.zeros((3, 3), dtype=np.float32),
+                        vectors=np.eye(3, dtype=np.float32) * 0.03,
+                        colors=np.array(
+                            [[200, 50, 50, 255], [50, 200, 50, 255], [50, 50, 200, 255]],
+                            dtype=np.uint8,
+                        ),
+                    ),
+                )
+                if obj_positions_base:
+                    rr.log(
+                        "world/object_path",
+                        rr.LineStrips3D(
+                            [np.asarray(obj_positions_base, dtype=np.float32)],
+                            radii=args.point_radius * 0.8,
+                            colors=np.array([[180, 100, 255, 255]], dtype=np.uint8),
+                        ),
+                    )
 
 
 if __name__ == "__main__":

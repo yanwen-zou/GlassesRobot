@@ -58,6 +58,7 @@ def main() -> None:
         split="all",
         with_cloud=True,
         with_obj_action=False,
+        cam_to_base_rot_noise_std=0.0,  # visualization/inference: no extrinsic noise
     )
 
     demo_name = args.demo
