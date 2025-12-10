@@ -40,7 +40,7 @@ class RealWorldDataset(Dataset):
         with_cloud = False,
         with_obj_action = False,
         cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
-        head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed.npy",
+        head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed.txt",
     ):
         assert split in ['train', 'eval', 'all']
 
@@ -192,12 +192,23 @@ class RealWorldDataset(Dataset):
 
     def _load_camera_extrinsics_from_dir(self, directory, head_to_zed_path):
         # Load head to zed transformation(from calibration)
-        if os.path.exists(head_to_zed_path):
-            T_head_zed = np.load(head_to_zed_path).astype(np.float32)
-            if T_head_zed.shape != (4, 4):
-                raise ValueError(f"Invalid head to zed transformation shape {T_head_zed.shape} in {head_to_zed_path}")
-        else:
-            raise FileNotFoundError(f"Head to zed calibration file missing: {head_to_zed_path}")
+        def _load_head_zed(path_str: str) -> np.ndarray:
+            if not os.path.exists(path_str):
+                raise FileNotFoundError(f"Head to zed calibration file missing: {path_str}")
+            try:
+                if path_str.lower().endswith(".npy"):
+                    arr = np.load(path_str).astype(np.float32)
+                else:
+                    arr = np.loadtxt(path_str).astype(np.float32)
+            except Exception as exc:
+                raise ValueError(f"Failed to load head_to_zed from {path_str}: {exc}")
+            if arr.shape == (3, 4):
+                arr = np.vstack([arr, np.array([0, 0, 0, 1], dtype=np.float32)])
+            if arr.shape != (4, 4):
+                raise ValueError(f"Invalid head to zed transformation shape {arr.shape} in {path_str}")
+            return arr
+
+        T_head_zed = _load_head_zed(head_to_zed_path)
         
         extr_map = {}
         files = [f for f in os.listdir(directory) if f.lower().endswith(".txt")]
@@ -248,7 +259,7 @@ class RealWorldDataset(Dataset):
                 raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {path}")
 
             key = sort_key(fname)
-            extr_map[key] = mat.astype(np.float32) @ T_head_zed # transform from head to zed
+            extr_map[key] = mat.astype(np.float32) @ T_head_zed # world_zed = world_head * head_zed
         return extr_map
 
     def _load_cam_to_base(self, demo_path, frame_ids, extr_map):
@@ -298,7 +309,7 @@ class RealWorldDataset(Dataset):
             warnings.warn(f"[RealWorldDataset] Missing head_pos for anchor frame {anchor_key}; keeping anchor for all frames.")
             return {f"{int(fid):06d}": T_base_cam0.copy() for fid in frame_ids}
 
-        T_world_cam0 = extr_map[anchor_int]
+        T_world_cam0 = extr_map[anchor_int] # extr_map: world_cam0
         cam_to_base_map = {}
         prev_T = T_base_cam0
         for fid in frame_ids:
@@ -309,7 +320,7 @@ class RealWorldDataset(Dataset):
                 cam_to_base_map[fid_key] = prev_T.copy()
                 continue
             T_world_cam = extr_map[fid_int]
-            T_cam0_cam = np.linalg.inv(T_world_cam0) @ T_world_cam # cam -> cam0
+            T_cam0_cam = np.linalg.inv(T_world_cam0) @ T_world_cam # head_cam_inv @ world_head0_inv @ world_head @ head_cam
             T_base_cam = T_base_cam0 @ T_cam0_cam
             cam_to_base_map[fid_key] = T_base_cam.astype(np.float32)
             prev_T = T_base_cam
