@@ -47,7 +47,7 @@ python scripts_data_processing/realsense_record_second.py --keyboard-control
 
 # When anygrasp doesn't work well:
 
-glasses_hardware/hardware/grasp_test.py
+python glasses_hardware/hardware/grasp_test.py
 
 # -------------Inference ----------------
 python src/egodata_eval/eval.py --ckpt MBA/ckpt_deploy/policy_last.ckpt 
