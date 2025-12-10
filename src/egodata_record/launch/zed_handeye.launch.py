@@ -29,7 +29,7 @@ def generate_launch_description():
     )
     intrinsic_scale_arg = DeclareLaunchArgument(
         "intrinsic_scale",
-        default_value="2.0",
+        default_value="1.0",
         description="若内参下采样过，放大 fx,fy,cx,cy 的倍率（K_ZED.txt 需 *2）。",
     )
     output_arg = DeclareLaunchArgument(

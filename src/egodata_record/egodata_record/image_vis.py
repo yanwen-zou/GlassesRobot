@@ -9,7 +9,7 @@ def main():
 
     # 初始化参数
     init_params = sl.InitParameters()
-    init_params.camera_resolution = sl.RESOLUTION.HD720   # 可以改成 AUTO/HD1080 等
+    init_params.camera_resolution = sl.RESOLUTION.VGA
     init_params.camera_fps = 30
 
     # 打开相机

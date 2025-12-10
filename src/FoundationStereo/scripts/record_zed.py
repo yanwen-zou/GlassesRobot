@@ -14,7 +14,7 @@ def main():
 
     zed = sl.Camera()
     init_params = sl.InitParameters()
-    init_params.camera_resolution = sl.RESOLUTION.HD720
+    init_params.camera_resolution = sl.RESOLUTION.VGA
     init_params.camera_fps = 30
     err = zed.open(init_params)
     if err != sl.ERROR_CODE.SUCCESS:
@@ -25,11 +25,9 @@ def main():
     right_image = sl.Mat()
     runtime_parameters = sl.RuntimeParameters()
 
-    # 保存视频到新文件夹（缩小分辨率，比如640x360）
-    target_size = (640, 360)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out_left = cv2.VideoWriter(os.path.join(out_dir, "left.mp4"), fourcc, 30.0, target_size)
-    out_right = cv2.VideoWriter(os.path.join(out_dir, "right.mp4"), fourcc, 30.0, target_size)
+    out_left = None
+    out_right = None
 
     print(f"Press 'q' to stop recording... Output folder: {out_dir}")
     while True:
@@ -42,19 +40,24 @@ def main():
             left_bgr = cv2.cvtColor(left, cv2.COLOR_BGRA2BGR)
             right_bgr = cv2.cvtColor(right, cv2.COLOR_BGRA2BGR)
 
-            left_bgr = cv2.resize(left_bgr, target_size)
-            right_bgr = cv2.resize(right_bgr, target_size)
+            if out_left is None or out_right is None:
+                h, w = left_bgr.shape[:2]
+                target_size = (w, h)
+                out_left = cv2.VideoWriter(os.path.join(out_dir, "left.mp4"), fourcc, 30.0, target_size)
+                out_right = cv2.VideoWriter(os.path.join(out_dir, "right.mp4"), fourcc, 30.0, target_size)
 
             out_left.write(left_bgr)
             out_right.write(right_bgr)
 
-            cv2.imshow("Left", left)
-            cv2.imshow("Right", right)
+            cv2.imshow("Left", left_bgr)
+            cv2.imshow("Right", right_bgr)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-    out_left.release()
-    out_right.release()
+    if out_left is not None:
+        out_left.release()
+    if out_right is not None:
+        out_right.release()
     zed.close()
     cv2.destroyAllWindows()
     print(f"Recording stopped. Videos saved to {out_dir}/left.mp4 and {out_dir}/right.mp4")

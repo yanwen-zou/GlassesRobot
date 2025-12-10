@@ -36,8 +36,9 @@ class StereoVideoRecorder(Node):
 
         self.frame_rate = self.declare_parameter('frame_rate', 30.0).get_parameter_value().double_value
         self.downscale_factor = self.declare_parameter('downscale_factor', 1.0).get_parameter_value().double_value
-        if self.downscale_factor <= 0:
-            raise ValueError('downscale_factor must be positive')
+        if self.downscale_factor != 1.0:
+            self.get_logger().warn('downscale_factor is ignored; recording at native VGA resolution.')
+            self.downscale_factor = 1.0
 
         self.marker_length = self.declare_parameter('marker_length', 0.045).get_parameter_value().double_value
         if self.marker_length <= 0:
@@ -135,14 +136,6 @@ class StereoVideoRecorder(Node):
 
         if not self.recording:
             return
-
-        if self.downscale_factor != 1.0:
-            target_size = (
-                max(1, int(left_bgr.shape[1] * self.downscale_factor)),
-                max(1, int(left_bgr.shape[0] * self.downscale_factor)),
-            )
-            left_bgr = cv2.resize(left_bgr, target_size, interpolation=cv2.INTER_AREA)
-            right_bgr = cv2.resize(right_bgr, target_size, interpolation=cv2.INTER_AREA)
 
         if self.left_dir is None or self.right_dir is None or self.head_pos_dir is None:
             self.get_logger().error('Output directories not ready; dropping frame.')

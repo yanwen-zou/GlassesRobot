@@ -137,7 +137,7 @@ class ZedHandeyeNode(Node):
 
         self.zed = sl.Camera()
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD720
+        init_params.camera_resolution = sl.RESOLUTION.VGA # use VGA instead of HD720
         init_params.camera_fps = int(args.frame_rate)
         init_params.depth_mode = sl.DEPTH_MODE.NONE
         if self.zed.open(init_params) != sl.ERROR_CODE.SUCCESS:
