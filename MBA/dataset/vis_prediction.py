@@ -495,8 +495,14 @@ def main():
                     help="Object pose prediction target type used by the checkpoint.")
     args = ap.parse_args()
 
-    ds = RealWorldDataset(args.data_path, split=args.split, num_obs=1,
-                          num_action=args.num_action, with_obj_action=True)
+    ds = RealWorldDataset(
+        args.data_path,
+        split=args.split,
+        num_obs=1,
+        num_action=args.num_action,
+        with_obj_action=True,
+        cam_to_base_rot_noise_std=0.0,  # inference: no extrinsic noise
+    )
     available_seq_ids = getattr(ds, "all_demos", sorted(set(ds.seq_ids)))
     if args.demo_index < 0 or args.demo_index >= len(available_seq_ids):
         raise IndexError(f"demo_index {args.demo_index} out of range for {len(available_seq_ids)} episodes.")
