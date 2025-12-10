@@ -36,7 +36,7 @@ def generate_launch_description():
 
     downscale_factor_arg = DeclareLaunchArgument(
         'downscale_factor',
-        default_value='0.5',
+        default_value='1.0',
         description='Factor to downscale captured frames before recording.'
     )
 

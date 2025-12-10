@@ -46,7 +46,7 @@ def copy_cam_k(cam_k_src: Path | None, dest_dirs: list[Path]):
 
 def main():
     parser = argparse.ArgumentParser(description="Record ZED stereo frames to PNGs.")
-    parser.add_argument("--resolution", default="720P", help="ZED resolution: 2K/1080P/720P/WVGA")
+    parser.add_argument("--resolution", default="WVGA", help="ZED resolution: 2K/1080P/720P/WVGA")
     parser.add_argument("--fps", type=int, default=30, help="Target FPS for capture")
     parser.add_argument("--duration", type=float, default=0.0, help="Duration seconds (0 for until Ctrl+C)")
     parser.add_argument("--cam-k", type=Path, default=None, help="Path to cam_K.txt (defaults to latest under data/train)")

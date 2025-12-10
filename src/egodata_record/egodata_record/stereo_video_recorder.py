@@ -35,7 +35,7 @@ class StereoVideoRecorder(Node):
         self.recording_dir: Path | None = None
 
         self.frame_rate = self.declare_parameter('frame_rate', 30.0).get_parameter_value().double_value
-        self.downscale_factor = self.declare_parameter('downscale_factor', 0.5).get_parameter_value().double_value
+        self.downscale_factor = self.declare_parameter('downscale_factor', 1.0).get_parameter_value().double_value
         if self.downscale_factor <= 0:
             raise ValueError('downscale_factor must be positive')
 
@@ -50,7 +50,7 @@ class StereoVideoRecorder(Node):
         # ZED camera setup
         self.zed = sl.Camera()
         init_params = sl.InitParameters()
-        init_params.camera_resolution = sl.RESOLUTION.HD720
+        init_params.camera_resolution = sl.RESOLUTION.VGA
         init_params.camera_fps = int(self.frame_rate)
         init_params.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
         init_params.coordinate_units = sl.UNIT.METER
