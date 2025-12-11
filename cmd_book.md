@@ -30,6 +30,15 @@ python MBA/train_obj.py \
   --obj_pose_mode delta
 
   We put all prediction at the coordinate of ball, as well as eval.
+
+  CUDA_VISIBLE_DEVICES=0,1 \
+  torchrun --master_addr 127.0.0.1 --master_port 14524 \
+    --nproc_per_node 2 --nnodes 1 --node_rank 0 \
+    MBA/train_obj.py \
+    --data_path /mnt/data/yanwen/glass_data/ \
+    --ckpt_dir MBA/ckpt_1211 \
+    --batch_size 128 --num_epochs 1000 --save_epochs 50 --num_workers 24 \
+    --lr 4e-4 --seed 233 --enable_mba --obj_pose_mode delta
   
   # Eval Preview
 
