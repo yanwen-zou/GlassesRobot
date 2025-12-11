@@ -6,8 +6,8 @@ ros2 launch egodata_record stereo_record.launch.py
 # Zed&Cam Calibration
 ros2 launch egodata_record zed_handeye.launch.py \
   intrinsics:=/home/yanwen/research/unity_comm/src/FoundationStereo/assets/K_ZED.txt \
-  intrinsic_scale:=2.0 \
-  output:=/home/yanwen/research/unity_comm/glasses_hardware/calib/T_zed_tcp.npy
+  intrinsic_scale:=1.0 \
+  output:=/home/yanwen/research/unity_comm/glasses_hardware/calib/T_zed_tcp_calib.txt
 
 # -------------foundation_stereo Env----------
 # SAM2 For Mask -> FoundationStereo For Depth -> FoundationPose for Obj Pose Tracking

@@ -40,7 +40,7 @@ class RealWorldDataset(Dataset):
         with_cloud = False,
         with_obj_action = False,
         cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
-        head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed.txt",
+        head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed_calib.txt",
     ):
         assert split in ['train', 'eval', 'all']
 

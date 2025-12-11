@@ -217,10 +217,14 @@ class ZedHandeyeNode(Node):
         inverse_path = (
             self.args.inverse_output
             if self.args.inverse_output is not None
-            else self.args.output.with_name(self.args.output.stem + "_tcp_to_zed.npy")
+            else self.args.output.with_name("T_tcp_zed_calib.txt")
         )
+        inverse_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(str(self.args.output), T_zed_to_tcp.astype(np.float32))
-        np.save(str(inverse_path), T_tcp_to_zed.astype(np.float32))
+        if inverse_path.suffix == ".npy":
+            np.save(str(inverse_path), T_tcp_to_zed.astype(np.float32))
+        else:
+            np.savetxt(str(inverse_path), T_tcp_to_zed.astype(np.float32), fmt="%.8f")
         self.get_logger().info(
             f"标定完成，pairwise 平均误差：rot={rot_err_deg:.3f} deg, trans={trans_err:.4f} m；已保存 {self.args.output} 和 {inverse_path}"
         )
@@ -235,7 +239,7 @@ class ZedHandeyeNode(Node):
                     continue
                 self.zed.retrieve_image(self.left, sl.VIEW.LEFT)
                 frame = self.left.get_data()
-                self.get_logger().info(f"pose:{self.latest_pose}")
+                #self.get_logger().info(f"pose:{self.latest_pose}")
                 if frame is None:
                     continue
 
@@ -361,7 +365,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="若内参是下采样结果，按此倍率放大 fx,fy,cx,cy（K_ZED.txt 需 *2 还原）。",
     )
     parser.add_argument("--output", type=Path, default=Path("glasses_hardware/calib/T_zed_tcp.npy"))
-    parser.add_argument("--inverse-output", type=Path, default=None, help="可选：保存 TCP->ZED 的路径。")
+    parser.add_argument(
+        "--inverse-output",
+        type=Path,
+        default=Path("glasses_hardware/calib/T_tcp_zed_calib.txt"),
+        help="可选：保存 TCP->ZED 的路径（默认保存为 txt，名称 T_tcp_zed_calib.txt）。",
+    )
     parser.add_argument("--pose-topic", type=str, default="/glasses_pose", help="PoseStamped 话题名。")
     parser.add_argument("--frame-rate", type=float, default=30.0, help="ZED 采集帧率。")
     parser.add_argument("--pattern-cols", type=int, default=11, help="棋盘格列数（内角点数）。")
