@@ -228,9 +228,9 @@ def run():
     ZEDCamera = _import_zed_class()
     cam = ZEDCamera(resolution="WVGA", fps=30)
     # Initialize depth estimator and load model at start
+
     print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator()
-    
+    depth_est = DepthEstimator(scale=0.75) # no need to modify intrinsics;
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'

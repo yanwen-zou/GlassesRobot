@@ -190,7 +190,6 @@ def render_item_predictions(ds: RealWorldDataset,
     frame_ids = ds.action_frame_ids[idx]
     ref_extr, _ = get_cam_extrinsics(ds, seq_id, frame_ids)
     cam_intr = ds.seq_intrinsics[seq_id].copy()
-    #cam_intr[:2] *= 0.5 # delete if not downscaled
     ref_extr = np.asarray(ref_extr)
 
     obs_frame_ids = ds.obs_frame_ids[idx]

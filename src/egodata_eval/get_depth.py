@@ -31,8 +31,10 @@ def _load_intrinsics(default_path: Optional[Path] = None) -> Tuple[np.ndarray, f
 class DepthEstimator:
     """Encapsulates FoundationStereo model and provides disparity/depth inference."""
 
-    def __init__(self, ckpt_dir: Optional[Path] = None, device: Optional[str] = None):
+    def __init__(self, ckpt_dir: Optional[Path] = None, device: Optional[str] = None, scale: float = 1.0):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        assert scale > 0 and scale <= 1, "scale must be in (0,1]"
+        self.scale = scale
         if ckpt_dir is None:
             ckpt_dir = _FS_ROOT / "pretrained_models" / "11-33-40" / "model_best_bp2.pth"
         cfg_path = ckpt_dir.parent / "cfg.yaml"
@@ -43,8 +45,6 @@ class DepthEstimator:
         # Real-time leaning defaults
         cfg["valid_iters"] = int(cfg.get("valid_iters", 24))
         cfg["hiera"] = int(cfg.get("hiera", 0))
-        cfg["scale"] = float(cfg.get("scale", 1))
-        print(f"[INFO] FoundationStereo config: scale={cfg['scale']}")
         cfg["mixed_precision"] = True
 
         self.args = OmegaConf.create(cfg)
@@ -65,6 +65,12 @@ class DepthEstimator:
         left_rgb = cv2.cvtColor(left_bgr, cv2.COLOR_BGR2RGB)
         right_rgb = cv2.cvtColor(right_bgr, cv2.COLOR_BGR2RGB)
 
+        H_raw, W_raw = left_rgb.shape[:2]
+
+        if self.scale != 1.0:
+            left_rgb = cv2.resize(left_rgb, fx=self.scale, fy=self.scale, dsize=None)
+            right_rgb = cv2.resize(right_rgb, fx=self.scale, fy=self.scale, dsize=None)
+
         H, W = left_rgb.shape[:2]
         img0 = torch.as_tensor(left_rgb, device=self.device).float()[None].permute(0, 3, 1, 2)
         img1 = torch.as_tensor(right_rgb, device=self.device).float()[None].permute(0, 3, 1, 2)
@@ -81,6 +87,12 @@ class DepthEstimator:
 
         disp = padder.unpad(disp_up.float())
         disp = disp.data.detach().cpu().numpy().reshape(H, W).astype(np.float32)
+
+        # Upscale disparity and restore values to original resolution
+        if self.scale != 1.0:
+            disp = cv2.resize(disp, (W_raw, H_raw), interpolation=cv2.INTER_LINEAR) * (1.0 / self.scale)
+        else:
+            disp = disp.reshape(H_raw, W_raw)
         return disp
 
     def depth(self, left_bgr: np.ndarray, right_bgr: np.ndarray) -> np.ndarray:
