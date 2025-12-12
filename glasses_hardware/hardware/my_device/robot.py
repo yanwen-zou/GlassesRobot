@@ -78,7 +78,9 @@ class FlexivRobot:
         self.robot = flexivrdk.Robot("Rizon4-00020")
         self.default_pose = default_pose
         self.home_pose = self.default_pose
-        self.home_joint_pos = [0.218,0.211,-0.075,1.941,0.001,0.414,0.73] # Predefined home joint positions for book picking
+        # Predefined home joint positions in radians (converted from current deg readings)
+        home_deg = [-56.99, -34.26, 44.09, 126.06, -130.76, 77.25, 99.87]
+        self.home_joint_pos = [np.deg2rad(angle) for angle in home_deg]
         self.init_robot(home)
         self.init_pose = self.get_tcp_pose()
 
@@ -92,7 +94,7 @@ class FlexivRobot:
             # log.warn("Fault occurred on robot server, trying to clear ...")
             print("Fault occurred on robot server, trying to clear ...")
             # Try to clear the fault
-            robot.clearFault()
+            robot.ClearFault()
             time.sleep(2)
             # Check again
             if robot.fault():
@@ -121,7 +123,8 @@ class FlexivRobot:
         # self.send_joint_pose(self.home_joint_pos)
         # time.sleep(4)
         if home:
-            self.send_tcp_pose(self.home_pose)
+            # self.send_tcp_pose(self.home_pose)
+            self.send_joint_pose(self.home_joint_pos)
             time.sleep(4)
 
         robot.SwitchMode(mode.NRT_PRIMITIVE_EXECUTION)
@@ -138,9 +141,11 @@ class FlexivRobot:
         print("Zeroing force/torque sensors, make sure nothing is in contact with the robot")
         # Wait for primitive completion
         while robot.busy():
-            time.sleep(1)
+            time.sleep(0.1)
         # log.info("Sensor zeroing complete")
         print("Sensor zeroing complete")
+        # Return controller to idle so downstream code starts from non-busy state
+        robot.SwitchMode(mode.IDLE)
 
     def enable(self, max_time=10):
         """Enable robot after emergency button is released."""
@@ -190,7 +195,7 @@ class FlexivRobot:
         print("[Robot] Set mode: {}".format(str(self.get_control_mode())))
 
     def clear_fault(self):
-        self.robot.clearFault()
+        self.robot.ClearFault()
 
     def is_fault(self):
         """Check if robot is in FAULT state."""
@@ -290,13 +295,18 @@ class FlexivRobot:
         """
         Send joint pose.
         """
-        self.switch_mode('joint')
-        DOF = len(q)
-        target_vel = [0.0] * DOF
-        target_acc = [0.0] * DOF
-        MAX_VEL = [1] * DOF
-        MAX_ACC = [1] * DOF
-        self.robot.SendJointPosition(np.array(q), target_vel, target_acc, MAX_VEL, MAX_ACC)
+        # convert rad to deg
+        q = np.rad2deg(q)
+        q = list(q)
+        self.robot.SwitchMode(flexivrdk.Mode.NRT_PRIMITIVE_EXECUTION)
+        self.robot.ExecutePrimitive("MoveJ", {"target": q})
+        # self.switch_mode('joint')
+        # DOF = len(q)
+        # target_vel = [0.0] * DOF
+        # target_acc = [0.0] * DOF
+        # MAX_VEL = [1] * DOF
+        # MAX_ACC = [1] * DOF
+        # self.robot.SendJointPosition(np.array(q), target_vel, target_acc, MAX_VEL, MAX_ACC)
 
 
     def get_robot_state(self):
@@ -306,6 +316,9 @@ class FlexivRobot:
         jointPose = raw.q
         jointVel = raw.dq
         return tcpPose, jointPose, tcpVel, jointVel
+    
+    def busy(self):
+        return self.robot.busy()
     
 class FlexivGripper:
     def __init__(self, r: FlexivRobot) -> None:
