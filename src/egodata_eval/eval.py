@@ -490,7 +490,7 @@ def run():
                                     print("[WARN] T_base_cam unavailable; skipping execution.")
                                 else:
                                     try:
-                                        steps_to_execute = 10  # how many relative steps to send each update
+                                        steps_to_execute = 5  # how many relative steps to send each update
                                         # Absolute predicted points in camera (ZED) frame
                                         xyz_abs_cam = traj_pred.last_traj_denorm[:, :3].astype(np.float32)
                                         # Gripper signal per step if available (10th channel)
@@ -533,7 +533,7 @@ def run():
                                                         except Exception:
                                                             pass
                                                     print(f"[EVAL] send step {i+1}/{steps_pts_robot.shape[0]} pose7=", np.round(pose7, 6))
-                                                    # robot.send_tcp_pose(pose7)
+                                                    robot.send_tcp_pose(pose7)
                                                     time.sleep(0.05)
                                         else:
                                             print("[INFO] Predicted traj has <2 points; skip execution.")
