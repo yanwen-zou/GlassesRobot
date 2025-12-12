@@ -351,7 +351,6 @@ def run():
 
     T_base_cam = calibrate_from_three_balls(cam)
 
-    # Determine display size directly from the ZED camera (fallback to 640x360)
     cam_size = cam.size
 
     disp_w = int(cam_size[0])
@@ -416,12 +415,6 @@ def run():
                 continue
             frame, frame_right = stereo
 
-            # Immediately downscale stereo to 640x360 for both display and model input
-            h0, w0 = frame.shape[:2]
-            if (w0, h0) != (disp_w, disp_h):
-                frame = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-                frame_right = cv2.resize(frame_right, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-            # Use pre-downscaled intrinsics directly (K already matches 640x360)
             K_rs = depth_est.K.astype(np.float32)
 
             # Prepare an RGB copy if needed downstream (already resized)
@@ -429,9 +422,9 @@ def run():
             image_rgb = image_bgr[..., ::-1].copy()
 
             last_frame_full = image_rgb
-            last_size = (frame.shape[1], frame.shape[0])  # (640,360)
+            last_size = (frame.shape[1], frame.shape[0])
 
-            disp = frame  # already 640x360
+            disp = frame
 
             if click_state["pending"]:
                 click_state["pending"] = False
