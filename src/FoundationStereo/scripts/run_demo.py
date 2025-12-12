@@ -26,6 +26,7 @@ if __name__=="__main__":
   parser.add_argument('--out_dir', default=f'{code_dir}/../output/', type=str, help='the directory to save results')
   parser.add_argument('--scale', default=1, type=float, help='downsize the image by scale, must be <=1')
   parser.add_argument('--hiera', default=0, type=int, help='hierarchical inference (only needed for high-resolution images (>1K))')
+  parser.add_argument('--restore_res', default=0, type=int, help='scale<1 时推理低分辨率并把视差/深度还原到原始分辨率')
   parser.add_argument('--z_far', default=10, type=float, help='max depth to clip in point cloud')
   parser.add_argument('--valid_iters', type=int, default=32, help='number of flow-field updates during forward pass')
   parser.add_argument('--get_pc', type=int, default=1, help='save point cloud output')
@@ -63,6 +64,7 @@ if __name__=="__main__":
   code_dir = os.path.dirname(os.path.realpath(__file__))
   img0 = imageio.imread(args.left_file)
   img1 = imageio.imread(args.right_file)
+  img0_raw = img0.copy()
   scale = args.scale
   assert scale<=1, "scale must be <=1"
   img0 = cv2.resize(img0, fx=scale, fy=scale, dsize=None)
@@ -83,8 +85,14 @@ if __name__=="__main__":
       disp = model.run_hierachical(img0, img1, iters=args.valid_iters, test_mode=True, small_ratio=0.5)
   disp = padder.unpad(disp.float())
   disp = disp.data.cpu().numpy().reshape(H,W)
+  if args.restore_res and scale != 1:
+    # Upscale disparity back to original resolution; scale disparity values accordingly
+    disp = cv2.resize(disp, (img0_raw.shape[1], img0_raw.shape[0]), interpolation=cv2.INTER_LINEAR) * (1.0/scale)
+    img_for_vis = img0_raw
+  else:
+    img_for_vis = img0_ori
   vis = vis_disparity(disp)
-  vis = np.concatenate([img0_ori, vis], axis=1)
+  vis = np.concatenate([img_for_vis, vis], axis=1)
   imageio.imwrite(f'{args.out_dir}/vis.png', vis)
   logging.info(f"Output saved to {args.out_dir}")
 
@@ -99,11 +107,13 @@ if __name__=="__main__":
       lines = f.readlines()
       K = np.array(list(map(float, lines[0].rstrip().split()))).astype(np.float32).reshape(3,3)
       baseline = float(lines[1])
-    K[:2] *= scale
-    depth = K[0,0]*baseline/disp
+    K_scaled = K.copy()
+    K_scaled[:2] *= scale
+    K_use = K if (args.restore_res and scale != 1) else K_scaled
+    depth = K_use[0,0]*baseline/disp
     np.save(f'{args.out_dir}/depth_meter.npy', depth)
-    xyz_map = depth2xyzmap(depth, K)
-    pcd = toOpen3dCloud(xyz_map.reshape(-1,3), img0_ori.reshape(-1,3))
+    xyz_map = depth2xyzmap(depth, K_use)
+    pcd = toOpen3dCloud(xyz_map.reshape(-1,3), img_for_vis.reshape(-1,3))
     keep_mask = (np.asarray(pcd.points)[:,2]>0) & (np.asarray(pcd.points)[:,2]<=args.z_far)
     keep_ids = np.arange(len(np.asarray(pcd.points)))[keep_mask]
     pcd = pcd.select_by_index(keep_ids)
@@ -125,4 +135,3 @@ if __name__=="__main__":
     vis.get_render_option().background_color = np.array([0.5, 0.5, 0.5])
     vis.run()
     vis.destroy_window()
-
