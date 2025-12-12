@@ -59,12 +59,6 @@ class ZEDCamera:
         if right is not None and right.ndim == 3 and right.shape[2] == 4:
             right = right[:, :, :3]
 
-        # Resize to 640x360 for downstream processing/visualization
-        if left is not None:
-            left = cv2.resize(left, (640, 360), interpolation=cv2.INTER_AREA)
-        if right is not None:
-            right = cv2.resize(right, (640, 360), interpolation=cv2.INTER_AREA)
-
         if left is not None and self._w is None:
             self._h, self._w = left.shape[:2]
         return left, right
@@ -77,7 +71,7 @@ class ZEDCamera:
         self._zed.close()
 
 
-def _run_with_pyzed(resolution: str = "720P", fps: int = 60, show_right: bool = False):
+def _run_with_pyzed(resolution: str = "WVGA", fps: int = 30, show_right: bool = False):
     try:
         import pyzed.sl as sl
     except Exception as e:
@@ -120,15 +114,12 @@ def _run_with_pyzed(resolution: str = "720P", fps: int = 60, show_right: bool = 
                     zed.retrieve_image(mat_right, sl.VIEW.RIGHT)
 
                 left = mat_left.get_data()
-                # downscale to 640x360 for display
-                left_small = cv2.resize(left, (640, 360), interpolation=cv2.INTER_AREA)
                 if show_right:
                     right = mat_right.get_data()
-                    right_small = cv2.resize(right, (640, 360), interpolation=cv2.INTER_AREA)
 
-                cv2.imshow(win_name, left_small)
+                cv2.imshow(win_name, left)
                 if show_right:
-                    cv2.imshow(win_name_r, right_small)
+                    cv2.imshow(win_name_r, right)
 
                 frames += 1
                 now = time.time()
