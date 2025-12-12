@@ -301,9 +301,6 @@ def run():
             if click_state["done"] or k in (27, ord('q')):
                 break
         cv2.destroyWindow(win_calib)
-        if len(pts) != 3:
-            print("[WARN] Need exactly 3 clicks for ball calibration; fallback to ArUco.")
-            return None
 
         # Depth for clicked points + mask-based centroid refinement
         depth_m = depth_est.depth(frame, frame_right)
@@ -354,14 +351,21 @@ def run():
 
     T_base_cam = calibrate_from_three_balls(cam)
 
+    # Determine display size directly from the ZED camera (fallback to 640x360)
+    cam_size = cam.size
+
+    disp_w = int(cam_size[0])
+    disp_h = int(cam_size[1])
+    print(f"[INFO] Display resolution set from ZEDCamera: {disp_w}x{disp_h}")
+
     # Initialize robot and gripper
     print("[INFO] Initializing robot and gripper...")
     robot = FlexivRobot(home=False)
     gripper = FlexivGripper(robot)
 
-    disp_w, disp_h = 640, 360 # target working/display size
     win = "ZED Stream (click to segment)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, disp_w, disp_h)
     # Video writer (writes displayed frames)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     fps = 30
@@ -410,10 +414,7 @@ def run():
 
             # Immediately downscale stereo to 640x360 for both display and model input
             h0, w0 = frame.shape[:2]
-            if (w0, h0) != (disp_w, disp_h):
-                frame = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-                frame_right = cv2.resize(frame_right, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
-            # Use pre-downscaled intrinsics directly (K already matches 640x360)
+
             K_rs = depth_est.K.astype(np.float32)
 
             # Prepare an RGB copy if needed downstream (already resized)
