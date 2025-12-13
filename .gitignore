@@ -90,3 +90,4 @@ glasses_hardware/anygrasp_debug*
 .sii/
 .vscode/
 install/src/FoundationStereo/demo_data_for_pose/
+src/FoundationStereo/demo_data_for_pose/my_demo/
