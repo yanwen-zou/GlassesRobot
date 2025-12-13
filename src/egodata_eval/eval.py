@@ -27,11 +27,9 @@ _import_zed_class   # type: ignore
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
 from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
 from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
+from glasses_hardware.hardware.my_device.i2rt import I2RT  # type: ignore
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
-
-# For live ArUco detection to build camera->base mapping
-from egodata_eval import piper_calib  # type: ignore
 
 # ========== MBA Trajectory Prediction (RISE) ==========
 
@@ -212,6 +210,111 @@ def _load_calib_mat_safe(path: Path) -> np.ndarray | None:
     return None
 
 
+I2RT_TARGET_DEG = [-17, 25, 61, -42, 0, -2,0]
+I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
+
+
+def move_i2rt_to_init_angles(robot: I2RT | None, target_rad: np.ndarray = I2RT_TARGET_RAD, duration: float = 2.0, steps: int = 80) -> None:
+    """Move I2RT arm to the evaluation target joint configuration."""
+    if robot is None:
+        print("[WARN] I2RT arm not initialized; cannot move to init pose.")
+        return
+    try:
+        robot.send_joint_pos_rad(target_rad, duration=duration, steps=steps)
+        print(f"[INFO] Moved I2RT joints to deg {I2RT_TARGET_DEG}")
+    except Exception as exc:
+        print(f"[WARN] I2RT init move failed: {exc}")
+
+
+def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot_fn=None) -> np.ndarray | None:
+    """Perform ball-based calibration to compute T_base_cam."""
+    if move_robot_fn is not None:
+        move_robot_fn()
+    print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
+    first = cam_handle.read_stereo()
+    if first is None:
+        print("[WARN] Could not grab frame for ball calibration.")
+        return None
+    frame, frame_right = first
+    K_rs = depth_est.K.astype(np.float32)
+    pts: list[tuple[float, float]] = []
+
+    click_state = {"done": False}
+
+    def _on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 3:
+            pts.append((float(x), float(y)))
+            print(f"[INFO] Clicked point {len(pts)}: ({x}, {y})")
+            if len(pts) == 3:
+                click_state["done"] = True
+
+    win_calib = "Ball Calibration"
+    cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(win_calib, _on_mouse)
+    disp = frame.copy()
+    while True:
+        cv2.imshow(win_calib, disp)
+        k = cv2.waitKey(10) & 0xFF
+        if click_state["done"] or k in (27, ord('q')):
+            break
+    cv2.destroyWindow(win_calib)
+
+    # Depth for clicked points + mask-based centroid refinement
+    depth_m = depth_est.depth(frame, frame_right)
+    fx, fy = K_rs[0, 0], K_rs[1, 1]
+    cx, cy = K_rs[0, 2], K_rs[1, 2]
+    print(f"[INFO] intrinsics fx={fx}, fy={fy}, cx={cx}, cy={cy}")
+
+    frame_rgb = frame[..., ::-1].copy()
+
+    def centroid_from_mask(mask: np.ndarray) -> np.ndarray | None:
+        valid = (mask.astype(bool)) & np.isfinite(depth_m) & (depth_m > 1e-6)
+        if valid.sum() < 10:
+            return None
+        vs, us = np.nonzero(valid)
+        zs = depth_m[valid]
+
+        x = (us - cx) * zs / fx
+        y = (vs - cy) * zs / fy
+        pts = np.stack([x, y, zs], axis=-1)
+        return pts.mean(axis=0)
+
+    cam_pts = []
+    for idx, (u, v) in enumerate(pts, 1):
+        u = int(round(u))
+        v = int(round(v))
+        roi = 60
+        u0 = max(0, u - roi)
+        u1 = min(frame.shape[1], u + roi)
+        v0 = max(0, v - roi)
+        v1 = min(frame.shape[0], v + roi)
+        crop = frame_rgb[v0:v1, u0:u1].copy()
+        mask = None
+        try:
+            mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
+            if isinstance(mask, list):
+                mask = mask[0]
+        except Exception as exc:
+            print(f"[WARN] SAM mask failed for point {idx}: {exc}")
+
+        centroid = centroid_from_mask(mask) if mask is not None else None
+        if centroid is not None:
+            cam_pts.append(centroid)
+            print(f"[INFO] Mask centroid for p{idx}: {centroid}")
+            continue
+
+    p1, p2, p3 = cam_pts
+    from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+
+    R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :3] = R_base_cam
+    T[:3, 3] = t_base_cam
+    print("[OK] Ball calibration produced T_base_cam:")
+    print(T)
+    return T
+
+
 def run():
     import argparse
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
@@ -230,7 +333,7 @@ def run():
     # Initialize depth estimator and load model at start
 
     print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator(scale=0.75) # no need to modify intrinsics;
+    depth_est = DepthEstimator(scale=0.5) # no need to modify intrinsics;
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'
@@ -246,110 +349,20 @@ def run():
         else:
             print(f"[WARN] Failed to load T_robot_base from {args.base_to_robot_npy}; using identity.")
 
-    def move_piper_to_init_angles():
-        """Move Piper arm to a known joint pose before ball calibration."""
-        try:
-            from piper_sdk import C_PiperInterface_V2
-        except Exception as exc:
-            print(f"[WARN] piper_sdk not available; skip Piper init. ({exc})")
-            return
-        try:
-            piper = C_PiperInterface_V2("can0")
-            piper.ConnectPort()
-            while not piper.EnablePiper():
-                time.sleep(0.01)
-            # target angles in degrees
-            target_deg = [-30.0, 18.0, -10.0, 0.0, -2.0, 0.0]
-            factor = 57295.7795  # rad -> scaled int (1000 * deg)
-            rad = np.deg2rad(target_deg)
-            joints = [int(r * factor) for r in rad]
-            piper.MotionCtrl_2(0x01, 0x01, 60, 0x00)
-            piper.JointCtrl(*joints)
-            print(f"[INFO] Moved Piper joints to deg {target_deg}")
-        except Exception as exc:
-            print(f"[WARN] Piper init move failed: {exc}")
+    # Initialize robot and gripper
+    print("[INFO] Initializing Flexiv and gripper...") # First initialize Flexiv, or I2RT comm will go error
+    robot = FlexivRobot(home=False)
+    gripper = FlexivGripper(robot)
 
-    # 1) Try ball-based calibration: ask the user to click three balls once
-    #    (ball order: id1, id2, id3). Ball 2 is origin, 2->3 defines X, 2->1 defines Y.
-    def calibrate_from_three_balls(cam_handle) -> np.ndarray | None:
-        move_piper_to_init_angles()
-        print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
-        first = cam_handle.read_stereo()
-        if first is None:
-            print("[WARN] Could not grab frame for ball calibration.")
-            return None
-        frame, frame_right = first
-        K_rs = depth_est.K.astype(np.float32)
-        pts: list[tuple[float, float]] = []
+    print("[INFO] Initializing I2RT...")
+    i2rt_robot = I2RT(channel="can0", zero_gravity_mode=True, home=False)
+    time.sleep(1)
 
-        click_state = {"done": False}
-
-        def _on_mouse(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 3:
-                pts.append((float(x), float(y)))
-                print(f"[INFO] Clicked point {len(pts)}: ({x}, {y})")
-                if len(pts) == 3:
-                    click_state["done"] = True
-
-        win_calib = "Ball Calibration"
-        cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
-        cv2.setMouseCallback(win_calib, _on_mouse)
-        disp = frame.copy()
-        while True:
-            cv2.imshow(win_calib, disp)
-            k = cv2.waitKey(10) & 0xFF
-            if click_state["done"] or k in (27, ord('q')):
-                break
-        cv2.destroyWindow(win_calib)
-
-        # Depth for clicked points + mask-based centroid refinement
-        depth_m = depth_est.depth(frame, frame_right)
-        fx, fy = K_rs[0, 0], K_rs[1, 1]
-        cx, cy = K_rs[0, 2], K_rs[1, 2]
-        print(f"[INFO] intrinsics fx={fx}, fy={fy}, cx={cx}, cy={cy}")
-
-        frame_rgb = frame[..., ::-1].copy()
-
-        def centroid_from_mask(mask: np.ndarray) -> np.ndarray | None:
-            valid = (mask.astype(bool)) & np.isfinite(depth_m) & (depth_m > 1e-6)
-            if valid.sum() < 10:
-                return None
-            vs, us = np.nonzero(valid)
-            zs = depth_m[valid]
-
-            x = (us - cx) * zs / fx
-            y = (vs - cy) * zs / fy
-            xyz = np.stack([x, y, zs], axis=-1)
-            return xyz.mean(axis=0).astype(np.float32)
-
-        cam_pts = []
-        for idx, (u, v) in enumerate(pts, start=1):
-            mask = None
-            try:
-                mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
-                if isinstance(mask, list):
-                    mask = mask[0]
-            except Exception as exc:
-                print(f"[WARN] SAM mask failed for point {idx}: {exc}")
-
-            centroid = centroid_from_mask(mask) if mask is not None else None
-            if centroid is not None:
-                cam_pts.append(centroid)
-                print(f"[INFO] Mask centroid for p{idx}: {centroid}")
-                continue
-
-        p1, p2, p3 = cam_pts
-        from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
-
-        R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
-        T = np.eye(4, dtype=np.float32)
-        T[:3, :3] = R_base_cam
-        T[:3, 3] = t_base_cam
-        print("[OK] Ball calibration produced T_base_cam:")
-        print(T)
-        return T
-
-    T_base_cam = calibrate_from_three_balls(cam)
+    T_base_cam = calibrate_from_three_balls(
+        cam,
+        depth_est,
+        move_robot_fn=lambda: move_i2rt_to_init_angles(i2rt_robot),
+    )
 
     cam_size = cam.size
 
@@ -357,14 +370,8 @@ def run():
     disp_h = int(cam_size[1])
     print(f"[INFO] Display resolution set from ZEDCamera: {disp_w}x{disp_h}")
 
-    # Initialize robot and gripper
-    print("[INFO] Initializing robot and gripper...")
-    robot = FlexivRobot(home=False)
-    gripper = FlexivGripper(robot)
-
     win = "ZED Stream (click to segment)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win, disp_w, disp_h)
     # Video writer (writes displayed frames)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     fps = 30
@@ -423,18 +430,15 @@ def run():
 
             last_frame_full = image_rgb
             last_size = (frame.shape[1], frame.shape[0])
-
             disp = frame
 
             if click_state["pending"]:
+                print("[INFO] Enter click_state")
                 click_state["pending"] = False
                 pt = click_state["pt"]
-                # visual click feedback
-                cx = int(pt[0] * (disp_w / max(1, last_size[0])))
-                cy = int(pt[1] * (disp_h / max(1, last_size[1])))
-                cv2.circle(disp, (cx, cy), 6, (0, 0, 255), -1)
                 try:
                     mask = click_mask(image_rgb, [pt], labels=[1], multimask=True)
+                    print("[INFO] Mask calculated")
                 except Exception as e:
                     cv2.displayStatusBar(win, f"SAM error: {e}", 3000)
                     mask = None
@@ -448,7 +452,7 @@ def run():
 
             if depth_enabled:
                 do_update = (frame_idx % update_interval == 0)
-                print(f"[INFO] Frame {frame_idx}: depth/pred update={do_update}")
+                # print(f"[INFO] Frame {frame_idx}: depth/pred update={do_update}")
                 if do_update:
                     with torch.no_grad():
                         # Depth on resized stereo
@@ -490,6 +494,8 @@ def run():
                             # Record current pose + predicted sequence in robot frame
                             # First convert current object pose from FP to robot frame
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
+                            print("[INFO] OB In Cam: {pose_cam_ob}")
+
                             pose_base_ob = T_base_cam @ pose_cam_ob
                             pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
                             pose_seq_robot = None
@@ -584,6 +590,9 @@ def run():
         cv2.destroyAllWindows()
 
         cam.close()
+
+        if i2rt_robot is not None:
+            i2rt_robot.close()
 
 
 

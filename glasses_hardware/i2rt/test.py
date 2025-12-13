@@ -101,15 +101,15 @@ def main(stdscr):
                 safe_addstr(2, 0, f"Step size: {step:.5f} rad (↑/k increase, ↓/j decrease)")
                 
                 # Display joint positions
-                safe_addstr(4, 0, "Joint | Current Pos | Target Pos  | Error")
+                safe_addstr(4, 0, "Joint | Current Deg | Target Deg | Error Deg")
                 safe_addstr(5, 0, "------|--------------|-------------|----------")
                 
                 # Only display joints that fit on screen
                 max_joints_to_show = min(num_joints, height - 8)
                 for i in range(max_joints_to_show):
                     marker = " <--" if i == selected_joint else ""
-                    current = current_pos[i]
-                    target = target_pos[i]
+                    current = np.rad2deg(current_pos[i])
+                    target = np.rad2deg(target_pos[i])
                     error = target - current
                     safe_addstr(6 + i, 0, 
                         f"  {i+1}   | {current:+8.4f}  | {target:+8.4f}  | {error:+8.4f}{marker}")

@@ -40,10 +40,6 @@ python MBA/train_obj.py \
     --batch_size 128 --num_epochs 1000 --save_epochs 50 --num_workers 24 \
     --lr 4e-4 --seed 233 --enable_mba --obj_pose_mode delta
   
-  # Eval Preview
-
-python MBA/dataset/vis_prediction.py --ckpt MBA/ckpt_delta/policy_epoch_1000_seed_233.ckpt     --output_video outputs/delta_eval.mp4 --demo_index 0 --full_episode --fps 20 --compare_mode traj --obj_pose_mode delta --data_path data
-
   # 3D Traj Preview
 
 python MBA/dataset/traj_vis.py
