@@ -23,6 +23,7 @@ import argparse
 import time
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+from types import SimpleNamespace
 
 import cv2
 import MinkowskiEngine as ME  # type: ignore
@@ -31,6 +32,7 @@ import torch
 
 from src.egodata_eval.eval import TrajectoryPredictor
 from src.egodata_eval.eval_utils import _build_pose_mats, _denormalize_obj_traj
+from MBA.dataset.realworld import RealWorldDataset
 
 
 def _load_matrix(path: Path) -> np.ndarray:
@@ -70,21 +72,34 @@ def _load_intrinsics(path: Path) -> np.ndarray:
     return K
 
 
-def _load_cam_to_base(path: Path) -> np.ndarray:
-    """Load cam_to_base.txt (frame_id + 12 numbers per line) and return frame-0 transform."""
-    arr = np.loadtxt(str(path), dtype=np.float32, skiprows=1)
-    if arr.ndim == 1:
-        row = arr
-    else:
-        row = arr[0]
-    if row.size < 13:
-        raise ValueError(f"cam_to_base row must contain frame_id + 12 values, got {row}")
-    rot = row[1:10].reshape(3, 3)
-    trans = row[10:13]
-    T = np.eye(4, dtype=np.float32)
-    T[:3, :3] = rot
-    T[:3, 3] = trans
-    return T
+def _load_cam_to_base_map(
+    seq_path: Path,
+    frame_ids: Sequence[str],
+    head_to_zed: Path,
+) -> Dict[str, np.ndarray]:
+    helper = SimpleNamespace(cam_to_base_rot_noise_std=0.0)
+    head_pos_dir = seq_path / "head_pos"
+    extr_map: Dict[int, np.ndarray] = {}
+    if head_pos_dir.exists():
+        extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_dir), str(head_to_zed))
+    cam_map = RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
+    return cam_map
+
+
+def _lookup_cam_to_base(cam_map: Dict[str, np.ndarray], frame_stem: str) -> np.ndarray:
+    """Fetch cam_to_base for the frame key."""
+    if frame_stem in cam_map:
+        return cam_map[frame_stem]
+    try:
+        fid = int(frame_stem)
+        padded = f"{fid:06d}"
+        if padded in cam_map:
+            return cam_map[padded]
+        if str(fid) in cam_map:
+            return cam_map[str(fid)]
+    except ValueError:
+        pass
+    raise RuntimeError(f"cam_to_base not found for frame {frame_stem}")
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -127,8 +142,7 @@ def _predict_sequence(
     pose_cam_ob: np.ndarray,
     T_base_cam: np.ndarray | None,
 ) -> Tuple[np.ndarray, np.ndarray | None]:
-    pose_base_ob = pose_cam_ob if T_base_cam is None else T_base_cam @ pose_cam_ob
-
+    pose_base_ob = T_base_cam @ pose_cam_ob
     feats, coords = predictor._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
     st = ME.SparseTensor(feats, coords)
     cur_obj = predictor._current_obj_vec(pose_base_ob)
@@ -170,32 +184,25 @@ def main() -> None:
         default=None,
         help="Optional path to 3x3 intrinsics matrix. If omitted, look for data-path/cam_K.txt (or K.npy).",
     )
+    parser.add_argument(
+        "--head-to-zed",
+        type=Path,
+        default=Path("glasses_hardware/calib/T_tcp_zed.txt"),
+        help="Path to tcp->zed calibration used when deriving cam_to_base.",
+    )
     args = parser.parse_args()
 
     data_path = args.data_path.resolve()
     rgb_dir = data_path / "rgb"
     depth_dir = data_path / "depth"
     pose_dir = data_path / "ob_in_cam"
-    cam2base_dir = data_path / "cam_to_base"
-    cam2base_txt = data_path / "cam_to_base.txt"
 
     frame_triples = _match_frame_paths(rgb_dir, depth_dir, pose_dir)
     if not frame_triples:
         raise RuntimeError(f"No matching frames found under {data_path}")
 
-    cam2base_files: List[Path] = []
-    if cam2base_txt.exists():
-        cam2base_files = [cam2base_txt]
-    elif cam2base_dir.exists():
-        cam2base_files = _list_frames(cam2base_dir)
-    if not cam2base_files:
-        raise RuntimeError(
-            f"No cam_to_base transform found (expected {cam2base_txt} or directory {cam2base_dir})."
-        )
-    if cam2base_files[0].suffix.lower() == ".txt":
-        T_base_cam = _load_cam_to_base(cam2base_files[0])
-    else:
-        T_base_cam = _load_matrix(cam2base_files[0])
+    rgb_frame_ids = [path.stem for path in _list_frames(rgb_dir)]
+    cam2base_map = _load_cam_to_base_map(data_path, rgb_frame_ids, args.head_to_zed)
 
     if args.intrinsics:
         K = _load_intrinsics(args.intrinsics)
@@ -216,14 +223,17 @@ def main() -> None:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     episode_dir = args.output_root.resolve() / f"{data_path.name}_{timestamp}"
     episode_dir.mkdir(parents=True, exist_ok=True)
-    np.save(episode_dir / "T_base_cam_runtime.npy", T_base_cam.astype(np.float32))
 
     pose_records: List[Dict[str, object]] = []
+    cam_runtime: List[np.ndarray] = []
 
     for frame_idx, (rgb_path, depth_path, pose_path) in enumerate(frame_triples):
         image_bgr = _load_rgb(rgb_path)
         depth_m = _load_depth(depth_path)
         pose_cam_ob = _load_matrix(pose_path)
+        T_base_cam = _lookup_cam_to_base(cam2base_map, frame_idx)
+        T_robot_cam = T_robot_base @ T_base_cam
+        cam_runtime.append(T_robot_cam.astype(np.float32))
 
         pose_base_ob, seq_base = _predict_sequence(
             predictor,
@@ -253,6 +263,7 @@ def main() -> None:
         print(f"[INFO] processed frame {frame_idx:04d} -> pose record saved.")
 
     np.save(episode_dir / "robot_pose_records.npy", np.array(pose_records, dtype=object))
+    np.save(episode_dir / "T_base_cam_runtime.npy", np.stack(cam_runtime, axis=0))
     np.save(episode_dir / "robot_executed_poses.npy", np.zeros((0, 3), dtype=np.float32))
     np.save(episode_dir / "robot_tcp_history.npy", np.zeros((0, 3), dtype=np.float32))
     print(f"[OK] Saved {len(pose_records)} pose records to {episode_dir}")

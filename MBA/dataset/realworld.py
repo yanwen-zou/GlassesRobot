@@ -272,19 +272,24 @@ class RealWorldDataset(Dataset):
 
         def _load_anchor_map():
             cam_to_base_map_local = {}
-            npy_path = os.path.join(demo_path, "cam_to_base.npy")
-            if os.path.exists(npy_path):
-                data = np.load(npy_path, allow_pickle=True).item()
-                frame_ids_file = data.get("frame_ids")
-                transforms = data.get("transforms")
-                if frame_ids_file is None or transforms is None:
-                    warnings.warn(f"[RealWorldDataset] cam_to_base.npy missing expected keys in {demo_path}; using identity.")
-                    return cam_to_base_map_local
-                for fid, mat in zip(frame_ids_file, transforms):
-                    cam_to_base_map_local[f"{int(fid):06d}"] = mat.astype(np.float32)
-                return cam_to_base_map_local
-            else:
-                warnings.warn(f"[RealWorldDataset] cam_to_base not found in {demo_path}; using identity.")
+            txt_path = os.path.join(demo_path, "cam_to_base.txt")
+            if not os.path.exists(txt_path):
+                raise FileNotFoundError(f"[RealWorldDataset] cam_to_base.txt not found in {demo_path}")
+            data = np.loadtxt(txt_path, dtype=np.float32, skiprows=1)
+            if data.ndim == 1:
+                data = data[None, :]
+            for row in data:
+                if row.size < 13:
+                    continue
+                fid = int(round(row[0]))
+                rot = row[1:10].reshape(3, 3)
+                trans = row[10:13]
+                T = np.eye(4, dtype=np.float32)
+                T[:3, :3] = rot
+                T[:3, 3] = trans
+                cam_to_base_map_local[f"{fid:06d}"] = T
+            if not cam_to_base_map_local:
+                raise RuntimeError(f"[RealWorldDataset] cam_to_base.txt in {demo_path} contained no valid rows")
             return cam_to_base_map_local
 
         file_map = _load_anchor_map()
