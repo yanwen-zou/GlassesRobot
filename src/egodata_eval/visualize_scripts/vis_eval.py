@@ -125,7 +125,7 @@ def main():
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_tf = _cam_transform_for_frame(frame_idx)
         if cam_tf is not None:
-            log_axis(f"frames/frame_{frame_idx}/base_cam", (T_robot_base @ cam_tf), args.axis_len * 0.4)
+            log_axis(f"frames/frame_{frame_idx}/base_cam", cam_tf, args.axis_len * 0.4)
 
     if executed is not None and executed.size > 0:
         rr.log(

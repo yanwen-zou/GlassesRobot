@@ -80,26 +80,9 @@ def _load_cam_to_base_map(
     helper = SimpleNamespace(cam_to_base_rot_noise_std=0.0)
     head_pos_dir = seq_path / "head_pos"
     extr_map: Dict[int, np.ndarray] = {}
-    if head_pos_dir.exists():
-        extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_dir), str(head_to_zed))
+    extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_dir), str(head_to_zed))
     cam_map = RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
     return cam_map
-
-
-def _lookup_cam_to_base(cam_map: Dict[str, np.ndarray], frame_stem: str) -> np.ndarray:
-    """Fetch cam_to_base for the frame key."""
-    if frame_stem in cam_map:
-        return cam_map[frame_stem]
-    try:
-        fid = int(frame_stem)
-        padded = f"{fid:06d}"
-        if padded in cam_map:
-            return cam_map[padded]
-        if str(fid) in cam_map:
-            return cam_map[str(fid)]
-    except ValueError:
-        pass
-    raise RuntimeError(f"cam_to_base not found for frame {frame_stem}")
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -231,8 +214,10 @@ def main() -> None:
         image_bgr = _load_rgb(rgb_path)
         depth_m = _load_depth(depth_path)
         pose_cam_ob = _load_matrix(pose_path)
-        T_base_cam = _lookup_cam_to_base(cam2base_map, frame_idx)
+        frame_key = rgb_path.stem
+        T_base_cam = cam2base_map[frame_key]
         T_robot_cam = T_robot_base @ T_base_cam
+
         cam_runtime.append(T_robot_cam.astype(np.float32))
 
         pose_base_ob, seq_base = _predict_sequence(
@@ -257,7 +242,7 @@ def main() -> None:
                 "timestamp": float(time.time()),
                 "frame_idx": int(frame_idx),
                 "object_pose_robot": pose_robot_ob.astype(np.float32),
-                "pred_seq_robot": None if pose_seq_robot is None else pose_seq_robot.astype(np.float32),
+                "pred_seq_robot": pose_seq_robot.astype(np.float32),
             }
         )
         print(f"[INFO] processed frame {frame_idx:04d} -> pose record saved.")
