@@ -53,18 +53,5 @@ python scripts_data_processing/realsense_record_second.py --keyboard-control
 # -------------6D Pose prediction Inference ----------------
 python src/egodata_eval/eval.py --ckpt MBA/ckpt_deploy/policy_last.ckpt 
 
-# -------------PiPER ------------------------
-cd glasses_hardware/piper_sdk/piper_sdk
-bash can_activate.sh can0 1000000
- # Control
-python glasses_hardware/hardware/my_device/piper.py
-
-# -----------Visualize point cloud-----------
-python src/egodata_eval/vis_pointcloud_sequence.py     --data_path data/moving --seq_index 0 --fps 30
-
-# -----------VGGT Pointcloud Reconstruction-------------
-
- # IN foundation_stereo ENV
-python vggt/glass_demo.py --episode-dir data/20251112_142342
-
-python src/egodata_eval/visualize_scripts/vis_tsdf.py
+# in train dataset, offline
+python src/egodata_eval/eval_dataset.py --data-path data/train/20251210_210052/ --ckpt MBA/ckpt_1213/policy_epoch_1000_seed_233.ckpt 
