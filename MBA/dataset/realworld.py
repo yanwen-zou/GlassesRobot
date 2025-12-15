@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from .constants import *
 # Use absolute import to allow running when MBA is on PYTHONPATH as a top-level module.
-from utils.transformation import xyz_rot_transform
+from ..utils.transformation import xyz_rot_transform
 
 # Default rotation noise (radians) applied to cam_to_base when requested.
 CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(1.0)

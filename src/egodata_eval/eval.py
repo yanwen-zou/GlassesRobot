@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import sys
 import os
+from typing import Optional
 
 import cv2
 import signal
@@ -25,9 +26,9 @@ _denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient, \
 _import_zed_class   # type: ignore
 
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
-from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
-from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
-from glasses_hardware.hardware.my_device.i2rt import I2RT  # type: ignore
+# from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
+# from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
+# from glasses_hardware.hardware.my_device.i2rt import I2RT  # type: ignore
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
 
@@ -44,8 +45,8 @@ class TrajectoryPredictor:
         self.num_action = num_action
         self.obj_pose_mode = obj_pose_mode
         self.voxel_size = voxel_size
-        self._cached_points_cam: np.ndarray | None = None
-        self.last_traj_denorm: np.ndarray | None = None
+        self._cached_points_cam: Optional[np.ndarray] = None
+        self.last_traj_denorm: Optional[np.ndarray] = None
         self.model = RISE(num_action=num_action,
                           input_dim=6,
                           obs_feature_dim=512,
@@ -62,7 +63,7 @@ class TrajectoryPredictor:
         state = torch.load(str(ckpt_path), map_location=self.device)
         self.model.load_state_dict(state, strict=False)
 
-    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: np.ndarray | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Backproject depth to xyz and optionally convert to base (ball) frame."""
         h, w = depth_m.shape
         fx, fy = K[0, 0], K[1, 1]
@@ -145,7 +146,7 @@ class TrajectoryPredictor:
             delta_full = np.concatenate([delta_xyz, delta_r6], axis=1)
         return delta_full.astype(np.float32)
 
-    def predict_and_overlay(self, image_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, pose_cam_ob: np.ndarray, T_base_cam: np.ndarray | None = None) -> np.ndarray:
+    def predict_and_overlay(self, image_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, pose_cam_ob: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> np.ndarray:
         # Convert object pose to base frame if provided
         if T_base_cam is not None:
             pose_base_ob = T_base_cam @ pose_cam_ob
@@ -197,7 +198,7 @@ class TrajectoryPredictor:
         )
 
 
-def _load_calib_mat_safe(path: Path) -> np.ndarray | None:
+def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
     try:
         arr = np.load(str(path)).astype(np.float32)
         if arr.shape == (4, 4):
@@ -214,7 +215,7 @@ I2RT_TARGET_DEG = [-17, 25, 61, -42, 0, -2,0]
 I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
 
 
-def move_i2rt_to_init_angles(robot: I2RT | None, target_rad: np.ndarray = I2RT_TARGET_RAD, duration: float = 2.0, steps: int = 80) -> None:
+def move_i2rt_to_init_angles(robot: Optional["I2RT"], target_rad: np.ndarray = I2RT_TARGET_RAD, duration: float = 2.0, steps: int = 80) -> None:
     """Move I2RT arm to the evaluation target joint configuration."""
     if robot is None:
         print("[WARN] I2RT arm not initialized; cannot move to init pose.")
@@ -226,7 +227,7 @@ def move_i2rt_to_init_angles(robot: I2RT | None, target_rad: np.ndarray = I2RT_T
         print(f"[WARN] I2RT init move failed: {exc}")
 
 
-def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot_fn=None) -> np.ndarray | None:
+def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot_fn=None) -> Optional[np.ndarray]:
     """Perform ball-based calibration to compute T_base_cam."""
     if move_robot_fn is not None:
         move_robot_fn()
@@ -267,7 +268,7 @@ def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot
 
     frame_rgb = frame[..., ::-1].copy()
 
-    def centroid_from_mask(mask: np.ndarray) -> np.ndarray | None:
+    def centroid_from_mask(mask: np.ndarray) -> Optional[np.ndarray]:
         valid = (mask.astype(bool)) & np.isfinite(depth_m) & (depth_m > 1e-6)
         if valid.sum() < 10:
             return None

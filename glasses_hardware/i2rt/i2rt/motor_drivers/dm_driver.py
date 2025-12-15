@@ -544,6 +544,7 @@ class DMChainCanInterface(MotorChain):
 
     def _set_commands(self, commands: List[MotorCmd]) -> List[MotorInfo]:
         motor_feedback = []
+        last_feedback = None
         for idx, motor_info in enumerate(self.motor_list):
             motor_id, motor_type = motor_info
             torque = commands[idx].torque * self.motor_direction[idx]
@@ -563,10 +564,11 @@ class DMChainCanInterface(MotorChain):
                     torque=torque,
                 )
             except Exception as e:
-                logging.error(f"{idx}th motor at DMChainCanInterface {self} failed with info {motor_info}")
-                raise e
-
+                logging.warning(f"DM Error when setting command to motor {motor_id} at {self}: {e}")
+                fd_back = last_feedback
             motor_feedback.append(fd_back)
+            if fd_back is not None:
+                last_feedback = fd_back
         return motor_feedback
 
     def read_states(self, torques: Optional[np.ndarray] = None) -> List[MotorInfo]:

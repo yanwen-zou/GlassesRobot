@@ -29,9 +29,24 @@ import cv2
 import MinkowskiEngine as ME  # type: ignore
 import numpy as np
 import torch
+import sys
 
-from src.egodata_eval.eval import TrajectoryPredictor
-from src.egodata_eval.eval_utils import _build_pose_mats, _denormalize_obj_traj
+here = Path(__file__).resolve()
+project_root = here.parents[2]
+src_root = project_root / "src"
+mba_root = project_root / "MBA"
+# Ensure project root paths are on sys.path, preferring MBA utils over src/utils.
+for path in (src_root, mba_root, project_root):
+    path_str = str(path)
+    if path_str in sys.path:
+        sys.path.remove(path_str)
+for path in reversed([project_root, mba_root, src_root]):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from egodata_eval.eval import TrajectoryPredictor
+from egodata_eval.eval_utils import _build_pose_mats, _denormalize_obj_traj
 from MBA.dataset.realworld import RealWorldDataset
 
 
