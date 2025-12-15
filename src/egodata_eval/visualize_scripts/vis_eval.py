@@ -41,7 +41,7 @@ def main():
         "--T_base_cam",
         type=Path,
         default=Path("glasses_hardware/calib/T_base_cam_runtime.npy"),
-        help="Path to T_base_cam.npy.",
+        help="Fallback path to T_base_cam.npy if per-episode file is missing.",
     )
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length for frames.")
     parser.add_argument("--spawn", action="store_true", help="Spawn rerun viewer.")
@@ -53,7 +53,11 @@ def main():
     tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
 
     T_robot_base = np.load(args.T_robot_base).astype(np.float32)
-    T_base_cam = load_array(args.T_base_cam)
+    runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
+    if runtime_cam_path.exists():
+        T_base_cam_seq = load_array(runtime_cam_path)
+    else:
+        T_base_cam_seq = load_array(args.T_base_cam)
 
     try:
         import rerun as rr
@@ -84,6 +88,15 @@ def main():
             ),
         )
 
+    def _cam_transform_for_frame(idx: int) -> np.ndarray | None:
+        if T_base_cam_seq is None:
+            return None
+        if T_base_cam_seq.ndim == 2:
+            return T_base_cam_seq
+        if idx < T_base_cam_seq.shape[0]:
+            return T_base_cam_seq[idx]
+        return T_base_cam_seq[-1]
+
     for rec in pose_records:
         frame_idx = rec.get("frame_idx", -1)
         pose_robot = rec.get("object_pose_robot")
@@ -110,8 +123,9 @@ def main():
                 ),
             )
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
-        if T_base_cam is not None:
-            log_axis(f"frames/frame_{frame_idx}/base_cam", (T_robot_base @ T_base_cam), args.axis_len * 0.4)
+        cam_tf = _cam_transform_for_frame(frame_idx)
+        if cam_tf is not None:
+            log_axis(f"frames/frame_{frame_idx}/base_cam", cam_tf, args.axis_len * 0.4)
 
     if executed is not None and executed.size > 0:
         rr.log(

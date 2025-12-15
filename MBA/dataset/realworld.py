@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from .constants import *
 # Use absolute import to allow running when MBA is on PYTHONPATH as a top-level module.
-from utils.transformation import xyz_rot_transform
+from ..utils.transformation import xyz_rot_transform
 
 # Default rotation noise (radians) applied to cam_to_base when requested.
 CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(1.0)
@@ -296,22 +296,11 @@ class RealWorldDataset(Dataset):
         if file_map:
             anchor_key = sorted(file_map.keys())[0]
             T_base_cam0 = file_map[anchor_key]
-        else:
-            anchor_key = f"{int(frame_ids[0]):06d}" if frame_ids else "000000"
-            T_base_cam0 = np.eye(4, dtype=np.float32)
-            warnings.warn(f"[RealWorldDataset] Using identity T_base_cam for {demo_path} (no cam_to_base file found).")
 
         if not extr_map:
             return {f"{int(fid):06d}": T_base_cam0.copy() for fid in frame_ids}
 
-        try:
-            anchor_int = int(anchor_key)
-        except Exception:
-            anchor_int = None
-
-        if anchor_int is None or anchor_int not in extr_map:
-            warnings.warn(f"[RealWorldDataset] Missing head_pos for anchor frame {anchor_key}; keeping anchor for all frames.")
-            return {f"{int(fid):06d}": T_base_cam0.copy() for fid in frame_ids}
+        anchor_int = int(anchor_key)
 
         T_world_cam0 = extr_map[anchor_int] # extr_map: world_cam0
         cam_to_base_map = {}
@@ -328,7 +317,6 @@ class RealWorldDataset(Dataset):
             T_base_cam = T_base_cam0 @ T_cam0_cam
             cam_to_base_map[fid_key] = T_base_cam.astype(np.float32)
             prev_T = T_base_cam
-
         # Optional rotation noise
         if self.cam_to_base_rot_noise_std > 0.0:
             def _rand_rot(std: float) -> np.ndarray:

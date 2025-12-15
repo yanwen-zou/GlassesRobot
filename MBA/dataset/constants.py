@@ -1,7 +1,7 @@
 import numpy as np
 
-# Use absolute import because this package is executed as a top-level module.
-from utils.constants import *
+# Use package-relative import to avoid depending on external sys.path state.
+from ..utils.constants import *
 
 
 TO_TENSOR_KEYS = [
