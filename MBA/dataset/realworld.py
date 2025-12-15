@@ -272,20 +272,24 @@ class RealWorldDataset(Dataset):
 
         def _load_anchor_map():
             cam_to_base_map_local = {}
-            npy_path = os.path.join(demo_path, "cam_to_base.npy")
-            if os.path.exists(npy_path):
-                data = np.load(npy_path, allow_pickle=True).item()
-                frame_ids_file = data.get("frame_ids")
-                transforms = data.get("transforms")
-                if frame_ids_file is None or transforms is None:
-                    warnings.warn(f"[RealWorldDataset] cam_to_base.npy missing expected keys in {demo_path}; using identity.")
-                    return cam_to_base_map_local
+            txt_path = os.path.join(demo_path, "cam_to_base.txt")  # 使用 `.txt` 文件路径
+            if os.path.exists(txt_path):
+                # 加载 `.txt` 文件，跳过第一行标题
+                data = np.loadtxt(txt_path, dtype=np.float32, skiprows=1)  # 跳过第一行
+                
+                # 假设第一列是 `frame_id`，剩下的是 12 个数值，表示 3x4 矩阵
+                frame_ids_file = data[:, 0].astype(int)  # 获取 `frame_id`
+                transforms = data[:, 1:].reshape(-1, 3, 4)  # 将剩余的部分转化为 3x4 矩阵
+                
                 for fid, mat in zip(frame_ids_file, transforms):
-                    cam_to_base_map_local[f"{int(fid):06d}"] = mat.astype(np.float32)
+                    # 将 3x4 矩阵补充为 4x4 矩阵
+                    mat_4x4 = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
+                    cam_to_base_map_local[f"{fid:06d}"] = mat_4x4  # 将每个 `frame_id` 对应的 4x4 变换矩阵保存
                 return cam_to_base_map_local
             else:
-                warnings.warn(f"[RealWorldDataset] cam_to_base not found in {demo_path}; using identity.")
+                warnings.warn(f"[RealWorldDataset] cam_to_base.txt not found in {demo_path}; using identity.")
             return cam_to_base_map_local
+
 
         file_map = _load_anchor_map()
 
