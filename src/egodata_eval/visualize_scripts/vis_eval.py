@@ -103,6 +103,7 @@ def main():
         pred_seq = rec.get("pred_seq_robot")
         if pose_robot is None:
             continue
+        #rr.set_time("frame", int(frame_idx))
         pose_robot = np.asarray(pose_robot, dtype=np.float32).reshape(4, 4)
         rr.log(
             f"frames/frame_{frame_idx}/object_pose",
@@ -112,10 +113,12 @@ def main():
                 radii=args.axis_len * 0.05,
             ),
         )
+        pred_path = "predictions/current"
+        rr.log(pred_path, rr.Clear(recursive=True))
         if pred_seq is not None:
             pred_seq = np.asarray(pred_seq, dtype=np.float32)
             rr.log(
-                f"frames/frame_{frame_idx}/pred_points",
+                pred_path,
                 rr.Points3D(
                     positions=pred_seq[:, :3, 3],
                     colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),

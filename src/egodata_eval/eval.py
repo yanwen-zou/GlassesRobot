@@ -66,10 +66,12 @@ class TrajectoryPredictor:
     def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Backproject depth to xyz and optionally convert to base (ball) frame."""
         h, w = depth_m.shape
+        print(f"[Traj Predictor INFO] depth_m.shape(h,w):{depth_m.shape}")
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
         # Subsample grid for speed
-        step = max(1, int(max(h, w) / 480))
+        step = max(1, int(max(h, w) / 480)) # for case that h=376, w=672, step = 1
+        print(f"[INFO] step: {step}")
         ys, xs = np.mgrid[0:h:step, 0:w:step]
         zs = depth_m[ys, xs]
         valid = zs > 1e-6

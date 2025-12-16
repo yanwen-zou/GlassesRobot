@@ -16,8 +16,23 @@ from typing import Iterable
 import numpy as np
 import rerun as rr
 from PIL import Image
+import sys
 
-from dataset.realworld import RealWorldDataset
+here = Path(__file__).resolve()
+project_root = here.parents[3]
+src_root = project_root / "src"
+mba_root = project_root / "MBA"
+# Ensure project root paths are on sys.path, preferring MBA utils over src/utils.
+for path in (src_root, mba_root, project_root):
+    path_str = str(path)
+    if path_str in sys.path:
+        sys.path.remove(path_str)
+for path in reversed([project_root, mba_root, src_root]):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from MBA.dataset.realworld import RealWorldDataset
 
 
 def load_rgb(rgb_path: Path) -> np.ndarray:

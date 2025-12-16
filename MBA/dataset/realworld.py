@@ -15,7 +15,7 @@ from .constants import *
 from ..utils.transformation import xyz_rot_transform
 
 # Default rotation noise (radians) applied to cam_to_base when requested.
-CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(1.0)
+CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(0)
 
 class RealWorldDataset(Dataset):
     """
@@ -81,7 +81,7 @@ class RealWorldDataset(Dataset):
         self.data_paths = []
         self.obs_frame_ids = []
         self.action_frame_ids = []
-        self.seq_ids = []
+        self.seq_ids = [] # one sequence = one episode
         if self.with_obj_action:
             self.obj_frame_ids = []
         self.seq_intrinsics = {}
@@ -90,7 +90,7 @@ class RealWorldDataset(Dataset):
         self.seq_num_frames = {}
         self.seq_last_frame_id = {}
         self.seq_terminal_frame_ids = {}
-        self.seq_cam_to_base = {}
+        self.seq_cam_to_base = {} # seq_cam_to_base[demo]: cam_to_base in one episode
 
         for demo in self.all_demos:
             demo_path = os.path.join(self.data_path, demo)
@@ -125,7 +125,7 @@ class RealWorldDataset(Dataset):
             self.seq_camera_extrinsics[demo] = extr_map
 
             cam_to_base_map = self._load_cam_to_base(demo_path, frame_ids, extr_map)
-            self.seq_cam_to_base[demo] = cam_to_base_map
+            self.seq_cam_to_base[demo] = cam_to_base_map 
             self.seq_ref_frame[demo] = int(frame_ids[0])
             self.seq_num_frames[demo] = len(frame_ids)
             self.seq_last_frame_id[demo] = frame_ids[-1]
@@ -490,7 +490,7 @@ class RealWorldDataset(Dataset):
             termination_flags = np.array(termination_flags, dtype=np.float32).reshape(-1, 1)
             action_objs = np.concatenate([action_objs, termination_flags], axis=-1)
             actions_obj_normalized = self._normalize_obj(action_objs.copy())
-            ret_dict["action_obj"] = torch.from_numpy(action_objs).float()
+            ret_dict["action_obj"] = torch.from_numpy(action_objs).float() # abs traj in base frame
             ret_dict["action_obj_normalized"] = torch.from_numpy(actions_obj_normalized).float()
 
             current_frame_id = obs_frame_ids[-1]
@@ -503,7 +503,7 @@ class RealWorldDataset(Dataset):
             )
             current_obj = np.concatenate([current_obj, current_term_flag], axis=0)
             current_obj_normalized = self._normalize_obj(current_obj[None, :]).squeeze(0)
-            ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float()
+            ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float() # obj pose in base frame
             ret_dict["current_obj_pose_normalized"] = torch.from_numpy(current_obj_normalized).float()
 
         return ret_dict
