@@ -164,19 +164,8 @@ class RealWorldDataset(Dataset):
     def _get_cam_to_base(self, seq_id, frame_id_str):
         """Fetch T_base_cam for a frame; identity if missing."""
         cam_to_base_map = self.seq_cam_to_base.get(seq_id, {})
-        if not cam_to_base_map:
-            return np.eye(4, dtype=np.float32)
-        if frame_id_str in cam_to_base_map:
-            return cam_to_base_map[frame_id_str]
-        try:
-            frame_int = int(frame_id_str)
-            fallback_key = f"{frame_int}"
-        except ValueError:
-            fallback_key = None
-        if fallback_key and fallback_key in cam_to_base_map:
-            return cam_to_base_map[fallback_key]
-        warnings.warn(f"[dataset] Missing cam_to_base for seq={seq_id} frame={frame_id_str}; using identity.")
-        return np.eye(4, dtype=np.float32)
+        return cam_to_base_map[frame_id_str]
+
         
     def __len__(self):
         return len(self.obs_frame_ids)
@@ -274,22 +263,24 @@ class RealWorldDataset(Dataset):
 
         def _load_anchor_map():
             cam_to_base_map_local = {}
-            txt_path = os.path.join(demo_path, "cam_to_base.txt")  # 使用 `.txt` 文件路径
-            if os.path.exists(txt_path):
-                # 加载 `.txt` 文件，跳过第一行标题
-                data = np.loadtxt(txt_path, dtype=np.float32, skiprows=1)  # 跳过第一行
-                
-                # 假设第一列是 `frame_id`，剩下的是 12 个数值，表示 3x4 矩阵
-                frame_ids_file = data[:, 0].astype(int)  # 获取 `frame_id`
-                transforms = data[:, 1:].reshape(-1, 3, 4)  # 将剩余的部分转化为 3x4 矩阵
-                
-                for fid, mat in zip(frame_ids_file, transforms):
-                    # 将 3x4 矩阵补充为 4x4 矩阵
-                    mat_4x4 = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
-                    cam_to_base_map_local[f"{fid:06d}"] = mat_4x4  # 将每个 `frame_id` 对应的 4x4 变换矩阵保存
-                return cam_to_base_map_local
-            else:
-                warnings.warn(f"[RealWorldDataset] cam_to_base.txt not found in {demo_path}; using identity.")
+            txt_path = os.path.join(demo_path, "cam_to_base.txt")
+            if not os.path.exists(txt_path):
+                raise FileNotFoundError(f"[RealWorldDataset] cam_to_base.txt not found in {demo_path}")
+            data = np.loadtxt(txt_path, dtype=np.float32, skiprows=1)
+            if data.ndim == 1:
+                data = data[None, :]
+            for row in data:
+                if row.size < 13:
+                    continue
+                fid = int(round(row[0]))
+                rot = row[1:10].reshape(3, 3)
+                trans = row[10:13]
+                T = np.eye(4, dtype=np.float32)
+                T[:3, :3] = rot
+                T[:3, 3] = trans
+                cam_to_base_map_local[f"{fid:06d}"] = T
+            if not cam_to_base_map_local:
+                raise RuntimeError(f"[RealWorldDataset] cam_to_base.txt in {demo_path} contained no valid entries.")
             return cam_to_base_map_local
 
 
@@ -311,9 +302,7 @@ class RealWorldDataset(Dataset):
             fid_int = int(fid)
             fid_key = f"{fid_int:06d}"
             if fid_int not in extr_map:
-                warnings.warn(f"[RealWorldDataset] Missing head_pos for frame {fid_key}; reusing previous cam_to_base.")
-                cam_to_base_map[fid_key] = prev_T.copy()
-                continue
+                raise Exception(f"[RealWorldDataset] Missing head_pos for frame {fid_key}; reusing previous cam_to_base.")
             T_world_cam = extr_map[fid_int]
             T_cam0_cam = np.linalg.inv(T_world_cam0) @ T_world_cam # head_cam_inv @ world_head0_inv @ world_head @ head_cam
             T_base_cam = T_base_cam0 @ T_cam0_cam

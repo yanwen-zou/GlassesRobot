@@ -288,6 +288,7 @@ def main() -> None:
 
     pose_records: List[Dict[str, object]] = []
     cam_runtime: List[np.ndarray] = []
+    base_cam_raw: List[np.ndarray] = []
     loss_sum = 0.0
     loss_count = 0
 
@@ -300,6 +301,7 @@ def main() -> None:
         T_robot_cam = T_robot_base @ T_base_cam
 
         cam_runtime.append(T_robot_cam.astype(np.float32))
+        base_cam_raw.append(T_base_cam.astype(np.float32))
 
         pose_base_ob, seq_pred = _predict_sequence(
             predictor,
@@ -353,6 +355,7 @@ def main() -> None:
 
     np.save(episode_dir / "robot_pose_records.npy", np.array(pose_records, dtype=object))
     np.save(episode_dir / "T_base_cam_runtime.npy", np.stack(cam_runtime, axis=0))
+    np.save(episode_dir / "T_base_cam.npy", np.stack(base_cam_raw, axis=0))
     np.save(episode_dir / "robot_executed_poses.npy", np.zeros((0, 3), dtype=np.float32))
     np.save(episode_dir / "robot_tcp_history.npy", np.zeros((0, 3), dtype=np.float32))
     print(f"[OK] Saved {len(pose_records)} pose records to {episode_dir}")
