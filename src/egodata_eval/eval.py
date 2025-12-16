@@ -336,7 +336,7 @@ def run():
     # Initialize depth estimator and load model at start
 
     print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator(scale=0.5) # no need to modify intrinsics;
+    depth_est = DepthEstimator(scale=0.75) # no need to modify intrinsics;
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'

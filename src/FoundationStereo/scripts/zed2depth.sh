@@ -6,10 +6,11 @@ FS_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 PROJECT_ROOT=$(cd "${FS_ROOT}/../.." && pwd)
 DEFAULT_DATA_DIR="${PROJECT_ROOT}/data/train"
 DATA_DIR="$DEFAULT_DATA_DIR"
+SCALE=1
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] <timestamp_dir>
+Usage: $(basename "$0") [--data-root PATH] [--scale FLOAT] <timestamp_dir>
 EOF
 }
 
@@ -22,6 +23,14 @@ while [ "$#" -gt 0 ]; do
                 exit 1
             fi
             DATA_DIR="$2"
+            shift 2
+            ;;
+        --scale)
+            if [ "${2:-}" = "" ]; then
+                echo "❌ Missing value for --scale" >&2
+                exit 1
+            fi
+            SCALE="$2"
             shift 2
             ;;
         -h|--help)
@@ -135,7 +144,8 @@ mkdir -p "$depth_dir"
 conda run --no-capture-output -n foundation_stereo python -u scripts/stereo2depth.py \
     --left_file "$input_left" \
     --right_file "$input_right" \
-    --out_dir "$episode_dir"
+    --out_dir "$episode_dir" \
+    --scale "$SCALE"
 
 echo "starting PNG2JPG processing for ${timestamp}..."
 
