@@ -224,6 +224,12 @@ def main() -> None:
         help="Path to T_robot_base transform (base->robot).",
     )
     parser.add_argument(
+        "--num_action",
+        type=int,
+        default=20,
+        help="Number of action/object steps predicted by the checkpoint (must match training).",
+    )
+    parser.add_argument(
         "--intrinsics",
         type=Path,
         default=None,
@@ -273,8 +279,8 @@ def main() -> None:
 
     T_robot_base = _load_matrix(args.T_robot_base)
 
-    predictor = TrajectoryPredictor(args.ckpt)
-    horizon = getattr(predictor.model.action_decoder, "horizon", 0)
+    predictor = TrajectoryPredictor(args.ckpt, num_action=args.num_action)
+    horizon = getattr(predictor.model.action_decoder, "horizon", args.num_action)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     episode_dir = args.output_root.resolve() / f"{data_path.name}_{timestamp}"
