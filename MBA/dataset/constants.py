@@ -1,8 +1,10 @@
 import numpy as np
 
 # Use package-relative import to avoid depending on external sys.path state.
-from ..utils.constants import *
-
+try:
+    from ..utils.constants import *
+except:
+    from utils.constants import *
 
 TO_TENSOR_KEYS = [
     'input_coords_list',
