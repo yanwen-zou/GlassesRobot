@@ -26,9 +26,9 @@ _denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient, \
 _import_zed_class   # type: ignore
 
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
-# from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
-# from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
-# from glasses_hardware.hardware.my_device.i2rt import I2RT  # type: ignore
+from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
+from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
+from glasses_hardware.hardware.my_device.i2rt_robo import I2RT  # type: ignore
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
 
@@ -38,6 +38,11 @@ import MinkowskiEngine as ME  # type: ignore
 from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot  # type: ignore
+from scripts_calib_balls.calculate_ball_centers import (
+    calculate_ball_centroid,
+    DEFAULT_MAX_RADIUS_STD_RATIO,
+)
+from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
 
 class TrajectoryPredictor:
     def __init__(self, ckpt_path: Path, num_action: int = 20, obj_pose_mode: str = "delta", voxel_size: float = 0.005):
@@ -229,7 +234,12 @@ def move_i2rt_to_init_angles(robot: Optional["I2RT"], target_rad: np.ndarray = I
         print(f"[WARN] I2RT init move failed: {exc}")
 
 
-def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot_fn=None) -> Optional[np.ndarray]:
+def calibrate_from_three_balls(
+    cam_handle,
+    depth_est: DepthEstimator,
+    move_robot_fn=None,
+    centroid_log_dir: Optional[Path] = None,
+) -> Optional[np.ndarray]:
     """Perform ball-based calibration to compute T_base_cam."""
     if move_robot_fn is not None:
         move_robot_fn()
@@ -270,28 +280,20 @@ def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot
 
     frame_rgb = frame[..., ::-1].copy()
 
-    def centroid_from_mask(mask: np.ndarray) -> Optional[np.ndarray]:
-        valid = (mask.astype(bool)) & np.isfinite(depth_m) & (depth_m > 1e-6)
-        if valid.sum() < 10:
-            return None
-        vs, us = np.nonzero(valid)
-        zs = depth_m[valid]
-
-        x = (us - cx) * zs / fx
-        y = (vs - cy) * zs / fy
-        pts = np.stack([x, y, zs], axis=-1)
-        return pts.mean(axis=0)
+    def _show_mask(mask_img: np.ndarray, window: str) -> None:
+        overlay = frame.copy()
+        mask_bool = mask_img.astype(bool)
+        overlay[mask_bool] = (
+            0.4 * overlay[mask_bool].astype(np.float32) + 0.6 * np.array([0, 0, 255], dtype=np.float32)
+        )
+        overlay = overlay.astype(np.uint8)
+        cv2.imshow(window, overlay)
+        cv2.waitKey(10)
 
     cam_pts = []
     for idx, (u, v) in enumerate(pts, 1):
         u = int(round(u))
         v = int(round(v))
-        roi = 60
-        u0 = max(0, u - roi)
-        u1 = min(frame.shape[1], u + roi)
-        v0 = max(0, v - roi)
-        v1 = min(frame.shape[0], v + roi)
-        crop = frame_rgb[v0:v1, u0:u1].copy()
         mask = None
         try:
             mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
@@ -300,14 +302,42 @@ def calibrate_from_three_balls(cam_handle, depth_est: DepthEstimator, move_robot
         except Exception as exc:
             print(f"[WARN] SAM mask failed for point {idx}: {exc}")
 
-        centroid = centroid_from_mask(mask) if mask is not None else None
+        centroid = None
+        if mask is not None:
+            mask_arr = np.asarray(mask)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze(axis=2)
+            centroid = calculate_ball_centroid(
+                depth_m=depth_m,
+                mask=mask_arr.astype(bool),
+                intrinsic=K_rs,
+                max_radius_std_ratio=DEFAULT_MAX_RADIUS_STD_RATIO,
+                frame_id=0,
+                ball_id=idx,
+            )
+            # _show_mask(mask_arr.astype(np.uint8), f"Ball Mask {idx}")
         if centroid is not None:
             cam_pts.append(centroid)
             print(f"[INFO] Mask centroid for p{idx}: {centroid}")
             continue
 
+    if len(cam_pts) != 3:
+        print("[WARN] Failed to compute all three ball centroids; aborting calibration.")
+        return None
+
     p1, p2, p3 = cam_pts
-    from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+
+    # Persist individual ball centroids for debugging/reuse
+    if centroid_log_dir is None:
+        centroid_log_dir = Path(__file__).resolve().parents[2] / "glasses_hardware" / "calib"
+    centroid_log_dir.mkdir(parents=True, exist_ok=True)
+    centroid_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    centroid_log_path = centroid_log_dir / f"ball_centroids_{centroid_ts}.txt"
+    with open(centroid_log_path, "w", encoding="utf-8") as fh:
+        fh.write("ball_id x y z\n")
+        for idx, pt in enumerate((p1, p2, p3), start=1):
+            fh.write(f"ball_{idx} {pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f}\n")
+    print(f"[INFO] Saved per-ball centroids to: {centroid_log_path}")
 
     R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
     T = np.eye(4, dtype=np.float32)
@@ -323,6 +353,8 @@ def run():
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--base-to-robot-npy", type=str, default='glasses_hardware/calib/T_robot_base.npy', help="Path to T_robot_base.npy (maps base->robot). Default: identity.")
+    ap.add_argument("--num_action", type=int, default=20)
+    ap.add_argument("--mesh-name", type=str, default="book", help="Name of mesh folder under data/ containing mesh.obj.")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = 10
@@ -359,13 +391,18 @@ def run():
 
     print("[INFO] Initializing I2RT...")
     i2rt_robot = I2RT(channel="can0", zero_gravity_mode=True, home=False)
-    time.sleep(1)
+    time.sleep(3)
 
     T_base_cam = calibrate_from_three_balls(
         cam,
         depth_est,
         move_robot_fn=lambda: move_i2rt_to_init_angles(i2rt_robot),
+        centroid_log_dir=out_dir,
     )
+    if T_base_cam is not None:
+        runtime_cam_path = out_dir / "T_base_cam_runtime.npy"
+        np.save(runtime_cam_path, T_base_cam.astype(np.float32))
+        print(f"[INFO] Saved runtime T_base_cam to: {runtime_cam_path}")
 
     cam_size = cam.size
 
@@ -410,7 +447,7 @@ def run():
 
     # Try initialize trajectory predictor (optional)
 
-    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt)) # current traj pred is under base frame
+    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt), num_action= args.num_action) # current traj pred is under base frame
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
@@ -465,8 +502,9 @@ def run():
                     continue
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
-
-                    mesh_path = Path(__file__).resolve().parents[2] / "data" / "book" / "mesh.obj"
+                    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj"
+                    if not mesh_path.exists():
+                        raise FileNotFoundError(f"Mesh not found: {mesh_path}")
                     if pose_est is None:
                         pose_est = PoseEstimatorFP(mesh_path)
                     pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
@@ -497,7 +535,7 @@ def run():
                             # Record current pose + predicted sequence in robot frame
                             # First convert current object pose from FP to robot frame
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
-                            print("[INFO] OB In Cam: {pose_cam_ob}")
+                            print(f"[INFO] OB In Cam: {pose_cam_ob}")
 
                             pose_base_ob = T_base_cam @ pose_cam_ob
                             pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
@@ -518,7 +556,7 @@ def run():
                                     "timestamp": float(time.time()),
                                     "frame_idx": int(frame_idx),
                                     "object_pose_robot": pose_robot_ob.astype(np.float32),
-                                    "pred_seq_robot": None if pose_seq_robot is None else pose_seq_robot.astype(np.float32),
+                                    "pred_seq_robot": pose_seq_robot.astype(np.float32),
                                 }
                             )
 
