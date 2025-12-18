@@ -40,7 +40,7 @@ class DepthEstimator:
         cfg_path = ckpt_dir.parent / "cfg.yaml"
 
         cfg = OmegaConf.load(str(cfg_path))
-        if "vit_size" not in cfg:
+        if "vit_size" not in cfg:  # currently set vit_size = "vits" in 11-33-40
             cfg["vit_size"] = "vitl"
         # Real-time leaning defaults
         cfg["valid_iters"] = int(cfg.get("valid_iters", 24))

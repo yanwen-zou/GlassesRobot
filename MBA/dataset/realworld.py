@@ -451,17 +451,9 @@ class RealWorldDataset(Dataset):
                 if not os.path.exists(pose_path):
                     raise FileNotFoundError(f"Object pose file missing: {pose_path}")
                 pose_values = np.loadtxt(pose_path).astype(np.float32)
-                if pose_values.ndim == 1:
-                    if pose_values.size == 16:
-                        pose_mat = pose_values.reshape(4, 4)
-                    elif pose_values.size == 12:
-                        pose_mat = np.vstack([pose_values.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
-                    else:
-                        raise ValueError(f"Invalid SE3 vector length {pose_values.size} in {pose_path}")
-                else:
-                    pose_mat = pose_values
-                if pose_mat.shape == (3, 4):
-                    pose_mat = np.vstack([pose_mat, np.array([0, 0, 0, 1], dtype=np.float32)])
+                
+                pose_mat = pose_values
+
                 if pose_mat.shape != (4, 4):
                     raise ValueError(f"Invalid SE3 matrix shape {pose_mat.shape} in {pose_path}")
                 T_base_cam = self._get_cam_to_base(seq_id, frame_id_str)

@@ -300,7 +300,7 @@ def main() -> None:
         T_base_cam = cam2base_map[frame_key]
         T_robot_cam = T_robot_base @ T_base_cam
 
-        cam_runtime.append(T_robot_cam.astype(np.float32))
+        cam_runtime.append(T_base_cam.astype(np.float32))
         base_cam_raw.append(T_base_cam.astype(np.float32))
 
         pose_base_ob, seq_pred = _predict_sequence(

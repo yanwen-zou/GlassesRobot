@@ -31,7 +31,7 @@ sys.modules.pop("i2rt", None)
 sys.modules.pop("i2rt.robots", None)
 
 from i2rt.robots.get_robot import get_yam_robot
-from i2rt.robots.kinematics import Kinematics
+from i2rt.robots.kinematics_mj import Kinematics
 from i2rt.robots.utils import YAM_XML_PATH
 
 
@@ -128,7 +128,7 @@ def main():
     target_pose_rad = [0.0, 0.15, 0.25, -0.2, 0.0, 0.0, 0]
     zero_pose_rad = np.zeros(robot.num_dofs())
     print(f"Moving to target joint positions (rad): {target_pose_rad}")
-    model = Kinematics(YAM_XML_PATH, "link_6")
+    model = Kinematics(YAM_XML_PATH, "tcp_site")
     """执行 IK 插值路径"""
     q_init = np.array([0.0, 0.15, 0.25, -0.2, 0.0, 0.0])
     pose_init = model.fk(q_init)
