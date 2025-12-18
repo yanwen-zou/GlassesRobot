@@ -14,6 +14,7 @@ FOUNDATION_STEREO_DIR="${PROJECT_ROOT}/src/FoundationStereo"
 BALL_PIPELINE="${PROJECT_ROOT}/scripts_calib_balls/run_ball_pipeline.sh"
 DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data"
 DATA_ROOT="$DEFAULT_DATA_ROOT"
+SCALE=0.75
 INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
 
 if [ ! -f "$INTRINSICS_SRC" ]; then
@@ -23,7 +24,7 @@ fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] [--mesh-name NAME] [episode_name ...]
+Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME]
 
 Without episode arguments, all directories under the selected data root are processed.
 Specify one or more episode names (matching subdirectories of the data root) to
@@ -41,14 +42,6 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       DATA_ROOT="$2"
-      shift 2
-      ;;
-    --mesh-name|--mesh_name)
-      if [ "${2:-}" = "" ]; then
-        echo "❌ Missing name for --mesh-name" >&2
-        exit 1
-      fi
-      MESH_NAME="$2"
       shift 2
       ;;
     -h|--help)
@@ -400,7 +393,7 @@ for episode in "${READY_EPISODES[@]}"; do
     echo "⏭️  Depth already exists in ${depth_dir}; skipping generation."
   else
     pushd "$FOUNDATION_STEREO_DIR" >/dev/null
-    ./scripts/zed2depth.sh --data-root "$DATA_ROOT" "$episode"
+    ./scripts/zed2depth.sh --data-root "$DATA_ROOT" --scale "$SCALE" "$episode"
     popd >/dev/null
   fi
 done

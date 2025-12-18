@@ -76,6 +76,7 @@ install/
 *.pcd
 *.ply
 *.jpg
+*.png
 
 # Vendor SDKs / binaries
 glasses_hardware/anygrasp_sdk/
