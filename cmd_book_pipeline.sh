@@ -23,7 +23,7 @@ fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] [episode_name ...]
+Usage: $(basename "$0") [--data-root PATH] [--mesh-name NAME] [episode_name ...]
 
 Without episode arguments, all directories under the selected data root are processed.
 Specify one or more episode names (matching subdirectories of the data root) to
@@ -32,6 +32,7 @@ EOF
 }
 
 POSITIONAL_ARGS=()
+MESH_NAME="book" # Set Mesh Name
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --data-root|--data_root)
@@ -40,6 +41,14 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       DATA_ROOT="$2"
+      shift 2
+      ;;
+    --mesh-name|--mesh_name)
+      if [ "${2:-}" = "" ]; then
+        echo "❌ Missing name for --mesh-name" >&2
+        exit 1
+      fi
+      MESH_NAME="$2"
       shift 2
       ;;
     -h|--help)
@@ -442,9 +451,10 @@ for episode in "${READY_EPISODES[@]}"; do
 
   set +e
   fp_output=$(conda run --no-capture-output -n foundationpose python -u \
-    foundationpose/FoundationPose/run_1010_only.py \
-    --demo_name "$episode" \
-    --data_root "$DATA_ROOT" 2>&1)
+    foundationpose/FoundationPose/run_from_mesh.py \
+    --demo-name "$episode" \
+    --data-root "$DATA_ROOT" \
+    --mesh-name "$MESH_NAME" 2>&1)
   fp_status=$?
   set -e
 
