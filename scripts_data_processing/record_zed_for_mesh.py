@@ -47,7 +47,7 @@ def main():
 
     zed = sl.Camera()
     init_params = sl.InitParameters()
-    init_params.camera_resolution = sl.RESOLUTION.VGA
+    init_params.camera_resolution = sl.RESOLUTION.HD720
     init_params.camera_fps = args.fps
     init_params.depth_mode = sl.DEPTH_MODE.NONE
     init_params.async_grab_camera_recovery = True
@@ -68,7 +68,8 @@ def main():
     runtime_params = sl.RuntimeParameters()
 
     frame_idx = 0
-    print(f"[info] Recording... Press 'q' to stop. Output: {out_root}")
+    record_key = ord("s")
+    print(f"[info] Ready. Press '{chr(record_key)}' to save a frame pair, 'q' to quit. Output dir: {out_root}")
     try:
         while True:
             if zed.grab(runtime_params) != sl.ERROR_CODE.SUCCESS:
@@ -83,13 +84,15 @@ def main():
             left_bgr = cv2.cvtColor(left, cv2.COLOR_BGRA2BGR)
             right_bgr = cv2.cvtColor(right, cv2.COLOR_BGRA2BGR)
 
-            cv2.imwrite(os.path.join(left_dir, f"left{frame_idx:06d}.png"), left_bgr)
-            cv2.imwrite(os.path.join(right_dir, f"right{frame_idx:06d}.png"), right_bgr)
-            frame_idx += 1
-
             cv2.imshow("Left", left_bgr)
             cv2.imshow("Right", right_bgr)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == record_key:
+                cv2.imwrite(os.path.join(left_dir, f"left{frame_idx:06d}.png"), left_bgr)
+                cv2.imwrite(os.path.join(right_dir, f"right{frame_idx:06d}.png"), right_bgr)
+                print(f"[info] Saved frame pair {frame_idx:06d}")
+                frame_idx += 1
+            elif key == ord("q"):
                 break
     except KeyboardInterrupt:
         print("\n[info] Interrupted by user.")

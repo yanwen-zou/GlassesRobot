@@ -141,7 +141,7 @@ echo "starting foundationstereo processing for ${timestamp}..."
 
 mkdir -p "$depth_dir"
 
-conda run --no-capture-output -n foundation_stereo python -u scripts/stereo2depth.py \
+conda run --no-capture-output -n glasses python -u scripts/stereo2depth.py \
     --left_file "$input_left" \
     --right_file "$input_right" \
     --out_dir "$episode_dir" \
@@ -151,7 +151,7 @@ echo "starting PNG2JPG processing for ${timestamp}..."
 
 mkdir -p "$jpg_dir"
 
-conda run --no-capture-output -n foundation_stereo python -u scripts/png2jpg.py \
+conda run --no-capture-output -n glasses python -u scripts/png2jpg.py \
     --input_dir "${out_dir}/rgb" \
     --output_dir "$jpg_dir"
 

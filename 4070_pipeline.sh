@@ -24,7 +24,7 @@ fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME]
+Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME] [--mesh-root PATH]
 
 Without episode arguments, all directories under the selected data root are processed.
 Specify one or more episode names (matching subdirectories of the data root) to
@@ -34,6 +34,7 @@ EOF
 
 POSITIONAL_ARGS=()
 MESH_NAME="book" # Set Mesh Name
+MESH_ROOT="${PROJECT_ROOT}/data"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --data-root|--data_root)
@@ -42,6 +43,14 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       DATA_ROOT="$2"
+      shift 2
+      ;;
+    --mesh-root|--mesh_root)
+      if [ "${2:-}" = "" ]; then
+        echo "❌ Missing path argument for --mesh-root" >&2
+        exit 1
+      fi
+      MESH_ROOT="$2"
       shift 2
       ;;
     -h|--help)
@@ -78,6 +87,20 @@ fi
 
 if [ ! -d "$DATA_ROOT" ]; then
   echo "❌ Data directory not found: $DATA_ROOT" >&2
+  exit 1
+fi
+
+if [[ "$MESH_ROOT" != /* ]]; then
+  MESH_ROOT="${PROJECT_ROOT}/${MESH_ROOT}"
+fi
+
+if ! MESH_ROOT=$(realpath "$MESH_ROOT"); then
+  echo "❌ Failed to resolve mesh root path." >&2
+  exit 1
+fi
+
+if [ ! -d "$MESH_ROOT" ]; then
+  echo "❌ Mesh directory not found: $MESH_ROOT" >&2
   exit 1
 fi
 
@@ -135,7 +158,7 @@ fill_head_pose_nans() {
   if ! find "$head_dir" -maxdepth 1 -type f -name '*.txt' -print -quit >/dev/null; then
     return
   fi
-  conda run --no-capture-output -n foundation_stereo python - "$head_dir" <<'PY'
+  conda run --no-capture-output -n glasses python - "$head_dir" <<'PY'
 import os
 import sys
 import numpy as np
@@ -274,7 +297,7 @@ prepare_frames() {
 
   if [ ! -d "$jpg_dir" ] || ! find "$jpg_dir" -maxdepth 1 -name '*.jpg' -print -quit >/dev/null; then
     echo "🖼️ Converting PNG -> JPG for $episode..."
-    conda run --no-capture-output -n foundation_stereo python -u \
+    conda run --no-capture-output -n glasses python -u \
       "${FOUNDATION_STEREO_DIR}/scripts/png2jpg.py" \
       --input_dir "$left_dir" \
       --output_dir "$jpg_dir"
@@ -318,7 +341,7 @@ if [ "${#SAM_EPISODES[@]}" -gt 0 ]; then
 
   echo "=============================="
   echo "🪄 Launching SAM for selected episodes..."
-  conda run --no-capture-output -n foundation_stereo python -u \
+  conda run --no-capture-output -n glasses python -u \
     "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
     --data_root "$SAM_TEMP_ROOT"
 
@@ -359,7 +382,7 @@ if [ "${#BALL_EPISODES[@]}" -gt 0 ]; then
 
   echo "=============================="
   echo "🟢 Launching SAM for balls (3 objects) ..."
-  conda run --no-capture-output -n foundation_stereo python -u \
+  conda run --no-capture-output -n glasses python -u \
     "${FOUNDATION_STEREO_DIR}/scripts/multi_object_sam_segmentation.py" \
     --data_root "$BALL_TEMP_ROOT" \
     --num_objects 3 \
@@ -402,13 +425,13 @@ if [ "${#BALL_PIPELINE_EPISODES[@]}" -gt 0 ]; then
   echo "=============================="
   echo "🎯 Running ball post-processing pipeline (masks -> centers -> cam_to_base)..."
   for episode in "${BALL_PIPELINE_EPISODES[@]}"; do
-    conda run --no-capture-output -n foundation_stereo bash "$BALL_PIPELINE" --data-dir "${DATA_ROOT}/${episode}"
+    conda run --no-capture-output -n glasses bash "$BALL_PIPELINE" --data-dir "${DATA_ROOT}/${episode}"
   done
 
   # echo "=============================="
   # echo "📐 Computing aligned cam poses (base frame) from head_pos..."
   # for episode in "${BALL_PIPELINE_EPISODES[@]}"; do
-  #   conda run --no-capture-output -n foundation_stereo python -u \
+  #   conda run --no-capture-output -n glasses python -u \
   #     "${PROJECT_ROOT}/scripts_calib_balls/compute_aligned_cam_pose.py" \
   #     --episode_dir "${DATA_ROOT}/${episode}"
   # done
@@ -443,10 +466,11 @@ for episode in "${READY_EPISODES[@]}"; do
   echo "🤖 Running FoundationPose for $episode..."
 
   set +e
-  fp_output=$(conda run --no-capture-output -n foundationpose python -u \
+  fp_output=$(conda run --no-capture-output -n glasses python -u \
     foundationpose/FoundationPose/run_from_mesh.py \
     --demo-name "$episode" \
     --data-root "$DATA_ROOT" \
+    --mesh-root "$MESH_ROOT" \
     --mesh-name "$MESH_NAME" 2>&1)
   fp_status=$?
   set -e

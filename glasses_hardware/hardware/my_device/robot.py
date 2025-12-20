@@ -68,7 +68,7 @@ class FlexivRobot:
     """
     logger_name = "FlexivRobot"
 
-    def __init__(self, robot_ip_address='192.168.2.100', pc_ip_address=None, default_pose=[0.45,0,0.35,0,0,1,0], home = True):
+    def __init__(self, robot_ip_address='192.168.2.100', pc_ip_address=None, default_pose=[0.45,0,0.35,0.707,0,0.707,0], home = True):
         if pc_ip_address is None:
             pc_ip_address = get_local_ip(robot_ip_address)
         
@@ -123,8 +123,8 @@ class FlexivRobot:
         # self.send_joint_pose(self.home_joint_pos)
         # time.sleep(4)
         if home:
-            # self.send_tcp_pose(self.home_pose)
-            self.send_joint_pose(self.home_joint_pos)
+            self.send_tcp_pose(self.home_pose)
+            #self.send_joint_pose(self.home_joint_pos)
             time.sleep(4)
 
         robot.SwitchMode(mode.NRT_PRIMITIVE_EXECUTION)

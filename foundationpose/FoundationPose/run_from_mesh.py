@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FoundationPose runner that auto-loads mesh.obj from data/<mesh>/")
     parser.add_argument("--demo-name", type=str, required=True, help="Name of dataset directory under data/.")
     parser.add_argument("--mesh-name", type=str, required=True, help="Folder name under data/ containing mesh.obj.")
+    parser.add_argument("--mesh-root", type=str, required=True, help="Root directory containing mesh files")
     parser.add_argument("--data-root", type=Path, default=default_data_root, help="Root directory containing data/.")
     parser.add_argument("--est-refine-iter", type=int, default=5)
     parser.add_argument("--track-refine-iter", type=int, default=2)
@@ -38,8 +39,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def locate_mesh(data_root: Path, mesh_name: str) -> Path:
-    mesh_path = data_root / mesh_name / "mesh.obj"
+def locate_mesh(mesh_root: Path, mesh_name: str) -> Path:
+    mesh_path = mesh_root / mesh_name / "mesh.obj"
     if not mesh_path.exists():
         raise FileNotFoundError(f"未找到 mesh: {mesh_path}")
     return mesh_path
@@ -48,8 +49,9 @@ def locate_mesh(data_root: Path, mesh_name: str) -> Path:
 def main() -> None:
     args = parse_args()
     data_root = args.data_root.resolve()
+    mesh_root = Path(args.mesh_root).resolve()
     demo_dir = data_root / args.demo_name
-    mesh_file = locate_mesh(data_root, args.mesh_name)
+    mesh_file = locate_mesh(mesh_root, args.mesh_name)
 
     if not demo_dir.exists():
         raise FileNotFoundError(f"未找到 demo 数据: {demo_dir}")

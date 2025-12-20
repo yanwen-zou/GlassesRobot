@@ -12,10 +12,11 @@ Press Ctrl+C to quit. Each key applies a small delta and solves IK to move there
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import termios
-import tty
 import time
+import tty
 from pathlib import Path
 from typing import Tuple
 
@@ -64,16 +65,127 @@ def get_key() -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
 
+def run_sim_teleop(pos_step: float, rot_step: float) -> None:
+    """Launch a MuJoCo viewer that mirrors the TCP teleop motions."""
+    import glfw
+    import mujoco
+
+    model = mujoco.MjModel.from_xml_path(str(YAM_XML_PATH))
+    data = mujoco.MjData(model)
+    kinematics = Kinematics(YAM_XML_PATH, "grasp_site")
+
+    if not glfw.init():
+        raise RuntimeError("Failed to initialize GLFW")
+
+    window = glfw.create_window(1280, 960, "YAM TCP Teleop (Sim)", None, None)
+    if window is None:
+        glfw.terminate()
+        raise RuntimeError("Failed to create GLFW window")
+    glfw.make_context_current(window)
+
+    cam = mujoco.MjvCamera()
+    opt = mujoco.MjvOption()
+    scene = mujoco.MjvScene(model, maxgeom=2000)
+    ctx = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
+
+    cam.distance = 2.0
+    cam.azimuth = 90
+    cam.elevation = -35
+
+    q_target = data.qpos.copy()
+    arm_dofs = min(6, q_target.shape[0])
+    target_pose = kinematics.fk(q_target[:arm_dofs])
+
+    zero3 = np.zeros(3, dtype=np.float32)
+
+    def key_callback(_win, key, _scancode, action, _mods):
+        nonlocal target_pose, q_target
+        if action not in (glfw.PRESS, glfw.REPEAT):
+            return
+        dpos = zero3.copy()
+        drot = zero3.copy()
+        if key == glfw.KEY_Q:
+            dpos[0] += pos_step
+        elif key == glfw.KEY_E:
+            dpos[0] -= pos_step
+        elif key == glfw.KEY_A:
+            dpos[1] += pos_step
+        elif key == glfw.KEY_D:
+            dpos[1] -= pos_step
+        elif key == glfw.KEY_W:
+            dpos[2] += pos_step
+        elif key == glfw.KEY_S:
+            dpos[2] -= pos_step
+        elif key == glfw.KEY_U:
+            drot[0] += rot_step
+        elif key == glfw.KEY_O:
+            drot[0] -= rot_step
+        elif key == glfw.KEY_I:
+            drot[1] += rot_step
+        elif key == glfw.KEY_K:
+            drot[1] -= rot_step
+        elif key == glfw.KEY_J:
+            drot[2] += rot_step
+        elif key == glfw.KEY_L:
+            drot[2] -= rot_step
+        else:
+            return
+        new_pose = apply_delta(target_pose, dpos, drot)
+        success, q_sol = kinematics.ik(new_pose, "grasp_site", verbose=False)
+        if success:
+            target_pose = new_pose
+            q_target[:arm_dofs] = q_sol[:arm_dofs]
+
+    glfw.set_key_callback(window, key_callback)
+
+    try:
+        while not glfw.window_should_close(window):
+            data.qpos[:] = q_target
+            data.qvel[:] = 0.0
+            mujoco.mj_forward(model, data)
+
+            viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
+            mujoco.mjv_updateScene(
+                model,
+                data,
+                opt,
+                None,
+                cam,
+                mujoco.mjtCatBit.mjCAT_ALL,
+                scene,
+            )
+            mujoco.mjr_render(viewport, scene, ctx)
+
+            glfw.swap_buffers(window)
+            glfw.poll_events()
+            time.sleep(model.opt.timestep)
+    finally:
+        glfw.terminate()
+
 
 def main() -> None:
-    robot = I2RT(channel="can0", zero_gravity_mode=False, home=True)
+    parser = argparse.ArgumentParser(description="Keyboard TCP teleop for YAM robot (real or MuJoCo).")
+    parser.add_argument("--mode", choices=("real", "sim"), default="real", help="Run on real hardware or MuJoCo simulation.")
+    parser.add_argument("--channel", type=str, default="can0", help="CAN channel for real robot.")
+    parser.add_argument("--home", dest="home", action="store_true", help="Home robot at startup (real mode).")
+    parser.add_argument("--no-home", dest="home", action="store_false", help="Skip homing at startup.")
+    parser.add_argument("--pos-step", type=float, default=0.02, help="Translation step size in meters.")
+    parser.add_argument("--rot-step", type=float, default=0.05, help="Rotation step size in radians.")
+    parser.set_defaults(home=True)
+    args = parser.parse_args()
+
+    if args.mode == "sim":
+        run_sim_teleop(args.pos_step, args.rot_step)
+        return
+
+    robot = I2RT(channel=args.channel, zero_gravity_mode=False, home=args.home)
     model = Kinematics(YAM_XML_PATH, "grasp_site")
 
     q_start = robot.current_joint_pos()
     target_pose = model.fk(q_start[:6])
 
-    pos_step = 0.02
-    rot_step = 0.05
+    pos_step = float(args.pos_step)
+    rot_step = float(args.rot_step)
 
     print("TCP keyboard teleop started.")
     print("q/e:+/-X  a/d:+/-Y  w/s:+/-Z  u/o:+/-roll  i/k:+/-pitch  j/l:+/-yaw  Ctrl+C to exit.")
