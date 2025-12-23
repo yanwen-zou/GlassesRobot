@@ -38,7 +38,7 @@ class I2RTSim:
         self._data = mujoco.MjData(self._model)
         self._default_duration = default_duration
         self._default_steps = default_steps
-        I2RT_TARGET_DEG = [-17, 25, 61, -42, 0, -2]
+        I2RT_TARGET_DEG = [-17, 55, 41, 22, 0, -2]
         I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
         self._qpos = I2RT_TARGET_RAD.copy()
         self._set_qpos(self._qpos.copy())

@@ -130,6 +130,7 @@ def run_sim_teleop(pos_step: float, rot_step: float) -> None:
             drot[2] -= rot_step
         else:
             return
+        drot[0], drot[2] = drot[2], drot[0]
         new_pose = apply_delta(target_pose, dpos, drot)
         success, q_sol = kinematics.ik(new_pose, "grasp_site", verbose=False)
         if success:
