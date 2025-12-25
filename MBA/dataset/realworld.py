@@ -491,7 +491,8 @@ class RealWorldDataset(Dataset):
                 dtype=np.float32
             )
             current_obj = np.concatenate([current_obj, current_term_flag], axis=0)
-            current_obj_normalized = self._normalize_obj(current_obj[None, :]).squeeze(0)
+            # Normalize on a copy so current_obj_pose stays in raw coordinates.
+            current_obj_normalized = self._normalize_obj(current_obj[None, :].copy()).squeeze(0)
             ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float() # obj pose in base frame
             ret_dict["current_obj_pose_normalized"] = torch.from_numpy(current_obj_normalized).float()
 
@@ -510,7 +511,8 @@ class RealWorldDataset(Dataset):
 
             current_frame_id = obs_frame_ids[-1]
             current_headpose = _load_headpose(current_frame_id).astype(np.float32)
-            current_headpose_normalized = self._normalize_headpose(current_headpose[None, :]).squeeze(0)
+            # Normalize on a copy so current_headpose stays in raw coordinates.
+            current_headpose_normalized = self._normalize_headpose(current_headpose[None, :].copy()).squeeze(0)
             ret_dict["current_headpose"] = torch.from_numpy(current_headpose).float()
             ret_dict["current_headpose_normalized"] = torch.from_numpy(current_headpose_normalized).float()
 
@@ -546,3 +548,45 @@ def decode_gripper_width(gripper_width):
     # robotiq-85: 0.0000 - 0.0085
     #                255 -      0
     return (1. - gripper_width / 255.) * 0.085
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-path", required=True, help="Path to dataset root.")
+    parser.add_argument("--split", default="train", choices=["train", "eval", "all"])
+    parser.add_argument("--output-dir", default="MBA/dataset/dataloader_output")
+    parser.add_argument("--num-obs", type=int, default=1)
+    parser.add_argument("--num-action", type=int, default=10)
+    args = parser.parse_args()
+
+    dataset = RealWorldDataset(
+        path=args.data_path,
+        split=args.split,
+        num_obs=args.num_obs,
+        num_action=args.num_action,
+        with_obj_action=True,
+        with_headpose=True,
+    )
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    for idx in range(len(dataset)):
+        data = dataset[idx]
+        current_obj = data.get("current_obj_pose")
+        action_obj = data.get("action_obj")
+        headpos = data.get("current_headpose")
+        if current_obj is None or action_obj is None:
+            continue
+        out_path = os.path.join(args.output_dir, f"sample_{idx:06d}.npz")
+        np.savez(
+            out_path,
+            current_obj_pose=current_obj.numpy(),
+            action_obj=action_obj.numpy(),
+            headpos = headpos.numpy(),
+        )
+
+
+if __name__ == "__main__":
+    main()
