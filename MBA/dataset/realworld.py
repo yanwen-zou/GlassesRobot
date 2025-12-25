@@ -41,6 +41,7 @@ class RealWorldDataset(Dataset):
         aug_jitter_prob = 0.2,
         with_cloud = False,
         with_obj_action = False,
+        with_headpose = False,
         cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
         head_to_zed_path: str = "glasses_hardware/calib/T_tcp_zed.txt",
     ):
@@ -65,6 +66,7 @@ class RealWorldDataset(Dataset):
         self.aug_jitter_prob = aug_jitter_prob
         self.with_cloud = with_cloud
         self.with_obj_action = with_obj_action
+        self.with_headpose = with_headpose
         self.cam_to_base_rot_noise_std = float(cam_to_base_rot_noise_std)
 
         if not os.path.isdir(self.data_path):
@@ -180,6 +182,11 @@ class RealWorldDataset(Dataset):
         ''' obj_list: [T, 3(trans) + 6(rot)]'''
         obj_list[:, :3] = (obj_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         return obj_list
+
+    def _normalize_headpose(self, headpose_list):
+        ''' headpose_list: [T, 3(trans) + 6(rot)]'''
+        headpose_list[:, :3] = (headpose_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+        return headpose_list
 
     def _load_camera_extrinsics_from_dir(self, directory, head_to_zed_path):
         # Load head to zed transformation(from calibration)
@@ -487,6 +494,25 @@ class RealWorldDataset(Dataset):
             current_obj_normalized = self._normalize_obj(current_obj[None, :]).squeeze(0)
             ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float() # obj pose in base frame
             ret_dict["current_obj_pose_normalized"] = torch.from_numpy(current_obj_normalized).float()
+
+        if self.with_headpose:
+            def _load_headpose(frame_id_str):
+                T_base_cam = self._get_cam_to_base(seq_id, frame_id_str)
+                return xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d")
+
+            action_headposes = []
+            for frame_id in action_frame_ids:
+                action_headposes.append(_load_headpose(frame_id))
+            action_headposes = np.stack(action_headposes).astype(np.float32)
+            action_headposes_normalized = self._normalize_headpose(action_headposes.copy())
+            ret_dict["action_headpose"] = torch.from_numpy(action_headposes).float()
+            ret_dict["action_headpose_normalized"] = torch.from_numpy(action_headposes_normalized).float()
+
+            current_frame_id = obs_frame_ids[-1]
+            current_headpose = _load_headpose(current_frame_id).astype(np.float32)
+            current_headpose_normalized = self._normalize_headpose(current_headpose[None, :]).squeeze(0)
+            ret_dict["current_headpose"] = torch.from_numpy(current_headpose).float()
+            ret_dict["current_headpose_normalized"] = torch.from_numpy(current_headpose_normalized).float()
 
         return ret_dict
         

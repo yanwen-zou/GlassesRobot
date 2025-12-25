@@ -39,6 +39,8 @@ default_args = edict({
     "seed": 233,
     "enable_mba": True,
     "obj_dim": 10,
+    "enable_headpose_head": True,
+    "headpose_dim": 9,
     "obj_pose_mode": "abs",
 })
 
@@ -79,6 +81,7 @@ def train(args_override):
         aug_jitter = args.aug_jitter, 
         with_cloud = False,
         with_obj_action = True,
+        with_headpose = args.enable_headpose_head,
     )
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -108,6 +111,8 @@ def train(args_override):
         dropout = args.dropout,
         enable_mba = args.enable_mba,
         obj_dim = args.obj_dim,
+        enable_headpose_head = args.enable_headpose_head,
+        headpose_dim = args.headpose_dim,
         obj_pose_mode = args.obj_pose_mode,
     ).to(device)
     if RANK == 0:
@@ -144,8 +149,6 @@ def train(args_override):
     # training
     train_history = []
 
-    action_dim = policy.module.action_decoder.action_dim if isinstance(policy, nn.parallel.DistributedDataParallel) else policy.action_decoder.action_dim
-
     policy.train()
     for epoch in range(args.resume_epoch + 1, args.num_epochs):
         if RANK == 0: print("Epoch {}".format(epoch)) 
@@ -154,6 +157,8 @@ def train(args_override):
         num_steps = len(dataloader)
         pbar = tqdm(dataloader) if RANK == 0 else dataloader
         avg_loss = 0
+        avg_obj_loss = 0
+        avg_headpose_loss = 0
 
         for data in pbar:
             # cloud data processing
@@ -161,20 +166,37 @@ def train(args_override):
             cloud_feats = data['input_feats_list']
             obj_data = data['action_obj_normalized']
             current_obj = data.get('current_obj_pose_normalized')
+            headpose_data = data.get('action_headpose_normalized')
+            current_headpose = data.get('current_headpose_normalized')
             cloud_feats = cloud_feats.to(device)
             cloud_coords = cloud_coords.to(device)
             obj_data = obj_data.to(device)
             if current_obj is not None:
                 current_obj = current_obj.to(device)
+            if headpose_data is not None:
+                headpose_data = headpose_data.to(device)
+            if current_headpose is not None:
+                current_headpose = current_headpose.to(device)
             batch_size_cur = obj_data.shape[0]
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
-            dummy_actions = obj_data.new_zeros((batch_size_cur, args.num_action, action_dim))
-            loss = policy(cloud = cloud_data,
-                          actions = dummy_actions,
-                          batch_size = batch_size_cur,
-                          actions_obj = obj_data,
-                          sample_mba = False,
-                          current_obj = current_obj)
+            losses = policy(cloud = cloud_data,
+                            batch_size = batch_size_cur,
+                            actions_obj = obj_data,
+                            sample_mba = False,
+                            current_obj = current_obj,
+                            headpose_data = headpose_data,
+                            headpose_cond = current_headpose)
+            if isinstance(losses, dict):
+                loss = losses.get("obj_loss")
+                headpose_loss = losses.get("headpose_loss")
+                if loss is None:
+                    raise RuntimeError("obj_loss is required for training in train_obj.")
+                avg_obj_loss += loss.item()
+                if headpose_loss is not None:
+                    avg_headpose_loss += headpose_loss.item()
+                    loss = loss + headpose_loss
+            else:
+                loss = losses
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -182,11 +204,17 @@ def train(args_override):
             avg_loss += loss.item()
 
         avg_loss = avg_loss / num_steps
+        avg_obj_loss = avg_obj_loss / num_steps
+        avg_headpose_loss = avg_headpose_loss / num_steps
         sync_loss(avg_loss, device)
         train_history.append(avg_loss)
 
         if RANK == 0:
-            print("Train loss: {:.6f}".format(avg_loss))
+            print(
+                "Train loss: {:.6f} (obj: {:.6f}, headpose: {:.6f})".format(
+                    avg_loss, avg_obj_loss, avg_headpose_loss
+                )
+            )
 
             if (epoch + 1) % args.save_epochs == 0:
                 torch.save(
@@ -228,6 +256,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--enable_mba', action = 'store_true', help = 'mba enabled / disabled')
     parser.add_argument('--obj_dim', action = 'store', type = int, help = 'hidden dimension', required = False, default = 10)
+    parser.add_argument('--disable_headpose_head', action = 'store_false', dest = 'enable_headpose_head', help = 'disable headpose diffusion head')
+    parser.add_argument('--headpose_dim', action = 'store', type = int, help = 'headpose action dimension', required = False, default = 9)
     parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='abs', help='object pose prediction target type')
 
     train(vars(parser.parse_args()))

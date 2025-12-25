@@ -23,7 +23,9 @@ class RISE(nn.Module):
         dropout = 0.1,
         enable_mba = False,
         obj_dim = 10,
-        obj_pose_mode = "abs",
+        enable_headpose_head = False,
+        headpose_dim = 9,
+        obj_pose_mode = "delta",
     ):
         super().__init__()
         num_obs = 1
@@ -39,27 +41,60 @@ class RISE(nn.Module):
                                                   rot_smooth_lambda=0.05,
                                                   cond_extra_dim=obj_dim,
                                                   obj_pose_mode=obj_pose_mode)
+        self.enable_headpose_head = enable_headpose_head
+        if self.enable_headpose_head:
+            self.headpose_decoder = DiffusionUNetPolicy(
+                headpose_dim,
+                num_action,
+                num_obs,
+                obs_feature_dim,
+                enable_mba=True,
+                obj_dim=headpose_dim,
+                rot_smooth_lambda=0.0,
+                cond_extra_dim=headpose_dim,
+                obj_pose_mode="abs",
+            )
         self.readout_embed = nn.Embedding(1, hidden_dim)
 
-    def forward(self, cloud, actions = None, batch_size = 24, actions_obj = None, sample_mba = False, current_obj = None):
+    def forward(
+        self,
+        cloud,
+        batch_size = 24,
+        actions_obj = None,
+        sample_mba = False,
+        current_obj = None,
+        headpose_data = None,
+        headpose_cond = None,
+    ):
         src, pos, src_padding_mask = self.sparse_encoder(cloud, batch_size=batch_size)
         readout = self.transformer(src, src_padding_mask, self.readout_embed.weight, pos)[-1]
         readout = readout[:, 0]
-        if actions is not None:
+        if headpose_data is not None and not self.enable_headpose_head:
+            raise RuntimeError("Headpose head is disabled but headpose_data was provided.")
+        if actions_obj is not None and sample_mba:
+            raise Exception("Sample mba should be set to false")
+        if headpose_data is not None or actions_obj is not None:
+            losses = {}
             if actions_obj is not None:
-                if not sample_mba:
-                    loss = self.action_decoder.compute_obj_loss(readout, actions_obj, extra_cond=current_obj)
-                else:
-                    loss = self.action_decoder.compute_loss(readout, actions, extra_cond=current_obj)
-            else:
-                loss = self.action_decoder.compute_loss(readout, actions, extra_cond=current_obj)
-            return loss
+                losses["obj_loss"] = self.action_decoder.compute_obj_loss(
+                    readout, actions_obj, extra_cond=current_obj
+                )
+            if headpose_data is not None:
+                readout_detached = readout.detach()
+                losses["headpose_loss"] = self.headpose_decoder.compute_obj_loss(
+                    readout_detached, headpose_data, extra_cond=headpose_cond
+                )
+            return losses
         else:
             outputs = {}
             if self.enable_mba:
                 with torch.no_grad():
                     obj_pred = self.action_decoder.predict_obj(readout, extra_cond=current_obj)
                 outputs["obj_pred"] = obj_pred
+            if self.enable_headpose_head:
+                with torch.no_grad():
+                    headpose_pred = self.headpose_decoder.predict_obj(readout, extra_cond=headpose_cond)
+                outputs["headpose_pred"] = headpose_pred
             with torch.no_grad():
                 action_pred = self.action_decoder.predict_action(readout, extra_cond=current_obj)
             outputs["action_pred"] = action_pred

@@ -225,9 +225,8 @@ def main() -> None:
             drot[2] -= rot_step
         else:
             continue
-
         target_pose = apply_delta(target_pose, dpos, drot)
-        success, q_sol = model.ik(target_pose, "grasp_site", verbose=False)
+        success, q_sol = model.ik(target_pose, "grasp_site", verbose=True)
         if not success:
             print(f"[WARN] IK failed for key '{key}', skipping.")
             continue

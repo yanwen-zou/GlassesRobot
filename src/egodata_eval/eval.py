@@ -164,7 +164,7 @@ class TrajectoryPredictor:
         st = ME.SparseTensor(feats, coords)
         cur_obj = self._current_obj_vec(pose_base_ob)
         with torch.no_grad():
-            outputs = self.model(st, actions=None, batch_size=1, current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device))
+            outputs = self.model(st, actions_obj = None ,batch_size=1, current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device))
         if "obj_pred" not in outputs:
             self.last_traj_denorm = None
             return image_bgr

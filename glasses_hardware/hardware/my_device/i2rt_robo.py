@@ -38,6 +38,9 @@ from i2rt.robots.utils import YAM_XML_PATH
 class I2RT:
     """User-facing helper that exposes simple joint-space commands."""
 
+    MAX_JOINT_VEL_RAD_S = 0.3
+    MAX_JOINT_ACCEL_RAD_S2 = 8.0
+
     def __init__(
         self,
         channel: str = "can0",
@@ -50,6 +53,8 @@ class I2RT:
         self._default_duration = default_duration
         self._default_steps = default_steps
         self._home = home
+        self._q_cmd = None
+        self._dq_cmd = None
 
         if self._home:
             zero_pose = np.zeros(self.num_dofs(), dtype=np.float64)
@@ -84,6 +89,18 @@ class I2RT:
         target = np.asarray(target_joint_pos_rad, dtype=np.float64)
         self._send_joint_pos_rad(target, duration=duration, steps=steps)
 
+    def _compute_sync_profile(self, q_start: np.ndarray, target: np.ndarray, duration: float):
+        dist = np.abs(target - q_start)
+        vmax = self.MAX_JOINT_VEL_RAD_S
+        amax = self.MAX_JOINT_ACCEL_RAD_S2
+        t_min = np.zeros_like(dist)
+        tri_limit = (vmax * vmax) / max(amax, 1e-6)
+        tri_mask = dist <= tri_limit
+        t_min[tri_mask] = 2.0 * np.sqrt(dist[tri_mask] / max(amax, 1e-6))
+        t_min[~tri_mask] = 2.0 * vmax / max(amax, 1e-6) + (dist[~tri_mask] - tri_limit) / max(vmax, 1e-6)
+        total_time = max(duration, float(np.max(t_min)))
+        return dist, t_min, total_time
+
     def _send_joint_pos_rad(
         self,
         target_joint_pos_rad: Iterable[float],
@@ -109,28 +126,87 @@ class I2RT:
             raise ValueError(
                 f"target joint size {target.shape} does not match robot DOFs {current.shape}"
             )
-
         if steps == 1:
-            self._robot.command_joint_pos(target)
+            vel = np.clip((target - current) / max(duration, 1e-6), -self.MAX_JOINT_VEL_RAD_S, self.MAX_JOINT_VEL_RAD_S)
+            self._robot.command_joint_state({"pos": target, "vel": vel})
             return
 
-        interval = duration / steps
-        alphas = np.linspace(0.0, 1.0, steps)
-        for idx, alpha in enumerate(alphas):
-            cmd = (1.0 - alpha) * current + alpha * target
-            self._robot.command_joint_pos(cmd)
+        if self._q_cmd is None or self._q_cmd.shape != current.shape:
+            self._q_cmd = current.copy()
+        if self._dq_cmd is None or self._dq_cmd.shape != current.shape:
+            self._dq_cmd = np.zeros_like(current)
+
+        q_start = self._q_cmd.copy()
+        dist, t_min, total_time = self._compute_sync_profile(q_start, target, duration)
+        dt = total_time / steps
+
+        for idx in range(steps):
+            t = min((idx + 1) * dt, total_time)
+            q_ref = q_start.copy()
+            dq_ref = np.zeros_like(q_start)
+            for j in range(q_start.shape[0]):
+                d = dist[j]
+                if d < 1e-9:
+                    q_ref[j] = target[j]
+                    dq_ref[j] = 0.0
+                    continue
+                t_j = t_min[j]
+                if t_j < 1e-9:
+                    q_ref[j] = target[j]
+                    dq_ref[j] = 0.0
+                    continue
+                scale = total_time / t_j
+                v_lim = self.MAX_JOINT_VEL_RAD_S / scale
+                a_lim = self.MAX_JOINT_ACCEL_RAD_S2 / (scale * scale)
+                if d <= (v_lim * v_lim) / max(a_lim, 1e-6):
+                    t_acc = np.sqrt(d / max(a_lim, 1e-6))
+                    t_flat = 0.0
+                else:
+                    t_acc = v_lim / max(a_lim, 1e-6)
+                    t_flat = (d - (v_lim * v_lim) / max(a_lim, 1e-6)) / max(v_lim, 1e-6)
+                t_total = 2.0 * t_acc + t_flat
+                t_use = min(t, t_total)
+                if t_use <= t_acc:
+                    pos = 0.5 * a_lim * t_use * t_use
+                    vel = a_lim * t_use
+                elif t_use <= t_acc + t_flat:
+                    pos = 0.5 * a_lim * t_acc * t_acc + v_lim * (t_use - t_acc)
+                    vel = v_lim
+                else:
+                    t_dec = t_use - t_acc - t_flat
+                    pos = (
+                        0.5 * a_lim * t_acc * t_acc
+                        + v_lim * t_flat
+                        + v_lim * t_dec
+                        - 0.5 * a_lim * t_dec * t_dec
+                    )
+                    vel = v_lim - a_lim * t_dec
+                sgn = 1.0 if (target[j] - q_start[j]) >= 0 else -1.0
+                q_ref[j] = q_start[j] + sgn * pos
+                dq_ref[j] = sgn * vel
+            e = q_ref - self._q_cmd
+            dq_ref_track = np.clip(e / max(dt, 1e-6), -self.MAX_JOINT_VEL_RAD_S, self.MAX_JOINT_VEL_RAD_S)
+            ddq = np.clip(
+                (dq_ref_track - self._dq_cmd) / max(dt, 1e-6),
+                -self.MAX_JOINT_ACCEL_RAD_S2,
+                self.MAX_JOINT_ACCEL_RAD_S2,
+            )
+            self._dq_cmd = self._dq_cmd + ddq * dt
+            self._q_cmd = self._q_cmd + self._dq_cmd * dt
+            print(f"step {idx + 1}/{steps} joint vel (rad/s): {np.round(self._dq_cmd, 2)}")
+            self._robot.command_joint_state({"pos": self._q_cmd, "vel": self._dq_cmd})
             if idx < steps - 1:
-                time.sleep(interval)
+                time.sleep(dt)
 
 def main():
     robot = I2RT(channel="can0", zero_gravity_mode=True)
     print("Current joint positions (deg):", np.rad2deg(robot.current_joint_pos()))
-    target_pose_rad = [0.0, 0.15, 0.25, -0.2, 0.0, 0.0, 0]
+    target_pose_rad = [0.0, 0.15, 0.25, 0, 0.0, 0.0, 0]
     zero_pose_rad = np.zeros(robot.num_dofs())
     print(f"Moving to target joint positions (rad): {target_pose_rad}")
     model = Kinematics(YAM_XML_PATH, "tcp_site")
     """执行 IK 插值路径"""
-    q_init = np.array([0.0, 0.15, 0.25, -0.2, 0.0, 0.0])
+    q_init = np.array([0.0, 0.15, 0.25, 0, 0.0, 0.0])
     pose_init = model.fk(q_init)
 
     while True:

@@ -329,7 +329,7 @@ setup(
     package_dir={"MinkowskiEngine": "./MinkowskiEngine"},
     ext_modules=ext_modules,
     include_dirs=[str(SRC_PATH), str(SRC_PATH / "3rdparty"), *include_dirs],
-    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
+    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=False)},
     author="Christopher Choy",
     author_email="chrischoy@ai.stanford.edu",
     description="a convolutional neural network library for sparse tensors",

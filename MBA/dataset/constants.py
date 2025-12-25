@@ -15,6 +15,10 @@ TO_TENSOR_KEYS = [
     'action_obj_normalized',
     'current_obj_pose',
     'current_obj_pose_normalized',
+    'action_headpose',
+    'action_headpose_normalized',
+    'current_headpose',
+    'current_headpose_normalized',
 ]
 
 # camera intrinsics
