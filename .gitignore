@@ -19,6 +19,7 @@ env/
 build/
 dist/
 *.egg-info/
+*.so
 
 # Project data and generated assets
 data/

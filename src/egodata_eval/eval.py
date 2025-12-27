@@ -45,7 +45,15 @@ from scripts_calib_balls.calculate_ball_centers import (
 from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
 
 class TrajectoryPredictor:
-    def __init__(self, ckpt_path: Path, num_action: int = 20, obj_pose_mode: str = "delta", voxel_size: float = 0.005):
+    def __init__(
+        self,
+        ckpt_path: Path,
+        num_action: int = 20,
+        obj_pose_mode: str = "delta",
+        voxel_size: float = 0.005,
+        enable_headpose_head: bool = False,
+        headpose_dim: int = 9,
+    ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_action = num_action
         self.obj_pose_mode = obj_pose_mode
@@ -59,7 +67,9 @@ class TrajectoryPredictor:
                           hidden_dim=512,
                           enable_mba=True,
                           obj_dim=10,
-                          obj_pose_mode=obj_pose_mode).to(self.device).eval()
+                          obj_pose_mode=obj_pose_mode,
+                          enable_headpose_head=enable_headpose_head,
+                          headpose_dim=headpose_dim).to(self.device).eval()
         if ckpt_path is None:
             raise ValueError("ckpt_path is required; please pass --ckpt to eval.py")
         ckpt_path = Path(ckpt_path)

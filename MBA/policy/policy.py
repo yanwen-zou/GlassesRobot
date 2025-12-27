@@ -52,7 +52,7 @@ class RISE(nn.Module):
                 obj_dim=headpose_dim,
                 rot_smooth_lambda=0.0,
                 cond_extra_dim=headpose_dim,
-                obj_pose_mode="abs",
+                obj_pose_mode="delta",
             )
         self.readout_embed = nn.Embedding(1, hidden_dim)
 
@@ -95,7 +95,7 @@ class RISE(nn.Module):
                 with torch.no_grad():
                     headpose_pred = self.headpose_decoder.predict_obj(readout, extra_cond=headpose_cond)
                 outputs["headpose_pred"] = headpose_pred
-            with torch.no_grad():
-                action_pred = self.action_decoder.predict_action(readout, extra_cond=current_obj)
-            outputs["action_pred"] = action_pred
+            # with torch.no_grad():
+            #     action_pred = self.action_decoder.predict_action(readout, extra_cond=current_obj)
+            # outputs["action_pred"] = action_pred
             return outputs

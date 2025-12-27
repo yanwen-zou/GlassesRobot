@@ -108,6 +108,18 @@ def _normalize_obj_np(traj: np.ndarray) -> np.ndarray:
     return norm
 
 
+def _normalize_headpose_np(headpose: np.ndarray) -> np.ndarray:
+    norm = headpose.copy()
+    norm[:3] = (norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+    return norm
+
+
+def _denormalize_headpose_np(traj: np.ndarray) -> np.ndarray:
+    denorm = traj.copy()
+    denorm[:, :3] = (denorm[:, :3] + 1) * 0.5 * (TRANS_MAX - TRANS_MIN) + TRANS_MIN
+    return denorm
+
+
 def _build_future_obj_traj(
     frame_idx: int,
     frame_ids: Sequence[str],
@@ -186,25 +198,37 @@ def _predict_sequence(
     K: np.ndarray,
     pose_cam_ob: np.ndarray,
     T_base_cam: np.ndarray | None,
+    headpose_cond: np.ndarray | None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray] | None]:
     pose_base_ob = T_base_cam @ pose_cam_ob
     feats, coords = predictor._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
     st = ME.SparseTensor(feats, coords)
     cur_obj = predictor._current_obj_vec(pose_base_ob)
+    headpose_tensor = None
+    if headpose_cond is not None:
+        headpose_tensor = torch.from_numpy(headpose_cond[None, :]).to(predictor.device)
 
     with torch.no_grad():
         outputs = predictor.model(
             st,
-            actions=None,
             batch_size=1,
             current_obj=torch.from_numpy(cur_obj[None, :]).to(predictor.device),
+            headpose_cond=headpose_tensor,
         )
-    if "obj_pred" not in outputs:
-        return pose_base_ob, None
-    obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
-    obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
-    pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:9])
-    return pose_base_ob, {"pose_mats": pose_mats_ref, "traj_norm": obj_traj_norm}
+    pred: Dict[str, np.ndarray] = {}
+    if "obj_pred" in outputs:
+        obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
+        obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
+        pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:9])
+        pred["pose_mats"] = pose_mats_ref
+        pred["traj_norm"] = obj_traj_norm
+    if "headpose_pred" in outputs:
+        headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
+        pred["headpose_pred"] = _denormalize_headpose_np(headpose_pred_norm)
+        pred["headpose_pred_norm"] = headpose_pred_norm
+    if not pred:
+        raise RuntimeError("No predictions were made by the model.")
+    return pose_base_ob, pred
 
 
 def main() -> None:
@@ -246,6 +270,11 @@ def main() -> None:
         action="store_true",
         help="When set, clamp GT future indices to the last frame when computing loss.",
     )
+    parser.add_argument(
+        "--enable-headpose-head",
+        action="store_true",
+        help="Enable headpose diffusion head and conditioning.",
+    )
     args = parser.parse_args()
 
     data_path = args.data_path.resolve()
@@ -279,7 +308,11 @@ def main() -> None:
 
     T_robot_base = _load_matrix(args.T_robot_base)
 
-    predictor = TrajectoryPredictor(args.ckpt, num_action=args.num_action)
+    predictor = TrajectoryPredictor(
+        args.ckpt,
+        num_action=args.num_action,
+        enable_headpose_head=args.enable_headpose_head,
+    )
     horizon = getattr(predictor.model.action_decoder, "horizon", args.num_action)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -288,7 +321,8 @@ def main() -> None:
 
     pose_records: List[Dict[str, object]] = []
     cam_runtime: List[np.ndarray] = []
-    base_cam_raw: List[np.ndarray] = []
+    headpose_preds: List[np.ndarray | None] = []
+    headpose_preds_norm: List[np.ndarray | None] = []
     loss_sum = 0.0
     loss_count = 0
 
@@ -298,10 +332,10 @@ def main() -> None:
         pose_cam_ob = _load_matrix(pose_path)
         frame_key = rgb_path.stem
         T_base_cam = cam2base_map[frame_key]
-        T_robot_cam = T_robot_base @ T_base_cam
 
         cam_runtime.append(T_base_cam.astype(np.float32))
-        base_cam_raw.append(T_base_cam.astype(np.float32))
+        headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
+        headpose_cond = _normalize_headpose_np(headpose_raw) if args.enable_headpose_head else None
 
         pose_base_ob, seq_pred = _predict_sequence(
             predictor,
@@ -310,13 +344,18 @@ def main() -> None:
             K,
             pose_cam_ob,
             T_base_cam,
+            headpose_cond,
         )
         pose_robot_ob = T_robot_base @ pose_base_ob
         pose_seq_robot = None
         obj_traj_norm = None
+        headpose_pred = None
+        headpose_pred_norm = None
         if seq_pred is not None:
             pose_mats = seq_pred.get("pose_mats")
             obj_traj_norm = seq_pred.get("traj_norm")
+            headpose_pred = seq_pred.get("headpose_pred")
+            headpose_pred_norm = seq_pred.get("headpose_pred_norm")
             if pose_mats is not None and pose_mats.size > 0:
                 pose_seq_robot = np.einsum(
                     "ij,njk->nik",
@@ -339,7 +378,7 @@ def main() -> None:
                 diff = obj_traj_norm[:steps] - gt_traj[:steps]
                 mse_per_step = np.mean(diff * diff, axis=1)
                 for step, loss in enumerate(mse_per_step):
-                    print(f"[LOSS] frame {frame_idx:04d} step {step:02d} mse {loss:.6f}")
+                    #print(f"[LOSS] frame {frame_idx:04d} step {step:02d} mse {loss:.6f}")
                     loss_sum += float(loss)
                     loss_count += 1
 
@@ -351,13 +390,16 @@ def main() -> None:
                 "pred_seq_robot": None if pose_seq_robot is None else pose_seq_robot.astype(np.float32),
             }
         )
+        headpose_preds.append(None if headpose_pred is None else headpose_pred.astype(np.float32))
+        headpose_preds_norm.append(None if headpose_pred_norm is None else headpose_pred_norm.astype(np.float32))
         print(f"[INFO] processed frame {frame_idx:04d} -> pose record saved.")
 
     np.save(episode_dir / "robot_pose_records.npy", np.array(pose_records, dtype=object))
     np.save(episode_dir / "T_base_cam_runtime.npy", np.stack(cam_runtime, axis=0))
-    np.save(episode_dir / "T_base_cam.npy", np.stack(base_cam_raw, axis=0))
     np.save(episode_dir / "robot_executed_poses.npy", np.zeros((0, 3), dtype=np.float32))
     np.save(episode_dir / "robot_tcp_history.npy", np.zeros((0, 3), dtype=np.float32))
+    np.save(episode_dir / "headpose_pred.npy", np.array(headpose_preds, dtype=object))
+    np.save(episode_dir / "headpose_pred_norm.npy", np.array(headpose_preds_norm, dtype=object))
     print(f"[OK] Saved {len(pose_records)} pose records to {episode_dir}")
     if loss_count > 0:
         avg_loss = loss_sum / loss_count
