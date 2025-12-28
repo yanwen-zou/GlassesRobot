@@ -194,7 +194,7 @@ def train(args_override):
                 avg_obj_loss += loss.item()
                 if headpose_loss is not None:
                     avg_headpose_loss += headpose_loss.item()
-                    loss = loss + headpose_loss
+                    loss = loss + headpose_loss * 0.3
             else:
                 loss = losses
             loss.backward()
@@ -258,6 +258,6 @@ if __name__ == '__main__':
     parser.add_argument('--obj_dim', action = 'store', type = int, help = 'hidden dimension', required = False, default = 10)
     parser.add_argument('--disable_headpose_head', action = 'store_false', dest = 'enable_headpose_head', help = 'disable headpose diffusion head')
     parser.add_argument('--headpose_dim', action = 'store', type = int, help = 'headpose action dimension', required = False, default = 9)
-    parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='abs', help='object pose prediction target type')
+    parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='delta', help='object pose prediction target type')
 
     train(vars(parser.parse_args()))
