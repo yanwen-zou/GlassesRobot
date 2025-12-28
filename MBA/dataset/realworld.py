@@ -9,8 +9,10 @@ import collections.abc as container_abcs
 
 from PIL import Image
 from torch.utils.data import Dataset
-
-from .constants import *
+try:
+    from .constants import *
+except:
+    from dataset.constants import *
 # Use absolute import to allow running when MBA is on PYTHONPATH as a top-level module.
 try:
     from ..utils.transformation import xyz_rot_transform

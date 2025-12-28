@@ -227,25 +227,25 @@ def main():
                     radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
                 ),
             )
-        if headpose_preds is not None:
+        if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
             headpose_entry = None
-            if headpose_preds.ndim == 2 and 0 <= frame_idx < headpose_preds.shape[0]:
-                headpose_entry = headpose_preds[frame_idx]
-            elif 0 <= frame_idx < len(headpose_preds):
+            if 0 <= frame_idx < headpose_preds.shape[0]:
                 headpose_entry = headpose_preds[frame_idx]
             if headpose_entry is not None:
                 headpose_entry = np.asarray(headpose_entry, dtype=np.float32)
-                if headpose_entry.ndim == 1:
-                    headpose_entry = headpose_entry[None, :]
-                if headpose_entry.shape[1] >= 9:
-                    headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
-                    for step_idx, headpose_T in enumerate(headpose_mats):
-                        headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
-                        log_axis(
-                            f"frames/frame_{frame_idx}/headpose_pred/step_{step_idx}",
-                            headpose_robot,
-                            args.axis_len * 0.3,
-                        )
+                headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
+                headpose_points = []
+                for headpose_T in headpose_mats:
+                    headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
+                    headpose_points.append(headpose_robot[:3, 3])
+                rr.log(
+                    f"frames/frame_{frame_idx}/headpose_pred/points",
+                    rr.Points3D(
+                        positions=np.asarray(headpose_points, dtype=np.float32),
+                        colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
+                        radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
+                    ),
+                )
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_tf = _cam_transform_for_frame(frame_idx)
         if cam_tf is not None:
