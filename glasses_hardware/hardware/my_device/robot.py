@@ -123,8 +123,8 @@ class FlexivRobot:
         # self.send_joint_pose(self.home_joint_pos)
         # time.sleep(4)
         if home:
-            self.send_tcp_pose(self.home_pose)
-            #self.send_joint_pose(self.home_joint_pos)
+            #self.send_tcp_pose(self.home_pose)
+            self.send_joint_pose(self.home_joint_pos)
             time.sleep(4)
 
         robot.SwitchMode(mode.NRT_PRIMITIVE_EXECUTION)

@@ -235,7 +235,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_path', action = 'store', type = str, help = 'data path', required = True)
     parser.add_argument('--aug', action = 'store_true', help = 'whether to add 3D data augmentation')
     parser.add_argument('--aug_jitter', action = 'store_true', help = 'whether to add color jitter augmentation')
-    parser.add_argument('--num_action', action = 'store', type = int, help = 'number of action steps', required = False, default = 20)
+    parser.add_argument('--num_action', action = 'store', type = int, help = 'number of action steps', required = False, default = 10)
     parser.add_argument('--voxel_size', action = 'store', type = float, help = 'voxel size', required = False, default = 0.005)
     parser.add_argument('--obs_feature_dim', action = 'store', type = int, help = 'observation feature dimension', required = False, default = 512)
     parser.add_argument('--hidden_dim', action = 'store', type = int, help = 'hidden dimension', required = False, default = 512)

@@ -123,7 +123,7 @@ class GlassesPoseFollower(Node):
         )
         rot_delta_robot = RDF_TO_ROBOT @ rot_delta @ RDF_TO_ROBOT.T
         rotvec = R.from_matrix(rot_delta_robot).as_rotvec() * self._rot_scale
-        rotvec[0], rotvec[2] = rotvec[2], rotvec[0]
+        rotvec[0], rotvec[2] = rotvec[2], rotvec[0] # DEBUG: swap pitch and roll
         rot_norm = float(np.linalg.norm(rotvec))
         if self._max_rot > 0 and rot_norm > self._max_rot:
             rotvec *= self._max_rot / rot_norm

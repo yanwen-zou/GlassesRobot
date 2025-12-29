@@ -9,6 +9,7 @@ import cv2
 import signal
 import numpy as np
 import torch
+import rclpy
 
 from pathlib import Path
 import sys
@@ -37,7 +38,8 @@ from egodata_eval.eval_utils import _import_zed_class  # already imported below;
 import MinkowskiEngine as ME  # type: ignore
 from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
-from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot  # type: ignore
+from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
+from egodata_eval.get_head import HeadPoseReader
 from scripts_calib_balls.calculate_ball_centers import (
     calculate_ball_centroid,
     DEFAULT_MAX_RADIUS_STD_RATIO,
@@ -163,44 +165,55 @@ class TrajectoryPredictor:
             delta_full = np.concatenate([delta_xyz, delta_r6], axis=1)
         return delta_full.astype(np.float32)
 
-    def predict_and_overlay(self, image_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, pose_cam_ob: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> np.ndarray:
+    def predict_and_overlay(
+        self,
+        image_bgr: np.ndarray,
+        depth_m: np.ndarray,
+        K: np.ndarray,
+        pose_cam_ob: np.ndarray,
+        T_base_cam: Optional[np.ndarray] = None,
+        headpose_cond: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         # Convert object pose to base frame if provided
-        if T_base_cam is not None:
-            pose_base_ob = T_base_cam @ pose_cam_ob
-        else:
-            pose_base_ob = pose_cam_ob
+
+        pose_base_ob = T_base_cam @ pose_cam_ob
 
         feats, coords = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
         st = ME.SparseTensor(feats, coords)
         cur_obj = self._current_obj_vec(pose_base_ob)
+        headpose_tensor = None
+        if self.model.enable_headpose_head:
+            if headpose_cond is None:
+                raise ValueError("headpose_cond is required when enable_headpose_head is True.")
+            headpose_tensor = torch.from_numpy(headpose_cond[None, :]).to(self.device)
         with torch.no_grad():
-            outputs = self.model(st, actions_obj = None ,batch_size=1, current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device))
-        if "obj_pred" not in outputs:
-            self.last_traj_denorm = None
-            return image_bgr
+            outputs = self.model(
+                st,
+                actions_obj=None,
+                batch_size=1,
+                current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device),
+                headpose_cond=headpose_tensor,
+            )
         obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
+        if self.model.enable_headpose_head:
+            headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
         # In delta mode, model already returns absolute poses relative to current pose; just denormalize translation.
         obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
+        headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame
+
+        print(f'[INFO] Predicted headpose: {headpose_pred[0:5]}')
+
         self.last_traj_denorm = obj_traj_ref
         # Deltas are not used in current execution path; keep only absolute trajectory
 
-        # Debug prints to compare current FP pose and first predicted absolute pose
-        # fp_xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
-        fp_xyz6d = mat_to_xyz_rot(pose_base_ob, rotation_rep="rotation_6d").astype(np.float32)
-        traj_first_xyz6d = obj_traj_ref[0, :9].astype(np.float32)
-        np.set_printoptions(precision=4, suppress=True)
-        print("[DEBUG] FP xyz6d:", fp_xyz6d)
-        print("[DEBUG] Traj first xyz6d:", traj_first_xyz6d)
-
         pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3+6])
         predicted_points = pose_mats_ref[:, :3, 3]  # (N,3)
-        if T_base_cam is not None:
-            T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
-            R = T_cam_base[:3, :3].astype(np.float32)
-            t = T_cam_base[:3, 3].astype(np.float32)
-            points_cam = (R @ predicted_points.T).T + t
-        else:
-            points_cam = predicted_points
+
+        T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
+        R = T_cam_base[:3, :3].astype(np.float32)
+        t = T_cam_base[:3, 3].astype(np.float32)
+        points_cam = (R @ predicted_points.T).T + t
+
         self._cached_points_cam = points_cam.copy()
         overlay = _project_points_with_gradient(image_bgr, K, points_cam,
                                                 color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
@@ -290,16 +303,6 @@ def calibrate_from_three_balls(
 
     frame_rgb = frame[..., ::-1].copy()
 
-    def _show_mask(mask_img: np.ndarray, window: str) -> None:
-        overlay = frame.copy()
-        mask_bool = mask_img.astype(bool)
-        overlay[mask_bool] = (
-            0.4 * overlay[mask_bool].astype(np.float32) + 0.6 * np.array([0, 0, 255], dtype=np.float32)
-        )
-        overlay = overlay.astype(np.uint8)
-        cv2.imshow(window, overlay)
-        cv2.waitKey(10)
-
     cam_pts = []
     for idx, (u, v) in enumerate(pts, 1):
         u = int(round(u))
@@ -363,8 +366,11 @@ def run():
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--base-to-robot-npy", type=str, default='glasses_hardware/calib/T_robot_base.npy', help="Path to T_robot_base.npy (maps base->robot). Default: identity.")
-    ap.add_argument("--num_action", type=int, default=20)
+    ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--mesh-name", type=str, default="book", help="Name of mesh folder under data/ containing mesh.obj.")
+    ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
+    ap.add_argument("--headpose-topic", type=str, default="/glasses_pose", help="ROS2 topic for headpose (PoseStamped).")
+    ap.add_argument("--tcp-zed", type=str, default="glasses_hardware/calib/T_tcp_zed.txt", help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = 10
@@ -383,7 +389,7 @@ def run():
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'
     calib_dir.mkdir(parents=True, exist_ok=True)
-    T_base_cam = None
+    T_base_cam0 = None
     # Optional base->robot transform (default identity)
     T_robot_base = np.eye(4, dtype=np.float32)
     if args.base_to_robot_npy:
@@ -403,17 +409,12 @@ def run():
     i2rt_robot = I2RT(channel="can0", zero_gravity_mode=True, home=False)
     time.sleep(3)
 
-    T_base_cam = calibrate_from_three_balls(
+    T_base_cam0 = calibrate_from_three_balls(
         cam,
         depth_est,
         move_robot_fn=lambda: move_i2rt_to_init_angles(i2rt_robot),
         centroid_log_dir=out_dir,
     )
-    if T_base_cam is not None:
-        runtime_cam_path = out_dir / "T_base_cam_runtime.npy"
-        np.save(runtime_cam_path, T_base_cam.astype(np.float32))
-        print(f"[INFO] Saved runtime T_base_cam to: {runtime_cam_path}")
-
     cam_size = cam.size
 
     disp_w = int(cam_size[0])
@@ -454,11 +455,17 @@ def run():
     last_mask = None
     last_depth_m = None  # cache last computed depth
     traj_pred = None
+    headpose_reader = None
 
     # Try initialize trajectory predictor (optional)
 
-    traj_pred = TrajectoryPredictor(ckpt_path=Path(args.ckpt), num_action= args.num_action) # current traj pred is under base frame
+    traj_pred = TrajectoryPredictor(ckpt_path = Path(args.ckpt), 
+                                    num_action = args.num_action, 
+                                    enable_headpose_head = args.enable_headpose_head) # current traj pred is under base frame
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
+    if args.enable_headpose_head:
+        rclpy.init(args=None)
+        headpose_reader = HeadPoseReader(args.headpose_topic, args.tcp_zed, T_base_cam0)
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
     tcp_history: list[np.ndarray] = []
@@ -531,12 +538,23 @@ def run():
                     if traj_pred is not None and pose_est.pose_cam_ob is not None:
                         if do_update:
                             print("[INFO] Running trajectory prediction...")
+                            headpose_norm = None
+                            if args.enable_headpose_head:
+                                T_base_cam = headpose_reader.get_headpos(timeout_sec=0.0) if headpose_reader else None
+                                if T_base_cam is None:
+                                    raise RuntimeError("[eval] No headpose received yet from topic.")
+                                headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
+                                headpose_norm = headpose_raw.copy() # [x,y,z,r6d] 9-dim
+                                headpose_norm[:3] = (headpose_norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+                            else:
+                                T_base_cam = T_base_cam0
                             frame = traj_pred.predict_and_overlay(
                                 frame,
                                 depth_m,
                                 K_rs,
                                 pose_est.pose_cam_ob.astype(np.float32),
                                 T_base_cam=T_base_cam,
+                                headpose_cond=headpose_norm,
                             )
                             # Execute first N steps relative to current TCP using robot_replay logic
                             steps_to_execute = 3  # how many relative steps to send each update
@@ -618,6 +636,10 @@ def run():
             torch.cuda.empty_cache()
     finally:
         # Release resources and save video
+        if headpose_reader is not None:
+            headpose_reader.destroy_node()
+        if args.enable_headpose_head:
+            rclpy.shutdown()
 
         if writer is not None:
             writer.release()
