@@ -90,7 +90,7 @@ class TrajectoryPredictor:
     def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Backproject depth to xyz and optionally convert to base (ball) frame."""
         h, w = depth_m.shape
-        print(f"[Traj Predictor INFO] depth_m.shape(h,w):{depth_m.shape}")
+        # print(f"[Traj Predictor INFO] depth_m.shape(h,w):{depth_m.shape}")
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
         # Subsample grid for speed
@@ -593,7 +593,7 @@ def run():
                             # Record current pose + predicted sequence in robot frame
                             # First convert current object pose from FP to robot frame
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
-                            print(f"[INFO] OB In Cam: {pose_cam_ob}")
+                            #print(f"[INFO] OB In Cam: {pose_cam_ob}")
 
                             pose_base_ob = T_base_cam @ pose_cam_ob
                             pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
@@ -638,10 +638,10 @@ def run():
                                     if steps_grip is not None and i < len(steps_grip):
                                         grip_val = float(steps_grip[i])
                                         width_cmd = open_width if grip_val > open_thresh else 0.0
-                                        print(f"[EVAL] step {i+1}/{robot_rel_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
+                                        # print(f"[EVAL] step {i+1}/{robot_rel_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
                                         gripper.move(width_cmd)
 
-                                    print(f"[EVAL] send step {i+1}/{robot_rel_pts.shape[0]} pose7=", np.round(pose7, 6))
+                                    #print(f"[EVAL] send step {i+1}/{robot_rel_pts.shape[0]} pose7=", np.round(pose7, 6))
                                     # robot.send_tcp_pose(pose7)
                                     executed_poses.append(pose7.copy())
 

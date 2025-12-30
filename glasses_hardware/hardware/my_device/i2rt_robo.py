@@ -223,7 +223,7 @@ class I2RT:
             )
             self._dq_cmd = self._dq_cmd + ddq * dt
             self._q_cmd = self._q_cmd + self._dq_cmd * dt
-            print(f"step {idx + 1}/{steps} joint vel (rad/s): {np.round(self._dq_cmd, 2)}")
+            # print(f"step {idx + 1}/{steps} joint vel (rad/s): {np.round(self._dq_cmd, 2)}")
             self._robot.command_joint_state({"pos": self._q_cmd, "vel": self._dq_cmd})
             if idx < steps - 1:
                 time.sleep(dt)
