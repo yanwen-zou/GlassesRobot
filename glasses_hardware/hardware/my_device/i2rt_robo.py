@@ -17,6 +17,7 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import sys
+import portal
 
 # Make repo modules importable when run as a script.
 here = Path(__file__).resolve()
@@ -33,6 +34,10 @@ sys.modules.pop("i2rt.robots", None)
 from i2rt.robots.get_robot import get_yam_robot
 from i2rt.robots.kinematics_mj import Kinematics
 from i2rt.robots.utils import YAM_XML_PATH
+from MBA.utils.transformation import rotation_transform  # type: ignore
+
+
+DEFAULT_ROBOT_PORT = 11333
 
 
 class I2RT:
@@ -55,6 +60,7 @@ class I2RT:
         self._home = home
         self._q_cmd = None
         self._dq_cmd = None
+        self._kin = Kinematics(YAM_XML_PATH, "grasp_site")
 
         if self._home:
             zero_pose = np.zeros(self.num_dofs(), dtype=np.float64)
@@ -88,6 +94,30 @@ class I2RT:
         """Move to the given joint configuration specified in radians."""
         target = np.asarray(target_joint_pos_rad, dtype=np.float64)
         self._send_joint_pos_rad(target, duration=duration, steps=steps)
+
+    def send_ee_pos(
+        self,
+        target_xyz_rot6d: Sequence[float],
+        duration: Optional[float] = None,
+        steps: Optional[int] = None,
+    ) -> None:
+        """Solve IK for xyz+rot6d and send joint position."""
+        target = np.asarray(target_xyz_rot6d, dtype=np.float64)
+        if target.shape[0] != 9:
+            raise ValueError(f"Expected xyz+rot6d (9,), got {target.shape}")
+        xyz = target[:3]
+        r6 = target[3:9]
+
+        rot = rotation_transform(r6[None, :], "rotation_6d", "matrix").squeeze(0)
+
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = rot
+        pose[:3, 3] = xyz.astype(np.float32)
+
+        success, q_sol = self._kin.ik(pose, "grasp_site", verbose=False)
+        if not success:
+            raise RuntimeError("IK failed for target pose.")
+        self.send_joint_pos_rad(q_sol[: self.num_dofs()], duration=duration, steps=steps)
 
     def _compute_sync_profile(self, q_start: np.ndarray, target: np.ndarray, duration: float):
         dist = np.abs(target - q_start)
@@ -198,21 +228,49 @@ class I2RT:
             if idx < steps - 1:
                 time.sleep(dt)
 
+class I2RTServer:
+    def __init__(self, robot: I2RT, port: int = DEFAULT_ROBOT_PORT) -> None:
+        self._robot = robot
+        self._server = portal.Server(str(port))
+        self._server.bind("num_dofs", self._robot.num_dofs)
+        self._server.bind("current_joint_pos", self._robot.current_joint_pos)
+        self._server.bind("send_joint_pos_deg", self._robot.send_joint_pos_deg)
+        self._server.bind("send_joint_pos_rad", self._robot.send_joint_pos_rad)
+        self._server.bind("send_ee_pos", self._robot.send_ee_pos)
+        self._server.bind("close", self._robot.close)
+
+    def serve(self) -> None:
+        self._server.start()
+
+
+class I2RTClient:
+    def __init__(self, host: str = "127.0.0.1", port: int = DEFAULT_ROBOT_PORT) -> None:
+        self._client = portal.Client(f"{host}:{port}")
+
+    def num_dofs(self) -> int:
+        return self._client.num_dofs().result()
+
+    def current_joint_pos(self) -> np.ndarray:
+        return self._client.current_joint_pos().result()
+
+    def send_joint_pos_deg(self, target_joint_pos_deg: Sequence[float], duration: Optional[float] = None, steps: Optional[int] = None) -> None:
+        self._client.send_joint_pos_deg(target_joint_pos_deg, duration, steps)
+
+    def send_joint_pos_rad(self, target_joint_pos_rad: Sequence[float], duration: Optional[float] = None, steps: Optional[int] = None) -> None:
+        self._client.send_joint_pos_rad(target_joint_pos_rad, duration, steps)
+
+    def send_ee_pos(self, target_xyz_rot6d: Sequence[float], duration: Optional[float] = None, steps: Optional[int] = None) -> None:
+        self._client.send_ee_pos(target_xyz_rot6d, duration, steps)
+
+    def close(self) -> None:
+        self._client.close()
+
+
 def main():
     robot = I2RT(channel="can0", zero_gravity_mode=True)
-    print("Current joint positions (deg):", np.rad2deg(robot.current_joint_pos()))
-    target_pose_rad = [0.0, 0.15, 0.25, 0, 0.0, 0.0, 0]
-    zero_pose_rad = np.zeros(robot.num_dofs())
-    print(f"Moving to target joint positions (rad): {target_pose_rad}")
-    model = Kinematics(YAM_XML_PATH, "tcp_site")
-    """执行 IK 插值路径"""
-    q_init = np.array([0.0, 0.15, 0.25, 0, 0.0, 0.0])
-    pose_init = model.fk(q_init)
-
-    while True:
-        robot.send_joint_pos_rad(target_pose_rad, duration=2.0, steps=100)
-        robot.send_joint_pos_rad(zero_pose_rad, duration=2.0, steps=100)
-    print("Reached target joint positions.")
+    server = I2RTServer(robot, DEFAULT_ROBOT_PORT)
+    print(f"[INFO] I2RT RPC server listening on {DEFAULT_ROBOT_PORT}")
+    server.serve()
 
 if __name__ == "__main__":
     main()

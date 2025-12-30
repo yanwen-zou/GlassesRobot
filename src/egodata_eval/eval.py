@@ -29,7 +29,14 @@ _import_zed_class   # type: ignore
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
 from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
 from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
-from glasses_hardware.hardware.my_device.i2rt_robo import I2RT  # type: ignore
+import multiprocessing as mp
+from glasses_hardware.hardware.my_device.i2rt_robo import (
+    I2RT,
+    I2RTClient,
+    I2RTServer,
+    DEFAULT_ROBOT_PORT,
+)  # type: ignore
+
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
 
@@ -267,13 +274,10 @@ def calibrate_from_three_balls(
     if move_robot_fn is not None:
         move_robot_fn()
     print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
-    first = cam_handle.read_stereo()
-    if first is None:
-        print("[WARN] Could not grab frame for ball calibration.")
-        return None
-    frame, frame_right = first
     K_rs = depth_est.K.astype(np.float32)
     pts: list[tuple[float, float]] = []
+    last_frame = None
+    last_frame_right = None
 
     click_state = {"done": False}
 
@@ -287,8 +291,16 @@ def calibrate_from_three_balls(
     win_calib = "Ball Calibration"
     cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
     cv2.setMouseCallback(win_calib, _on_mouse)
-    disp = frame.copy()
     while True:
+        stereo = cam_handle.read_stereo()
+        if stereo is None:
+            continue
+        frame, frame_right = stereo
+        last_frame = frame.copy()
+        last_frame_right = frame_right
+        disp = frame.copy()
+        for pt in pts:
+            cv2.circle(disp, (int(pt[0]), int(pt[1])), 5, (0, 255, 255), -1)
         cv2.imshow(win_calib, disp)
         k = cv2.waitKey(10) & 0xFF
         if click_state["done"] or k in (27, ord('q')):
@@ -296,6 +308,11 @@ def calibrate_from_three_balls(
     cv2.destroyWindow(win_calib)
 
     # Depth for clicked points + mask-based centroid refinement
+    if last_frame is None or last_frame_right is None:
+        print("[WARN] Could not grab frame for ball calibration.")
+        return None
+    frame = last_frame
+    frame_right = last_frame_right
     depth_m = depth_est.depth(frame, frame_right)
     fx, fy = K_rs[0, 0], K_rs[1, 1]
     cx, cy = K_rs[0, 2], K_rs[1, 2]
@@ -360,6 +377,11 @@ def calibrate_from_three_balls(
     print(T)
     return T
 
+def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
+    robot = I2RT(channel=channel, zero_gravity_mode=True, home=home)
+    server = I2RTServer(robot, port)
+    server.serve()
+
 
 def run():
     import argparse
@@ -405,8 +427,16 @@ def run():
     robot = FlexivRobot(home=False)
     gripper = FlexivGripper(robot)
 
-    print("[INFO] Initializing I2RT...")
-    i2rt_robot = I2RT(channel="can0", zero_gravity_mode=True, home=False)
+    i2rt_server_proc = None
+    print("[INFO] Initializing I2RT (RPC)...")
+    i2rt_server_proc = mp.Process(
+        target=_run_i2rt_server,
+        args=("can0", False, DEFAULT_ROBOT_PORT),
+        daemon=True,
+    )
+    i2rt_server_proc.start()
+    i2rt_robot = I2RTClient(port=DEFAULT_ROBOT_PORT)
+
     time.sleep(3)
 
     T_base_cam0 = calibrate_from_three_balls(
@@ -666,7 +696,9 @@ def run():
 
         if i2rt_robot is not None:
             i2rt_robot.close()
-
+        if i2rt_server_proc is not None and i2rt_server_proc.is_alive():
+            i2rt_server_proc.terminate()
+            i2rt_server_proc.join(timeout=2.0)
 
 
 if __name__ == "__main__":

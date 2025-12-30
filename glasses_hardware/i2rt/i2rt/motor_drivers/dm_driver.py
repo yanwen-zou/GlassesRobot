@@ -486,6 +486,15 @@ class DMChainCanInterface(MotorChain):
         Control loop for updating motor torques and states at a fixed frequency.
         If step_time > EXPECTED_CONTROL_PERIODs, it will report the number of step_time > EXPECTED_CONTROL_PERIODs and mean step_time every REPORT_INTERVAL seconds.
         """
+        rt_prio = int(os.environ.get("I2RT_RT_PRIORITY", "0"))
+        if rt_prio > 0:
+            try:
+                os.sched_setscheduler(0, os.SCHED_RR, os.sched_param(rt_prio))
+                logging.info(f"[I2RT] Set control loop RT priority to {rt_prio}")
+            except PermissionError:
+                logging.warning(f"[I2RT] No permission to set RT priority {rt_prio}; skipping.")
+            except Exception as exc:
+                logging.warning(f"[I2RT] Failed to set RT priority: {exc}")
         last_step_time = time.time()
         step_time_exceed_count = 0
         step_time_sum = 0.0

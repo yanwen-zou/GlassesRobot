@@ -1,1 +1,0 @@
-from pytorch3d import renderer 
