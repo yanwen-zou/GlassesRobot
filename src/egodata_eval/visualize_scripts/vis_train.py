@@ -64,8 +64,8 @@ def main():
     parser.add_argument(
         "--T_robot_base",
         type=Path,
-        default=Path("glasses_hardware/calib/T_robot_base.txt"),
-        help="Path to T_robot_base.txt (base->robot).",
+        default=Path("glasses_hardware/calib/T_robot_base.npy"),
+        help="Path to T_robot_base.npy (base->robot).",
     )
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length for frames.")
     parser.add_argument(
@@ -79,48 +79,16 @@ def main():
 
     data_dir = args.data_dir.resolve()
     pose_records = load_records(data_dir / "robot_pose_records.npy")
-    try:
-        executed = load_array(data_dir / "robot_executed_poses.npy")
-        tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
-    except Exception:
-        executed = None
-        tcp_hist = None
+    executed = load_array(data_dir / "robot_executed_poses.npy")
+    tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
     try:
         headpose_preds = load_array(data_dir / "headpose_pred.npy")
     except Exception:
         headpose_preds = None
 
-    T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
+    T_robot_base = np.load(args.T_robot_base).astype(np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
     T_base_cam_seq = load_array(runtime_cam_path)
-
-    def _load_ball_centroids(path: Optional[Path], search_root: Path) -> tuple[np.ndarray | None, Optional[Path]]:
-        search_path = path
-        if search_path is None:
-            candidates = sorted(search_root.glob("ball_centroids_*.txt"))
-            if candidates:
-                search_path = candidates[-1]
-        if search_path is None or not search_path.exists():
-            return None, None
-        points: list[list[float]] = []
-        with open(search_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.lower().startswith("ball_id"):
-                    continue
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                try:
-                    coords = [float(parts[1]), float(parts[2]), float(parts[3])]
-                except ValueError:
-                    continue
-                points.append(coords)
-        if not points:
-            return None, None
-        return np.array(points, dtype=np.float32), search_path
-
-    ball_centroids, centroid_source_path = _load_ball_centroids(args.ball_centroids, data_dir) # in cam coordinate
 
     try:
         import rerun as rr
@@ -180,20 +148,6 @@ def main():
         pts_base = (T_base_cam @ homog.T).T
         pts_robot = (T_robot_base @ pts_base.T).T
         return pts_robot[:, :3]
-
-    ball_centroids_robot = _transform_points_cam_to_robot(ball_centroids)
-
-    if ball_centroids_robot is not None:
-        rr.log(
-            "calibration/ball_centroids",
-            rr.Points3D(
-                positions=ball_centroids_robot,
-                colors=np.array([[255, 105, 180, 255]] * ball_centroids_robot.shape[0], dtype=np.uint8),
-                radii=np.full(ball_centroids_robot.shape[0], args.axis_len * 0.06, dtype=np.float32),
-            ),
-        )
-        if centroid_source_path is not None:
-            print(f"[INFO] Visualizing ball centroids from {centroid_source_path}")
 
     for rec in pose_records:
         frame_idx = rec.get("frame_idx", -1)

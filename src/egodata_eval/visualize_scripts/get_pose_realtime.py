@@ -9,7 +9,6 @@ import cv2
 import signal
 import numpy as np
 import torch
-import rclpy
 
 from pathlib import Path
 import sys
@@ -46,194 +45,11 @@ import MinkowskiEngine as ME  # type: ignore
 from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
-from egodata_eval.get_head import HeadPoseReader
 from scripts_calib_balls.calculate_ball_centers import (
     calculate_ball_centroid,
     DEFAULT_MAX_RADIUS_STD_RATIO,
 )
 from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
-
-class TrajectoryPredictor:
-    def __init__(
-        self,
-        ckpt_path: Path,
-        num_action: int = 20,
-        obj_pose_mode: str = "delta",
-        voxel_size: float = 0.005,
-        enable_headpose_head: bool = False,
-        headpose_dim: int = 9,
-    ):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.num_action = num_action
-        self.obj_pose_mode = obj_pose_mode
-        self.voxel_size = voxel_size
-        self._cached_points_cam: Optional[np.ndarray] = None
-        self.last_traj_denorm: Optional[np.ndarray] = None
-        self.model = RISE(num_action=num_action,
-                          input_dim=6,
-                          obs_feature_dim=512,
-                          action_dim=10,
-                          hidden_dim=512,
-                          enable_mba=True,
-                          obj_dim=10,
-                          obj_pose_mode=obj_pose_mode,
-                          enable_headpose_head=enable_headpose_head,
-                          headpose_dim=headpose_dim).to(self.device).eval()
-        if ckpt_path is None:
-            raise ValueError("ckpt_path is required; please pass --ckpt to eval.py")
-        ckpt_path = Path(ckpt_path)
-        if not ckpt_path.exists():
-            raise FileNotFoundError(f"Trajectory ckpt not found: {ckpt_path}")
-        state = torch.load(str(ckpt_path), map_location=self.device)
-        self.model.load_state_dict(state, strict=False)
-
-    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Backproject depth to xyz and optionally convert to base (ball) frame."""
-        h, w = depth_m.shape
-        # print(f"[Traj Predictor INFO] depth_m.shape(h,w):{depth_m.shape}")
-        fx, fy = K[0, 0], K[1, 1]
-        cx, cy = K[0, 2], K[1, 2]
-        # Subsample grid for speed
-        step = max(1, int(max(h, w) / 480)) # for case that h=376, w=672, step = 1
-        print(f"[INFO] step: {step}")
-        ys, xs = np.mgrid[0:h:step, 0:w:step]
-        zs = depth_m[ys, xs]
-        valid = zs > 1e-6
-        xs = xs[valid].astype(np.float32)
-        ys = ys[valid].astype(np.float32)
-        zs = zs[valid].astype(np.float32)
-        xs3 = (xs - cx) * zs / fx
-        ys3 = (ys - cy) * zs / fy
-        xyz_cam = np.stack([xs3, ys3, zs], axis=-1)
-        if T_base_cam is not None:
-            R = T_base_cam[:3, :3].astype(np.float32)
-            t = T_base_cam[:3, 3].astype(np.float32)
-            xyz = (R @ xyz_cam.T).T + t
-        else:
-            xyz = xyz_cam
-        # Colors to [0,1]
-        rgb = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
-        colors = rgb[ys.astype(int), xs.astype(int)].astype(np.float32) / 255.0
-        colors = (colors - IMG_MEAN) / IMG_STD
-        cloud = np.concatenate([xyz, colors], axis=-1).astype(np.float32)
-
-        # Remove any rows with non-finite values to avoid NaNs in voxelization
-        finite_mask = np.isfinite(cloud).all(axis=1)
-        cloud = cloud[finite_mask]
-
-        coords = np.ascontiguousarray((cloud[:, :3] / self.voxel_size).astype(np.int32))
-        feats = cloud.astype(np.float32)
-        # Collate into ME batched format
-        coords_me, feats_me = ME.utils.sparse_collate([coords], [feats])
-
-        # ME may already return torch tensors depending on version; handle both
-        if isinstance(feats_me, np.ndarray):
-            feats_t = torch.from_numpy(feats_me)
-        else:
-            feats_t = feats_me
-        if isinstance(coords_me, np.ndarray):
-            coords_t = torch.from_numpy(coords_me)
-        else:
-            coords_t = coords_me
-
-        return feats_t.to(self.device), coords_t.to(self.device)
-
-    def _current_obj_vec(self, pose_cam_ob: np.ndarray) -> np.ndarray:
-        xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
-        term = np.array([0.0], dtype=np.float32)
-        cur = np.concatenate([xyz6d, term], axis=0)
-        # normalize like dataset
-        norm = cur.copy()
-        norm[:3] = (norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
-        return norm
-
-    def _absolute_to_delta_np(self, abs_traj_10: np.ndarray, base_pose_cam_ob: np.ndarray) -> np.ndarray:
-        """Convert absolute traj (T,10) [xyz(m), rot6d, grip] to delta wrt base_pose.
-
-        Returns: (T,10) with [dxyz, drot6d, grip]
-        """
-        if abs_traj_10 is None or abs_traj_10.size == 0:
-            return abs_traj_10
-        base_xyz6d = mat_to_xyz_rot(base_pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
-        base_xyz = base_xyz6d[:3]
-        base_r6 = base_xyz6d[3:9]
-        # Translation delta
-        delta_xyz = abs_traj_10[:, :3] - base_xyz[None, :]
-        # Rotation delta: R_delta = R_abs @ R_base^T
-        R_abs = rotation_transform(abs_traj_10[:, 3:9], "rotation_6d", "matrix")
-        R_base = rotation_transform(base_r6[None, :], "rotation_6d", "matrix").squeeze(0)
-        R_delta = R_abs @ R_base.T
-        delta_r6 = rotation_transform(R_delta, "matrix", "rotation_6d")
-        # Gripper passthrough if present
-        if abs_traj_10.shape[1] > 9:
-            grip = abs_traj_10[:, 9:10]
-            delta_full = np.concatenate([delta_xyz, delta_r6, grip], axis=1)
-        else:
-            delta_full = np.concatenate([delta_xyz, delta_r6], axis=1)
-        return delta_full.astype(np.float32)
-
-    def predict_and_overlay(
-        self,
-        image_bgr: np.ndarray,
-        depth_m: np.ndarray,
-        K: np.ndarray,
-        pose_cam_ob: np.ndarray,
-        T_base_cam: Optional[np.ndarray] = None,
-        headpose_cond: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        # Convert object pose to base frame if provided
-
-        pose_base_ob = T_base_cam @ pose_cam_ob
-
-        feats, coords = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
-        st = ME.SparseTensor(feats, coords)
-        cur_obj = self._current_obj_vec(pose_base_ob)
-        headpose_tensor = None
-        if self.model.enable_headpose_head:
-            if headpose_cond is None:
-                raise ValueError("headpose_cond is required when enable_headpose_head is True.")
-            headpose_tensor = torch.from_numpy(headpose_cond[None, :]).to(self.device)
-        with torch.no_grad():
-            outputs = self.model(
-                st,
-                actions_obj=None,
-                batch_size=1,
-                current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device),
-                headpose_cond=headpose_tensor,
-            )
-        obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
-        if self.model.enable_headpose_head:
-            headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
-        # In delta mode, model already returns absolute poses relative to current pose; just denormalize translation.
-        obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
-        headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame
-
-        print(f'[INFO] Predicted headpose: {headpose_pred[0:5]}')
-
-        self.last_traj_denorm = obj_traj_ref
-        # Deltas are not used in current execution path; keep only absolute trajectory
-
-        pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3+6])
-        predicted_points = pose_mats_ref[:, :3, 3]  # (N,3)
-
-        T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
-        R = T_cam_base[:3, :3].astype(np.float32)
-        t = T_cam_base[:3, 3].astype(np.float32)
-        points_cam = (R @ predicted_points.T).T + t
-
-        self._cached_points_cam = points_cam.copy()
-        overlay = _project_points_with_gradient(image_bgr, K, points_cam,
-                                                color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
-        return overlay
-
-    def overlay_cached(self, image_bgr: np.ndarray, K: np.ndarray) -> np.ndarray:
-        if self._cached_points_cam is None:
-            return image_bgr
-        return _project_points_with_gradient(
-            image_bgr, K, self._cached_points_cam,
-            color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1,
-        )
-
 
 def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
     try:
@@ -386,7 +202,6 @@ def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
 def run():
     import argparse
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
-    ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--base-to-robot-txt", type=str, default='glasses_hardware/calib/T_robot_base.txt', help="Path to T_robot_base.txt (maps base->robot). Default: identity.")
     ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--mesh-name", type=str, default="book", help="Name of mesh folder under data/ containing mesh.obj.")
@@ -397,7 +212,7 @@ def run():
     update_interval = 10
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Prepare video output
-    out_dir = Path(__file__).resolve().parent / "eval_output" / ts
+    out_dir = Path(__file__).resolve().parents[1] / "eval_output" / ts
     out_dir.mkdir(parents=True, exist_ok=True)
     headpose_topic = "/glasses_pose"
     video_path = out_dir / "stream.mp4"
@@ -484,18 +299,9 @@ def run():
     pose_ready = False
     last_mask = None
     last_depth_m = None  # cache last computed depth
-    traj_pred = None
     headpose_reader = None
 
-    # Try initialize trajectory predictor (optional)
 
-    traj_pred = TrajectoryPredictor(ckpt_path = Path(args.ckpt), 
-                                    num_action = args.num_action, 
-                                    enable_headpose_head = args.enable_headpose_head) # current traj pred is under base frame
-    print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
-    if args.enable_headpose_head:
-        rclpy.init(args=None)
-        headpose_reader = HeadPoseReader(headpose_topic, args.tcp_zed, T_base_cam0)
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
     tcp_history: list[np.ndarray] = []
@@ -550,7 +356,7 @@ def run():
                     continue
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
-                    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj"
+                    mesh_path = Path(__file__).resolve().parents[3] / "data" / args.mesh_name / "mesh.obj"
                     if not mesh_path.exists():
                         raise FileNotFoundError(f"Mesh not found: {mesh_path}")
                     if pose_est is None:
@@ -566,93 +372,27 @@ def run():
                     frame = pose_est.draw_overlay(frame, K_rs)
 
                     # Overlay trajectory prediction; then execute a few steps on robot
-                    if traj_pred is not None and pose_est.pose_cam_ob is not None:
+                    if pose_est.pose_cam_ob is not None:
                         if do_update:
                             print("[INFO] Running trajectory prediction...")
                             headpose_norm = None
-                            if args.enable_headpose_head:
-                                T_base_cam = headpose_reader.get_headpos(timeout_sec=0.0) if headpose_reader else None
-                                if T_base_cam is None:
-                                    raise RuntimeError("[eval] No headpose received yet from topic.")
-                                headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
-                                headpose_norm = headpose_raw.copy() # [x,y,z,r6d] 9-dim
-                                headpose_norm[:3] = (headpose_norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
-                            else:
-                                T_base_cam = T_base_cam0 # fixed head
+                            T_base_cam = T_base_cam0 # fixed head
                             if T_base_cam is not None:
                                 T_base_cam_runtime.append(T_base_cam.astype(np.float32))
-                            frame = traj_pred.predict_and_overlay(
-                                frame,
-                                depth_m,
-                                K_rs,
-                                pose_est.pose_cam_ob.astype(np.float32),
-                                T_base_cam=T_base_cam,
-                                headpose_cond=headpose_norm,
-                            )
-                            # Execute first N steps relative to current TCP using robot_replay logic
-                            steps_to_execute = 3  # how many relative steps to send each update
-                            # Gripper signal per step if available (10th channel)
-                            grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
-                            # Record current pose + predicted sequence in robot frame
-                            # First convert current object pose from FP to robot frame
+
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
                             #print(f"[INFO] OB In Cam: {pose_cam_ob}")
 
                             pose_base_ob = T_base_cam @ pose_cam_ob
                             pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
-                            pose_seq_robot = None
-
-                            pose_seq_base = _build_pose_mats(
-                                traj_pred.last_traj_denorm[:, :3],
-                                traj_pred.last_traj_denorm[:, 3:3+6],
-                            )
-                            pose_seq_robot = np.einsum(
-                                'ij,njk->nik',
-                                T_robot_base.astype(np.float32),
-                                pose_seq_base.astype(np.float32),
-                            ) # [N,4,4], SE3 in robot frame
 
                             pose_records.append(
                                 {
                                     "timestamp": float(time.time()),
                                     "frame_idx": int(frame_idx),
                                     "object_pose_robot": pose_robot_ob.astype(np.float32),
-                                    "pred_seq_robot": pose_seq_robot.astype(np.float32),
                                 }
                             )
-
-                            # Take the first `steps_to_execute` non-zero steps starting from index 1
-                            steps_grip = None
-                            if grip_seq is not None:
-                                steps_grip = grip_seq[1:1+int(steps_to_execute)]
-                            if pose_seq_robot.size > 0:
-                                # convert pose to pts
-                                robot_rel_pts = pose_seq_robot[1:1+int(steps_to_execute), :3, 3] - pose_robot_ob[:3, 3][None, :]
-                                # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
-                                curr_pose7 = robot.get_tcp_pose().astype(np.float32)
-                                start_xyz = curr_pose7[:3].astype(np.float32)
-                                start_quat = curr_pose7[3:7].astype(np.float32)
-                                open_width = getattr(gripper, 'max_width', 0.085)
-                                open_thresh = 0.8
-                                for i in range(robot_rel_pts.shape[0]):
-                                    xyz = start_xyz + robot_rel_pts[i]
-                                    pose7 = np.concatenate([xyz, start_quat], axis=0).astype(np.float32)
-                                    # Gripper control if grip available
-                                    if steps_grip is not None and i < len(steps_grip):
-                                        grip_val = float(steps_grip[i])
-                                        width_cmd = open_width if grip_val > open_thresh else 0.0
-                                        # print(f"[EVAL] step {i+1}/{robot_rel_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
-                                        gripper.move(width_cmd)
-
-                                    #print(f"[EVAL] send step {i+1}/{robot_rel_pts.shape[0]} pose7=", np.round(pose7, 6))
-                                    # robot.send_tcp_pose(pose7)
-                                    executed_poses.append(pose7.copy())
-
-                                    tcp_history.append(robot.get_tcp_pose().astype(np.float32))
-
-                                    time.sleep(0.05)
-                        else:
-                            frame = traj_pred.overlay_cached(frame, K_rs)
                 frame_idx += 1 # increment frame index only when depth is enabled
 
             # Refresh display from possibly overlaid frame
@@ -671,8 +411,6 @@ def run():
         # Release resources and save video
         if headpose_reader is not None:
             headpose_reader.destroy_node()
-        if args.enable_headpose_head:
-            rclpy.shutdown()
 
         if writer is not None:
             writer.release()
