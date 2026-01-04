@@ -64,8 +64,8 @@ def main():
     parser.add_argument(
         "--T_robot_base",
         type=Path,
-        default=Path("glasses_hardware/calib/T_robot_base.npy"),
-        help="Path to T_robot_base.npy (base->robot).",
+        default=Path("glasses_hardware/calib/T_robot_base.txt"),
+        help="Path to T_robot_base.txt (base->robot).",
     )
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length for frames.")
     parser.add_argument(
@@ -86,7 +86,7 @@ def main():
     except Exception:
         headpose_preds = None
 
-    T_robot_base = np.load(args.T_robot_base).astype(np.float32)
+    T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
     T_base_cam_seq = load_array(runtime_cam_path)
 

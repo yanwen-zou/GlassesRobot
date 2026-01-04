@@ -1,3 +1,6 @@
+"""
+For real-time obj pose est, but no inference
+"""
 import time
 from datetime import datetime
 from pathlib import Path
@@ -165,6 +168,7 @@ def calibrate_from_three_balls(
         if centroid is not None:
             cam_pts.append(centroid)
             print(f"[INFO] Mask centroid for p{idx}: {centroid}")
+            print(f"[INFO] Ball p{idx} depth (z): {float(centroid[2]):.6f} m")
             continue
 
     if len(cam_pts) != 3:
@@ -222,6 +226,27 @@ def run():
 
     print("[INFO] Loading FoundationStereo depth model...")
     depth_est = DepthEstimator(scale=0.75) # no need to modify intrinsics;
+    try:
+        zed_handle = getattr(cam, "_zed", cam)
+        info = zed_handle.get_camera_information()
+        config = getattr(info, "camera_configuration", None)
+        calibration = config.calibration_parameters if config else info.calibration_parameters
+        left_cam = calibration.left_cam
+        fx = float(getattr(left_cam, "fx"))
+        fy = float(getattr(left_cam, "fy"))
+        cx = float(getattr(left_cam, "cx"))
+        cy = float(getattr(left_cam, "cy"))
+        depth_est.K = np.array(
+            [
+                [fx, 0.0, cx],
+                [0.0, fy, cy],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        print(f"[INFO] Loaded intrinsics from ZED: fx={fx:.3f}, fy={fy:.3f}, cx={cx:.3f}, cy={cy:.3f}")
+    except Exception as exc:
+        print(f"[WARN] Failed to load intrinsics from ZED; using file defaults. Reason: {exc}")
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / 'glasses_hardware' / 'calib'

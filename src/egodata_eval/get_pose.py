@@ -74,6 +74,15 @@ class PoseEstimatorFP:
         
         pose = self.est.register(K=K.astype(np.float32), rgb=rgb, depth=depth_m.astype(np.float32), ob_mask=mask_bin, iteration=5)
         self.pose_cam_ob = pose
+        valid = (mask_bin > 0) & np.isfinite(depth_m) & (depth_m > 0)
+        if np.any(valid):
+            mean_depth = float(depth_m[valid].mean())
+            print(f"[INFO] Mask mean depth for book: {mean_depth:.4f}m")
+        if pose is not None and np.shape(pose) == (4, 4):
+            xyz = pose[:3, 3].astype(np.float32)
+            dist = float(np.linalg.norm(xyz))
+            print(f"[INFO] Init pose xyz: {xyz}, dist={dist:.4f}m")
+        
         return pose
 
 

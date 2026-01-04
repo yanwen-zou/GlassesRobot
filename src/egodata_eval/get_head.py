@@ -62,7 +62,7 @@ class HeadPoseReader(Node):
         T_base_cam = self._T_base_cam0 @ T_cam0_cam
         self._last_base_cam = T_base_cam
         flat = np.array2string(T_base_cam, precision=4, suppress_small=True)
-        self.get_logger().info(f"T_base_cam:\n{flat}")
+        # self.get_logger().info(f"T_base_cam:\n{flat}")
 
     def get_headpos(self, timeout_sec: float = 0.0) -> Optional[np.ndarray]:
         rclpy.spin_once(self, timeout_sec=timeout_sec)

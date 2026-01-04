@@ -49,13 +49,13 @@ def main() -> None:
     move_home(robot)
     center_pose = robot.get_tcp_pose().copy()
 
-    # 设置运动幅度和速度
-    delta_x = 0
+    delta_x = 0.1
+    delta_y = 0.15
     delta_z = 0.05
 
-    # 定义两个往返目标点（在 X 方向前后移动）
     pose_forward = center_pose.copy()
     pose_forward[0] += delta_x
+    pose_forward[1] += delta_y
     pose_forward[2] += -delta_z
 
     robot.send_tcp_pose(pose_forward)
