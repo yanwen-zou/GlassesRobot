@@ -2,233 +2,59 @@ import time
 from datetime import datetime
 from pathlib import Path
 import sys
-import os
-from typing import Optional
 
 import cv2
 import signal
 import numpy as np
 import torch
 import rclpy
-from scipy.spatial.transform import Rotation as R
 
-from pathlib import Path
-import sys
 here = Path(__file__).resolve()
 project_root = here.parents[2] # 指向仓库根目录
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-# Ensure '<project>/src' is importable, then import click_mask as package
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from FoundationStereo.sam2_root.notebooks.get_mask import click_mask  # type: ignore
-from egodata_eval.eval_utils import save_mask,  \
-_denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient, \
-_import_zed_class   # type: ignore
-
-from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
-from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
-from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
-import multiprocessing as mp
-from glasses_hardware.hardware.my_device.i2rt_robo import (
-    I2RT,
-    I2RTClient,
-    I2RTServer,
-    DEFAULT_ROBOT_PORT,
+from egodata_eval.eval_utils import (
+    calibrate_from_three_balls,
+    click_mask,
+    headpose_base_to_tcp_abs,
+    move_i2rt_to_init_angles,
+    save_mask,
 )  # type: ignore
-from i2rt.robots.kinematics_mj import Kinematics
-from i2rt.robots.utils import YAM_XML_PATH
+from egodata_eval.eval_hardware import EvalHardware
 
-from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
-from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
+from egodata_eval.get_depth import DepthEstimator  # type: ignore
+from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
+from egodata_eval.get_head import HeadPoseReader
 
 # ========== MBA Trajectory Prediction (RISE) ==========
 
-import MinkowskiEngine as ME  # type: ignore
-from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
 from egodata_eval.traj_predictor import TrajectoryPredictor  # type: ignore
-from egodata_eval.get_head import HeadPoseReader
-from scripts_calib_balls.calculate_ball_centers import (
-    calculate_ball_centroid,
-    DEFAULT_MAX_RADIUS_STD_RATIO,
-)
-from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+from egodata_eval.eval_constant import *
 
-def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
-    try:
-        arr = np.loadtxt(str(path), dtype=np.float32)
-        if arr.shape == (4, 4):
-            return arr
-        if arr.shape == (3, 4):
-            arr = np.vstack([arr, np.array([0, 0, 0, 1], dtype=np.float32)])
-            return arr
-    except Exception:
-        return None
-    return None
-
-
-I2RT_TARGET_DEG = [-17, 25, 61, -42, 0, -2,0]
-I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
-
-
-def move_i2rt_to_init_angles(robot: Optional["I2RT"], target_rad: np.ndarray = I2RT_TARGET_RAD, duration: float = 2.0, steps: int = 80) -> None:
-    """Move I2RT arm to the evaluation target joint configuration."""
-    if robot is None:
-        print("[WARN] I2RT arm not initialized; cannot move to init pose.")
-        return
-    try:
-        robot.send_joint_pos_rad(target_rad, duration=duration, steps=steps)
-        print(f"[INFO] Moved I2RT joints to deg {I2RT_TARGET_DEG}")
-    except Exception as exc:
-        print(f"[WARN] I2RT init move failed: {exc}")
-
-
-def calibrate_from_three_balls(
-    cam_handle,
-    depth_est: DepthEstimator,
-    move_robot_fn=None,
-    centroid_log_dir: Optional[Path] = None,
-) -> Optional[np.ndarray]:
-    """Perform ball-based calibration to compute T_base_cam."""
-    if move_robot_fn is not None:
-        move_robot_fn()
-    print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
-    K_rs = depth_est.K.astype(np.float32)
-    pts: list[tuple[float, float]] = []
-    last_frame = None
-    last_frame_right = None
-
-    click_state = {"done": False}
-
-    def _on_mouse(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 3:
-            pts.append((float(x), float(y)))
-            print(f"[INFO] Clicked point {len(pts)}: ({x}, {y})")
-            if len(pts) == 3:
-                click_state["done"] = True
-
-    win_calib = "Ball Calibration"
-    cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback(win_calib, _on_mouse)
-    while True:
-        stereo = cam_handle.read_stereo()
-        if stereo is None:
-            continue
-        frame, frame_right = stereo
-        last_frame = frame.copy()
-        last_frame_right = frame_right
-        disp = frame.copy()
-        for pt in pts:
-            cv2.circle(disp, (int(pt[0]), int(pt[1])), 5, (0, 255, 255), -1)
-        cv2.imshow(win_calib, disp)
-        k = cv2.waitKey(10) & 0xFF
-        if click_state["done"] or k in (27, ord('q')):
-            break
-    cv2.destroyWindow(win_calib)
-
-    # Depth for clicked points + mask-based centroid refinement
-    if last_frame is None or last_frame_right is None:
-        print("[WARN] Could not grab frame for ball calibration.")
-        return None
-    frame = last_frame
-    frame_right = last_frame_right
-    depth_m = depth_est.depth(frame, frame_right)
-    fx, fy = K_rs[0, 0], K_rs[1, 1]
-    cx, cy = K_rs[0, 2], K_rs[1, 2]
-    print(f"[INFO] intrinsics fx={fx}, fy={fy}, cx={cx}, cy={cy}")
-
-    frame_rgb = frame[..., ::-1].copy()
-
-    cam_pts = []
-    for idx, (u, v) in enumerate(pts, 1):
-        u = int(round(u))
-        v = int(round(v))
-        mask = None
-        try:
-            mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
-            if isinstance(mask, list):
-                mask = mask[0]
-        except Exception as exc:
-            print(f"[WARN] SAM mask failed for point {idx}: {exc}")
-
-        centroid = None
-        if mask is not None:
-            mask_arr = np.asarray(mask)
-            if mask_arr.ndim == 3:
-                mask_arr = mask_arr.squeeze(axis=2)
-            centroid = calculate_ball_centroid( # in cam coordinate
-                depth_m=depth_m,
-                mask=mask_arr.astype(bool),
-                intrinsic=K_rs,
-                max_radius_std_ratio=DEFAULT_MAX_RADIUS_STD_RATIO,
-                frame_id=0,
-                ball_id=idx,
-            )
-            # _show_mask(mask_arr.astype(np.uint8), f"Ball Mask {idx}")
-        if centroid is not None:
-            cam_pts.append(centroid)
-            print(f"[INFO] Mask centroid for p{idx}: {centroid}")
-            continue
-
-    if len(cam_pts) != 3:
-        print("[WARN] Failed to compute all three ball centroids; aborting calibration.")
-        return None
-
-    p1, p2, p3 = cam_pts
-
-    # Persist individual ball centroids for debugging/reuse
-    if centroid_log_dir is None:
-        centroid_log_dir = Path(__file__).resolve().parents[2] / "glasses_hardware" / "calib"
-    centroid_log_dir.mkdir(parents=True, exist_ok=True)
-    centroid_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    centroid_log_path = centroid_log_dir / f"ball_centroids_{centroid_ts}.txt"
-    with open(centroid_log_path, "w", encoding="utf-8") as fh:
-        fh.write("ball_id x y z\n")
-        for idx, pt in enumerate((p1, p2, p3), start=1):
-            fh.write(f"ball_{idx} {pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f}\n")
-    print(f"[INFO] Saved per-ball centroids to: {centroid_log_path}") # in cam coordinate
-
-    R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
-    T = np.eye(4, dtype=np.float32)
-    T[:3, :3] = R_base_cam
-    T[:3, 3] = t_base_cam
-    print("[OK] Ball calibration produced T_base_cam:")
-    print(T)
-    return T
-
-def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
-    robot = I2RT(channel=channel, zero_gravity_mode=True, home=home)
-    server = I2RTServer(robot, port)
-    server.serve()
-
-
-def run():
+def main():
     import argparse
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
-    ap.add_argument("--base-to-robot-txt", type=str, default='glasses_hardware/calib/T_robot_base.txt', help="Path to T_robot_base.txt (maps base->robot). Default: identity.")
     ap.add_argument("--num_action", type=int, default=10)
-    ap.add_argument("--mesh-name", type=str, default="book", help="Name of mesh folder under data/ containing mesh.obj.")
+    ap.add_argument("--mesh-name", type=str, default=DEFAULT_MESH_NAME, help="Name of mesh folder under data/ containing mesh.obj.")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
-    ap.add_argument("--tcp-zed", type=str, default="glasses_hardware/calib/T_tcp_zed.txt", help="Path to T_tcp_zed (4x4 SE3).")
+    ap.add_argument("--tcp-zed", type=str, default=DEFAULT_TCP_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
-    update_interval = 10
+    update_interval = UPDATE_INTERVAL
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Prepare video output
     out_dir = Path(__file__).resolve().parent / "eval_output" / ts
     out_dir.mkdir(parents=True, exist_ok=True)
-    headpose_topic = "/glasses_pose"
+    headpose_topic = DEFAULT_POSE_TOPIC
     video_path = out_dir / "stream.mp4"
-    ZEDCamera = _import_zed_class()
-    cam = ZEDCamera(resolution="WVGA", fps=30)
     # Initialize depth estimator and load model at start
 
     print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator(scale=0.75) # no need to modify intrinsics;
+    depth_est = DepthEstimator(scale=DEPTH_EST_SCALE) # no need to modify intrinsics;
     try:
         zed_handle = getattr(cam, "_zed", cam)
         info = zed_handle.get_camera_information()
@@ -252,40 +78,17 @@ def run():
         print(f"[WARN] Failed to load intrinsics from ZED; using file defaults. Reason: {exc}")
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
-    calib_dir = project_root / 'glasses_hardware' / 'calib'
+    calib_dir = project_root / CALIB_DIR_REL
     calib_dir.mkdir(parents=True, exist_ok=True)
     T_base_cam0 = None
-    # Optional base->robot transform (default identity)
-    T_robot_base = np.eye(4, dtype=np.float32)
-    if args.base_to_robot_txt:
-        loaded = _load_calib_mat_safe(Path(args.base_to_robot_txt))
-        if loaded is not None:
-            T_robot_base = loaded.astype(np.float32)
-            print(f"[INFO] Loaded T_robot_base from {args.base_to_robot_txt}")
-        else:
-            print(f"[WARN] Failed to load T_robot_base from {args.base_to_robot_txt}; using identity.")
 
-    # Initialize robot and gripper
-    print("[INFO] Initializing Flexiv and gripper...") # First initialize Flexiv, or I2RT comm will go error
-    robot = FlexivRobot(home=False)
-    gripper = FlexivGripper(robot)
-
-    i2rt_server_proc = None
-    print("[INFO] Initializing I2RT (RPC)...")
-    i2rt_server_proc = mp.Process(
-        target=_run_i2rt_server,
-        args=("can0", False, DEFAULT_ROBOT_PORT),
-        daemon=True,
-    )
-    i2rt_server_proc.start()
-    i2rt_robot = I2RTClient(port=DEFAULT_ROBOT_PORT)
-
-    time.sleep(3)
+    exec_ctx = EvalHardware()
+    cam = exec_ctx.camera
 
     T_base_cam0 = calibrate_from_three_balls(
         cam,
         depth_est,
-        move_robot_fn=lambda: move_i2rt_to_init_angles(i2rt_robot),
+        move_robot_fn=lambda: move_i2rt_to_init_angles(exec_ctx.i2rt_robot),
         centroid_log_dir=out_dir,
     )
     cam_size = cam.size
@@ -294,12 +97,11 @@ def run():
     disp_h = int(cam_size[1])
     print(f"[INFO] Display resolution set from ZEDCamera: {disp_w}x{disp_h}")
 
-    win = "ZED Stream (click to segment)"
+    win = WIN_STREAM
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     # Video writer (writes displayed frames)
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    fps = 30
-    writer = cv2.VideoWriter(str(video_path), fourcc, fps, (disp_w, disp_h))
+    writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (disp_w, disp_h))
 
     # Handle interrupt signal to ensure video is saved
     interrupted = {"flag": False}
@@ -393,7 +195,7 @@ def run():
                     continue
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
-                    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj"
+                    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj" #TODO: Hardcode
                     if not mesh_path.exists():
                         raise FileNotFoundError(f"Mesh not found: {mesh_path}")
                     if pose_est is None:
@@ -411,7 +213,7 @@ def run():
                     # Overlay trajectory prediction; then execute a few steps on robot
                     if traj_pred is not None and pose_est.pose_cam_ob is not None:
                         if do_update:
-                            print("[INFO] Running trajectory prediction...")
+                            # print("[INFO] Running trajectory prediction...")
                             headpose_norm = None
                             if args.enable_headpose_head:
                                 T_base_cam = headpose_reader.get_headpos(timeout_sec=0.0) if headpose_reader else None
@@ -432,75 +234,33 @@ def run():
                                 T_base_cam=T_base_cam,
                                 headpose_cond=headpose_norm,
                             )
-                            # Execute first N steps relative to current TCP using robot_replay logic
-                            steps_to_execute = 3  # how many relative steps to send each update
-                            # Gripper signal per step if available (10th channel)
-                            grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
-                            # Record current pose + predicted sequence in robot frame
-                            # First convert current object pose from FP to robot frame
+                            if args.enable_headpose_head and traj_pred.last_headpose_pred is not None: # execute headpose
+                                headpose_base = traj_pred.last_headpose_pred.astype(np.float32)
+                                headpose_tcp_abs = headpose_base_to_tcp_abs(headpose_base, T_base_cam)
+
+                                end_idx = min(headpose_tcp_abs.shape[0], 1 + STEPS_TO_EXECUTE)
+                                for step_idx in range(1, end_idx):
+                                    exec_ctx.execute_headpose_delta(headpose_tcp_abs[step_idx:step_idx+1])
+
+                            # Saving execution info
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
-                            #print(f"[INFO] OB In Cam: {pose_cam_ob}")
-
-                            pose_base_ob = T_base_cam @ pose_cam_ob
-                            pose_robot_ob = T_robot_base @ pose_base_ob # [4,4]
-                            pose_seq_robot = None
-
-                            pose_seq_base = _build_pose_mats(
-                                traj_pred.last_traj_denorm[:, :3],
-                                traj_pred.last_traj_denorm[:, 3:3+6],
+                            pose_robot_ob, pose_seq_robot, step_poses, step_tcp = exec_ctx.execute_robot_traj(
+                                traj_pred,
+                                pose_cam_ob,
+                                T_base_cam,
                             )
-                            pose_seq_robot = np.einsum(
-                                'ij,njk->nik',
-                                T_robot_base.astype(np.float32),
-                                pose_seq_base.astype(np.float32),
-                            ) # [N,4,4], SE3 in robot frame
-
                             pose_records.append(
                                 {
                                     "timestamp": float(time.time()),
                                     "frame_idx": int(frame_idx),
-                                    "object_pose_robot": pose_robot_ob.astype(np.float32),
-                                    "pred_seq_robot": pose_seq_robot.astype(np.float32),
+                                    "object_pose_robot": pose_robot_ob,
+                                    "pred_seq_robot": pose_seq_robot,
                                 }
                             )
-
-                            # Take the first `steps_to_execute` non-zero steps starting from index 1
-                            steps_grip = None
-                            if grip_seq is not None:
-                                steps_grip = grip_seq[1:1+int(steps_to_execute)]
-                            if pose_seq_robot.size > 0:
-                                # convert pose to pts
-                                robot_rel_pts = pose_seq_robot[1:1+int(steps_to_execute), :3, 3] - pose_robot_ob[:3, 3][None, :]
-                                # Send absolute targets: start_xyz + p_rel_base, keep start quaternion
-                                curr_pose7 = robot.get_tcp_pose().astype(np.float32)
-                                start_xyz = curr_pose7[:3].astype(np.float32)
-                                start_quat = curr_pose7[3:7].astype(np.float32)
-                                start_rot = rotation_transform(start_quat[None, :], "quaternion", "matrix").squeeze(0)
-                                base_obj_rot = pose_robot_ob[:3, :3].astype(np.float32)
-                                open_width = getattr(gripper, 'max_width', 0.085)
-                                open_thresh = 0.8
-                                for i in range(robot_rel_pts.shape[0]):
-                                    xyz = start_xyz + robot_rel_pts[i]
-                                    step_rot = pose_seq_robot[1 + i, :3, :3].astype(np.float32)
-                                    rel_rot = step_rot @ base_obj_rot.T # TODO: Here suppose object is at TCP, offset should be considered.
-                                    #print(f"[EVAL] Step {i+1}: rel_rot=\n", rel_rot)
-                                    target_rot = rel_rot @ start_rot
-                                    target_quat = rotation_transform(target_rot[None, ...], "matrix", "quaternion").squeeze(0)
-                                    pose7 = np.concatenate([xyz, target_quat], axis=0).astype(np.float32)
-                                    # Gripper control if grip available
-                                    if steps_grip is not None and i < len(steps_grip):
-                                        grip_val = float(steps_grip[i])
-                                        width_cmd = open_width if grip_val > open_thresh else 0.0
-                                        # print(f"[EVAL] step {i+1}/{robot_rel_pts.shape[0]} grip={grip_val:.3f} -> width={width_cmd:.3f}")
-                                        gripper.move(width_cmd)
-
-                                    #print(f"[EVAL] send step {i+1}/{robot_rel_pts.shape[0]} pose7=", np.round(pose7, 6))
-                                    robot.send_tcp_pose(pose7)
-                                    executed_poses.append(pose7.copy())
-
-                                    tcp_history.append(robot.get_tcp_pose().astype(np.float32))
-
-                                    time.sleep(0.05)
+                            if step_poses:
+                                executed_poses.extend(step_poses)
+                            if step_tcp:
+                                tcp_history.extend(step_tcp)
                         else:
                             frame = traj_pred.overlay_cached(frame, K_rs)
                 frame_idx += 1 # increment frame index only when depth is enabled
@@ -514,8 +274,8 @@ def run():
             key = cv2.waitKey(1) & 0xFF
             if interrupted["flag"] or key == ord('q') or key == 27:
                 break
-            gripper_width = float(gripper.get_gripper_state())
-            open_width = getattr(gripper, "max_width", 0.085)
+            gripper_width = float(exec_ctx.flexiv_gripper.get_gripper_state())
+            open_width = getattr(exec_ctx.flexiv_gripper, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
             if gripper_width >= 0.8 * open_width:
                 print(f"[INFO] Gripper open ({gripper_width:.4f}m); stopping.")
                 break
@@ -556,12 +316,12 @@ def run():
 
         cam.close()
 
-        if i2rt_robot is not None:
-            i2rt_robot.close()
-        if i2rt_server_proc is not None and i2rt_server_proc.is_alive():
-            i2rt_server_proc.terminate()
-            i2rt_server_proc.join(timeout=2.0)
+        if exec_ctx.i2rt_robot is not None:
+            exec_ctx.i2rt_robot.close()
+        if exec_ctx.i2rt_server_proc is not None and exec_ctx.i2rt_server_proc.is_alive():
+            exec_ctx.i2rt_server_proc.terminate()
+            exec_ctx.i2rt_server_proc.join(timeout=2.0)
 
 
 if __name__ == "__main__":
-    run()
+    main()

@@ -43,8 +43,8 @@ DEFAULT_ROBOT_PORT = 11333
 class I2RT:
     """User-facing helper that exposes simple joint-space commands."""
 
-    MAX_JOINT_VEL_RAD_S = 0.3
-    MAX_JOINT_ACCEL_RAD_S2 = 8.0
+    MAX_JOINT_VEL_RAD_S = 0.2
+    MAX_JOINT_ACCEL_RAD_S2 = 6.0
 
     def __init__(
         self,
@@ -268,9 +268,38 @@ class I2RTClient:
 
 def main():
     robot = I2RT(channel="can0", zero_gravity_mode=True)
-    server = I2RTServer(robot, DEFAULT_ROBOT_PORT)
-    print(f"[INFO] I2RT RPC server listening on {DEFAULT_ROBOT_PORT}")
-    server.serve()
+    try:
+        current_q = robot.current_joint_pos()
+        current_pose = robot._kin.fk(current_q[:6])
+        base_xyz = current_pose[:3, 3].astype(np.float32)
+        base_rot6d = rotation_transform(
+            current_pose[:3, :3][None, ...],
+            "matrix",
+            "rotation_6d",
+        ).squeeze(0)
+        target_up = np.concatenate(
+            [base_xyz + np.array([0.0, 0.0, 0.2], dtype=np.float32), base_rot6d],
+            axis=0,
+        ).astype(np.float32)
+        robot.send_ee_pos(target_up)
+        time.sleep(0.5)
+
+        base_xyz = target_up[:3]
+        target_forward = np.concatenate(
+            [base_xyz + np.array([0.1, 0.0, 0.0], dtype=np.float32), base_rot6d],
+            axis=0,
+        ).astype(np.float32)
+        target_backward = np.concatenate(
+            [base_xyz - np.array([0.1, 0.0, 0.0], dtype=np.float32), base_rot6d],
+            axis=0,
+        ).astype(np.float32)
+        while True:
+            robot.send_ee_pos(target_forward)
+            time.sleep(0.5)
+            robot.send_ee_pos(target_backward)
+            time.sleep(0.5)
+    finally:
+        robot.close()
 
 if __name__ == "__main__":
     main()

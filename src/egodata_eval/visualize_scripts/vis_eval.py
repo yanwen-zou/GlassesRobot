@@ -8,7 +8,6 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import sys
-
 import numpy as np
 
 here = Path(__file__).resolve()
@@ -19,6 +18,7 @@ for path in (src_root, mba_root, project_root):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+from egodata_eval.eval_constant import UPDATE_INTERVAL
 
 def _rotation_6d_to_matrix(rot_6d: np.ndarray) -> np.ndarray:
     a1 = rot_6d[..., 0:3]
@@ -163,13 +163,11 @@ def main():
         return None
 
     def _cam_transform_for_frame(idx: int) -> np.ndarray | None:
-        if T_base_cam_seq is None:
+        update_idx = int(idx // UPDATE_INTERVAL)
+        # print(f"[DEBUG] frame idx: {idx}, update_idx: {update_idx}")
+        if update_idx < 0 or update_idx >= T_base_cam_seq.shape[0]:
             return None
-        if T_base_cam_seq.ndim == 3:
-            if idx < 0 or idx >= T_base_cam_seq.shape[0]:
-                return None
-            return _coerce_matrix(T_base_cam_seq[idx])
-        return _coerce_matrix(T_base_cam_seq)
+        return _coerce_matrix(T_base_cam_seq[update_idx])
 
     def _transform_points_cam_to_robot(points_cam: np.ndarray) -> np.ndarray | None:
         if T_base_cam_seq.ndim == 3:

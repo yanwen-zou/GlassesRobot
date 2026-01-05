@@ -57,7 +57,7 @@ class TrajectoryPredictor:
         cx, cy = K[0, 2], K[1, 2]
         # Subsample grid for speed
         step = max(1, int(max(h, w) / 480)) # for case that h=376, w=672, step = 1
-        print(f"[INFO] step: {step}")
+        # print(f"[INFO] step: {step}")
         ys, xs = np.mgrid[0:h:step, 0:w:step]
         zs = depth_m[ys, xs]
         valid = zs > 1e-6
@@ -171,7 +171,7 @@ class TrajectoryPredictor:
         if self.model.enable_headpose_head:
             headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame
             self.last_headpose_pred = headpose_pred
-            print(f"[INFO] Predicted headpose: {headpose_pred[0:5]}")
+            print(f"[INFO] Predicted headpose: {headpose_pred[0]}")
         else:
             self.last_headpose_pred = None
 

@@ -179,7 +179,7 @@ class FoundationPose:
     @pts: (N,3) np array, downsampled scene points
     '''
     set_seed(0)
-    logging.info('Welcome')
+    # logging.info('Welcome')
 
     if self.glctx is None:
       if glctx is None:
@@ -270,17 +270,17 @@ class FoundationPose:
     if self.pose_last is None:
       logging.info("Please init pose by register first")
       raise RuntimeError
-    logging.info("Welcome")
+    # logging.info("Welcome")
 
     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
     depth = FPUtils.erode_depth(depth, radius=2, device='cuda')
     depth = FPUtils.bilateral_filter_depth(depth, radius=2, device='cuda')
-    logging.info("depth processing done")
+    # logging.info("depth processing done")
 
     xyz_map = FPUtils.depth2xyzmap_batch(depth[None], torch.as_tensor(K, dtype=torch.float, device='cuda')[None], zfar=np.inf)[0]
 
     pose, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=self.pose_last.reshape(1,4,4).data.cpu().numpy(), normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter, glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2)
-    logging.info("pose done")
+    # logging.info("pose done")
     if self.debug>=2:
       extra['vis'] = vis
     self.pose_last = pose

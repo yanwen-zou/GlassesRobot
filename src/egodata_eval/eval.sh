@@ -5,6 +5,10 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
+export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
+
+python -u glasses_hardware/hardware/grasp_test.py
+
 python -u src/egodata_record/egodata_record/headpos_listener.py &
 HEADPOS_PID=$!
 

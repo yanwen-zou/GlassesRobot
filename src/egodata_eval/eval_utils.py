@@ -1,14 +1,44 @@
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
-
 import sys
+
 import numpy as np
 import cv2
 
-
 from MBA.utils.transformation import rotation_transform  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
+from egodata_eval.eval_constant import (
+    CALIB_DIR_REL,
+    I2RT_INIT_DURATION,
+    I2RT_INIT_STEPS,
+    I2RT_TARGET_DEG,
+    I2RT_TARGET_RAD,
+    WIN_CALIB,
+)
+from egodata_eval.get_depth import DepthEstimator  # type: ignore
+from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
+
+RDF_TO_ROBOT = np.array(
+    [
+        [0.0, 0.0, 1.0],   # forward
+        [-1.0, 0.0, 0.0],  # left
+        [0.0, -1.0, 0.0],  # up
+    ],
+    dtype=np.float32,
+)
+from scripts_calib_balls.calculate_ball_centers import (
+    calculate_ball_centroid,
+    DEFAULT_MAX_RADIUS_STD_RATIO,
+)
+from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+
+here = Path(__file__).resolve()
+project_root = here.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "src"))
+from FoundationStereo.sam2_root.notebooks.get_mask import click_mask  # type: ignore
 
 
 
@@ -107,3 +137,174 @@ def _import_zed_class():
     sys.path.insert(0, str(project_root))
     from glasses_hardware.hardware.my_device.zed import ZEDCamera
     return ZEDCamera
+
+
+def headpose_base_to_tcp_abs(headpose_base: np.ndarray, T_base_cam: np.ndarray) -> np.ndarray:
+    pose_seq_base = _build_pose_mats(
+        headpose_base[:, :3],
+        headpose_base[:, 3:3+6],
+    )
+    T_cam_base = np.linalg.inv(T_base_cam.astype(np.float32))
+    pose_seq_cam = np.einsum(
+        "ij,njk->nik",
+        T_cam_base.astype(np.float32),
+        pose_seq_base.astype(np.float32),
+    )
+    R_tcp_cam = RDF_TO_ROBOT.astype(np.float32)
+    pose_seq_tcp = pose_seq_cam.copy()
+    pose_seq_tcp[:, :3, :3] = np.einsum("ij,njk->nik", R_tcp_cam, pose_seq_cam[:, :3, :3])
+    pose_seq_tcp[:, :3, 3] = (R_tcp_cam @ pose_seq_cam[:, :3, 3].T).T
+    xyz_tcp = pose_seq_tcp[:, :3, 3]
+    r6_tcp = rotation_transform(
+        pose_seq_tcp[:, :3, :3],
+        "matrix",
+        "rotation_6d",
+    )
+    return np.concatenate([xyz_tcp, r6_tcp], axis=1).astype(np.float32)
+
+
+def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
+    try:
+        arr = np.loadtxt(str(path), dtype=np.float32)
+        if arr.shape == (4, 4):
+            return arr
+        if arr.shape == (3, 4):
+            arr = np.vstack([arr, np.array([0, 0, 0, 1], dtype=np.float32)])
+            return arr
+    except Exception:
+        return None
+    return None
+
+
+def move_i2rt_to_init_angles(
+    robot: Optional["I2RT"],
+    target_rad: np.ndarray = I2RT_TARGET_RAD,
+    duration: float = I2RT_INIT_DURATION,
+    steps: int = I2RT_INIT_STEPS,
+) -> None:
+    """Move I2RT arm to the evaluation target joint configuration."""
+    if robot is None:
+        print("[WARN] I2RT arm not initialized; cannot move to init pose.")
+        return
+    try:
+        robot.send_joint_pos_rad(target_rad, duration=duration, steps=steps)
+        print(f"[INFO] Moved I2RT joints to deg {I2RT_TARGET_DEG}")
+    except Exception as exc:
+        print(f"[WARN] I2RT init move failed: {exc}")
+
+
+def calibrate_from_three_balls(
+    cam_handle,
+    depth_est: DepthEstimator,
+    move_robot_fn=None,
+    centroid_log_dir: Optional[Path] = None,
+) -> Optional[np.ndarray]:
+    """Perform ball-based calibration to compute T_base_cam."""
+    if move_robot_fn is not None:
+        move_robot_fn()
+    print("[INFO] Click three ball centers (id1, id2, id3) on the first frame to calibrate base.")
+    K_rs = depth_est.K.astype(np.float32)
+    pts: list[tuple[float, float]] = []
+    last_frame = None
+    last_frame_right = None
+
+    click_state = {"done": False}
+
+    def _on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 3:
+            pts.append((float(x), float(y)))
+            print(f"[INFO] Clicked point {len(pts)}: ({x}, {y})")
+            if len(pts) == 3:
+                click_state["done"] = True
+
+    win_calib = WIN_CALIB
+    cv2.namedWindow(win_calib, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(win_calib, _on_mouse)
+    while True:
+        stereo = cam_handle.read_stereo()
+        if stereo is None:
+            continue
+        frame, frame_right = stereo
+        last_frame = frame.copy()
+        last_frame_right = frame_right
+        disp = frame.copy()
+        for pt in pts:
+            cv2.circle(disp, (int(pt[0]), int(pt[1])), 5, (0, 255, 255), -1)
+        cv2.imshow(win_calib, disp)
+        k = cv2.waitKey(10) & 0xFF
+        if click_state["done"] or k in (27, ord('q')):
+            break
+    cv2.destroyWindow(win_calib)
+
+    if last_frame is None or last_frame_right is None:
+        print("[WARN] Could not grab frame for ball calibration.")
+        return None
+    frame = last_frame
+    frame_right = last_frame_right
+    depth_m = depth_est.depth(frame, frame_right)
+    fx, fy = K_rs[0, 0], K_rs[1, 1]
+    cx, cy = K_rs[0, 2], K_rs[1, 2]
+    print(f"[INFO] intrinsics fx={fx}, fy={fy}, cx={cx}, cy={cy}")
+
+    frame_rgb = frame[..., ::-1].copy()
+
+    cam_pts = []
+    for idx, (u, v) in enumerate(pts, 1):
+        u = int(round(u))
+        v = int(round(v))
+        mask = None
+        try:
+            mask = click_mask(frame_rgb, [(u, v)], labels=[1], multimask=True)
+            if isinstance(mask, list):
+                mask = mask[0]
+        except Exception as exc:
+            print(f"[WARN] SAM mask failed for point {idx}: {exc}")
+
+        centroid = None
+        if mask is not None:
+            mask_arr = np.asarray(mask)
+            if mask_arr.ndim == 3:
+                mask_arr = mask_arr.squeeze(axis=2)
+            centroid = calculate_ball_centroid( # in cam coordinate
+                depth_m=depth_m,
+                mask=mask_arr.astype(bool),
+                intrinsic=K_rs,
+                max_radius_std_ratio=DEFAULT_MAX_RADIUS_STD_RATIO,
+                frame_id=0,
+                ball_id=idx,
+            )
+        if centroid is not None:
+            cam_pts.append(centroid)
+            print(f"[INFO] Mask centroid for p{idx}: {centroid}")
+            continue
+
+    if len(cam_pts) != 3:
+        print("[WARN] Failed to compute all three ball centroids; aborting calibration.")
+        return None
+
+    p1, p2, p3 = cam_pts
+
+    if centroid_log_dir is None:
+        centroid_log_dir = Path(__file__).resolve().parents[2] / CALIB_DIR_REL
+    centroid_log_dir.mkdir(parents=True, exist_ok=True)
+    centroid_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    centroid_log_path = centroid_log_dir / f"ball_centroids_{centroid_ts}.txt"
+    with open(centroid_log_path, "w", encoding="utf-8") as fh:
+        fh.write("ball_id x y z\n")
+        for idx, pt in enumerate((p1, p2, p3), start=1):
+            fh.write(f"ball_{idx} {pt[0]:.6f} {pt[1]:.6f} {pt[2]:.6f}\n")
+    print(f"[INFO] Saved per-ball centroids to: {centroid_log_path}") # in cam coordinate
+
+    R_base_cam, t_base_cam = compute_base_from_three_points(p1, p2, p3)
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :3] = R_base_cam
+    T[:3, 3] = t_base_cam
+    print("[OK] Ball calibration produced T_base_cam:")
+    print(T)
+    return T
+
+
+def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
+    robot = I2RT(channel=channel, zero_gravity_mode=True, home=home)
+    server = I2RTServer(robot, port)
+    server.serve()
