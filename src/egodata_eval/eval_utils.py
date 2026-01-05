@@ -10,6 +10,8 @@ from MBA.utils.transformation import rotation_transform  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
 from egodata_eval.eval_constant import (
     CALIB_DIR_REL,
+    DEFAULT_I2RT_ZED_TXT,
+    DEFAULT_TCP_ZED_TXT,
     I2RT_INIT_DURATION,
     I2RT_INIT_STEPS,
     I2RT_TARGET_DEG,
@@ -27,6 +29,8 @@ RDF_TO_ROBOT = np.array(
     ],
     dtype=np.float32,
 )
+
+_T_TCP_ZED_CACHE: Optional[np.ndarray] = None
 from scripts_calib_balls.calculate_ball_centers import (
     calculate_ball_centroid,
     DEFAULT_MAX_RADIUS_STD_RATIO,
@@ -139,7 +143,11 @@ def _import_zed_class():
     return ZEDCamera
 
 
-def headpose_base_to_tcp_abs(headpose_base: np.ndarray, T_base_cam: np.ndarray) -> np.ndarray:
+def headpose_base_to_tcp_abs(
+    headpose_base: np.ndarray,
+    T_base_cam: np.ndarray,
+    T_tcp_zed: Optional[np.ndarray] = None,
+) -> np.ndarray:
     pose_seq_base = _build_pose_mats(
         headpose_base[:, :3],
         headpose_base[:, 3:3+6],
@@ -150,10 +158,18 @@ def headpose_base_to_tcp_abs(headpose_base: np.ndarray, T_base_cam: np.ndarray) 
         T_cam_base.astype(np.float32),
         pose_seq_base.astype(np.float32),
     )
-    R_tcp_cam = RDF_TO_ROBOT.astype(np.float32)
-    pose_seq_tcp = pose_seq_cam.copy()
-    pose_seq_tcp[:, :3, :3] = np.einsum("ij,njk->nik", R_tcp_cam, pose_seq_cam[:, :3, :3])
-    pose_seq_tcp[:, :3, 3] = (R_tcp_cam @ pose_seq_cam[:, :3, 3].T).T
+    global _T_TCP_ZED_CACHE
+    if T_tcp_zed is None:
+        if _T_TCP_ZED_CACHE is None:
+            _T_TCP_ZED_CACHE = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+        if _T_TCP_ZED_CACHE is None:
+            raise ValueError(f"Failed to load T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}")
+        T_tcp_zed = _T_TCP_ZED_CACHE
+    pose_seq_tcp = np.einsum(
+        "ij,njk->nik",
+        T_tcp_zed.astype(np.float32),
+        pose_seq_cam.astype(np.float32),
+    )
     xyz_tcp = pose_seq_tcp[:, :3, 3]
     r6_tcp = rotation_transform(
         pose_seq_tcp[:, :3, :3],

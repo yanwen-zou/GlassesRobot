@@ -31,7 +31,7 @@ WIN_STREAM = "ZED Stream (click to segment)"
 # Default resource paths/topics.
 DEFAULT_POSE_TOPIC = "/glasses_pose"
 DEFAULT_BASE_TO_ROBOT_TXT = "glasses_hardware/calib/T_robot_base.txt"
-DEFAULT_TCP_ZED_TXT = "glasses_hardware/calib/T_tcp_zed.txt"
+DEFAULT_I2RT_ZED_TXT = "glasses_hardware/calib/T_i2rt_zed.txt"
 DEFAULT_MESH_NAME = "book"
 CALIB_DIR_REL = "glasses_hardware/calib"
 I2RT_SERVER_CHANNEL = "can0"
