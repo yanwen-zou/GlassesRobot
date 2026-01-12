@@ -1,6 +1,6 @@
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 import sys
 
 import numpy as np
@@ -10,8 +10,8 @@ from MBA.utils.transformation import rotation_transform  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
 from egodata_eval.eval_constant import (
     CALIB_DIR_REL,
+    DEFAULT_GLASSES_ZED_TXT,
     DEFAULT_I2RT_ZED_TXT,
-    DEFAULT_TCP_ZED_TXT,
     I2RT_INIT_DURATION,
     I2RT_INIT_STEPS,
     I2RT_TARGET_DEG,
@@ -30,7 +30,6 @@ RDF_TO_ROBOT = np.array(
     dtype=np.float32,
 )
 
-_T_TCP_ZED_CACHE: Optional[np.ndarray] = None
 from scripts_calib_balls.calculate_ball_centers import (
     calculate_ball_centroid,
     DEFAULT_MAX_RADIUS_STD_RATIO,
@@ -143,9 +142,33 @@ def _import_zed_class():
     return ZEDCamera
 
 
-def headpose_base_to_tcp_abs(
+def read_zed_intrinsics_baseline(camera) -> Tuple[np.ndarray, float]:
+    """Read ZED left intrinsics and baseline from a camera handle."""
+    zed_handle = getattr(camera, "_zed", camera)
+    info = zed_handle.get_camera_information()
+    config = getattr(info, "camera_configuration", None)
+    calib = config.calibration_parameters if config else info.calibration_parameters
+    left = calib.left_cam
+    K = np.array(
+        [
+            [float(left.fx), 0.0, float(left.cx)],
+            [0.0, float(left.fy), float(left.cy)],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    try:
+        raw = zed_handle.get_camera_information().camera_configuration.calibration_parameters_raw
+        baseline = float(raw.get_camera_baseline()) / 1000
+    except Exception as exc:
+        raise RuntimeError("ZED baseline not available from SDK.") from exc
+    return K, baseline
+
+
+def headpose_base_to_i2rt_rel( # headpose_base: rel traj in base frame
     headpose_base: np.ndarray,
     T_base_cam: np.ndarray,
+    T_i2rt_tcp: np.ndarray,
     T_tcp_zed: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     pose_seq_base = _build_pose_mats(
@@ -153,22 +176,54 @@ def headpose_base_to_tcp_abs(
         headpose_base[:, 3:3+6],
     )
     T_cam_base = np.linalg.inv(T_base_cam.astype(np.float32))
-    pose_seq_cam = np.einsum(
-        "ij,njk->nik",
-        T_cam_base.astype(np.float32),
-        pose_seq_base.astype(np.float32),
-    )
-    global _T_TCP_ZED_CACHE
     if T_tcp_zed is None:
-        if _T_TCP_ZED_CACHE is None:
-            _T_TCP_ZED_CACHE = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
-        if _T_TCP_ZED_CACHE is None:
+        T_tcp_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+        if T_tcp_zed is None:
             raise ValueError(f"Failed to load T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}")
-        T_tcp_zed = _T_TCP_ZED_CACHE
+    T_i2rt_base = (
+        T_i2rt_tcp.astype(np.float32)
+        @ T_tcp_zed.astype(np.float32)
+        @ T_cam_base.astype(np.float32)
+    )
+    T_base_i2rt = np.linalg.inv(T_i2rt_base)
+    print(f"T_i2rt_base:{T_i2rt_base}")
+    pose_seq_i2rt = np.einsum(
+        "ij,njk,kl->nil",
+        T_i2rt_base,
+        pose_seq_base.astype(np.float32),
+        T_base_i2rt,
+    )
+    xyz_i2rt = pose_seq_i2rt[:, :3, 3]
+    r6_i2rt = rotation_transform(
+        pose_seq_i2rt[:, :3, :3],
+        "matrix",
+        "rotation_6d",
+    )
+    return np.concatenate([xyz_i2rt, r6_i2rt], axis=1).astype(np.float32)
+
+
+def headpose_to_tcp(
+    headpose_i2rt_rel: np.ndarray,
+    T_glasses_zed: Optional[np.ndarray] = None,
+    T_zed_tcp: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    pose_seq_i2rt = _build_pose_mats(
+        headpose_i2rt_rel[:, :3],
+        headpose_i2rt_rel[:, 3:3+6],
+    )
+    if T_glasses_zed is None:
+        T_glasses_zed = _load_calib_mat_safe(Path(DEFAULT_GLASSES_ZED_TXT))
+        if T_glasses_zed is None:
+            raise ValueError(f"Failed to load T_glasses_zed from {DEFAULT_GLASSES_ZED_TXT}")
+    if T_zed_tcp is None:
+        T_zed_tcp = np.linalg.inv(T_glasses_zed.astype(np.float32))
+    T_glasses_tcp = T_zed_tcp.astype(np.float32) @ T_glasses_zed.astype(np.float32)
+    T_tcp_glasses = np.linalg.inv(T_glasses_tcp)
     pose_seq_tcp = np.einsum(
-        "ij,njk->nik",
-        T_tcp_zed.astype(np.float32),
-        pose_seq_cam.astype(np.float32),
+        "ij,njk,kl->nil",
+        T_glasses_tcp,
+        pose_seq_i2rt.astype(np.float32),
+        T_tcp_glasses,
     )
     xyz_tcp = pose_seq_tcp[:, :3, 3]
     r6_tcp = rotation_transform(
@@ -323,4 +378,15 @@ def calibrate_from_three_balls(
 def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
     robot = I2RT(channel=channel, zero_gravity_mode=True, home=home)
     server = I2RTServer(robot, port)
-    server.serve()
+    try:
+        server.serve()
+    except KeyboardInterrupt:
+        try:
+            server._server.close(internal=True)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    finally:
+        try:
+            robot.close()
+        except Exception:
+            pass

@@ -142,7 +142,7 @@ def calculate_ball_centroid(
     if ys.size == 0:
         return None
 
-    z = depth_m[ys, xs].astype(np.float32)
+    z = depth_m[ys, xs].astype(np.float32) / 1.14 # DEBUG: Hardcode scaling for depth unmatching
     fx, fy = intrinsic[0, 0], intrinsic[1, 1]
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
     x = (xs - cx) * z / fx

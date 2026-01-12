@@ -10,7 +10,7 @@ class Kinematics:
     def __init__(self, xml_path: str, site_name: Optional[str]):
         """Initialize the Kinematics object.
 
-        Args:
+        Args:e
             xml_path (str): Path to the MuJoCo XML model file.
             site_name (Optional[str]): Name of the site for which to compute the forward kinematics.
         """

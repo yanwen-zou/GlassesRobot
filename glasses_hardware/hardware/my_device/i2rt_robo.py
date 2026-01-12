@@ -33,7 +33,7 @@ sys.modules.pop("i2rt.robots", None)
 
 from i2rt.robots.get_robot import get_yam_robot
 from i2rt.robots.kinematics_mj import Kinematics
-from i2rt.robots.utils import YAM_XML_PATH
+from i2rt.robots.utils import YAM_XML_PATH, YAM_GLASS_PATH
 from MBA.utils.transformation import rotation_transform  # type: ignore
 
 
@@ -60,7 +60,8 @@ class I2RT:
         self._home = home
         self._q_cmd = None
         self._dq_cmd = None
-        self._kin = Kinematics(YAM_XML_PATH, "grasp_site")
+        self._kin = Kinematics(YAM_XML_PATH, "grasp_site") #TODO: check payload
+        self._ee_pos_error = np.zeros(3, dtype=np.float32)
 
         if self._home:
             zero_pose = np.zeros(self.num_dofs(), dtype=np.float64)
@@ -72,7 +73,27 @@ class I2RT:
     def current_joint_pos(self) -> np.ndarray:
         return self._robot.get_joint_pos()
 
-    def close(self) -> None:
+    def close(self, timeout_s: Optional[float] = None) -> None:
+        """Send arm to home pose before closing, with a timeout."""
+        duration = self._default_duration
+        steps = self._default_steps
+        try:
+            print("Start go back to 0")
+            home_q = np.zeros(self.num_dofs(), dtype=np.float64)
+            self.send_joint_pos_rad(home_q, duration=duration, steps=steps)
+            if timeout_s is None:
+                timeout_s = max(duration + 1.0, 3.0)
+            t0 = time.time()
+            while (time.time() - t0) < timeout_s:
+                try:
+                    cur = self.current_joint_pos()
+                except Exception:
+                    break
+                if np.linalg.norm(cur - home_q) < 1e-2:
+                    break
+                time.sleep(0.1)
+        except Exception as exc:
+            print(f"[WARN] I2RT 回零失败: {exc}")
         self._robot.close()
 
     def send_joint_pos_deg(
@@ -113,10 +134,10 @@ class I2RT:
         pose = np.eye(4, dtype=np.float32)
         pose[:3, :3] = rot
         pose[:3, 3] = xyz.astype(np.float32)
-
         success, q_sol = self._kin.ik(pose, "grasp_site", verbose=False)
         if not success:
-            raise RuntimeError("IK failed for target pose.")
+            print("[WARN] IK failed for target pose.")
+            return
         self.send_joint_pos_rad(q_sol[: self.num_dofs()], duration=duration, steps=steps)
 
     def _compute_sync_profile(self, q_start: np.ndarray, target: np.ndarray, duration: float):
@@ -227,6 +248,20 @@ class I2RT:
             self._robot.command_joint_state({"pos": self._q_cmd, "vel": self._dq_cmd})
             if idx < steps - 1:
                 time.sleep(dt)
+    def _test_send_joint(
+        self,
+        target_joint_pos_rad: Iterable[float],
+        duration: Optional[float] = None,
+        steps: Optional[int] = None,
+    ) -> None:
+        if duration is None:
+            duration = self._default_duration
+        if steps is None:
+            steps = self._default_steps
+
+        q_test = self.current_joint_pos()
+        self._robot.command_joint_state({"pos": q_test, "vel": self._dq_cmd})
+        print(f"q_test:{np.round(q_test*100,4)}")
 
 class I2RTServer:
     def __init__(self, robot: I2RT, port: int = DEFAULT_ROBOT_PORT) -> None:
@@ -262,41 +297,58 @@ class I2RTClient:
     def send_ee_pos(self, target_xyz_rot6d: Sequence[float], duration: Optional[float] = None, steps: Optional[int] = None) -> None:
         self._client.send_ee_pos(target_xyz_rot6d, duration, steps)
 
-    def close(self) -> None:
-        self._client.close()
+    def close(self, timeout_s: float = 15.0) -> None:
+        try:
+            self._client.call("close").result(timeout=timeout_s)
+        except Exception as exc:
+            print(f"[WARN] I2RTClient close RPC failed: {exc!r}")
+        finally:
+            try:
+                self._client.close()
+            except Exception as exc:
+                print(f"[WARN] I2RTClient socket close failed: {exc!r}")
 
 
 def main():
-    robot = I2RT(channel="can0", zero_gravity_mode=True)
+    robot = I2RT(channel="can0", zero_gravity_mode=False)
     try:
         current_q = robot.current_joint_pos()
         current_pose = robot._kin.fk(current_q[:6])
-        base_xyz = current_pose[:3, 3].astype(np.float32)
-        base_rot6d = rotation_transform(
+        current_rot6d = rotation_transform(
             current_pose[:3, :3][None, ...],
             "matrix",
             "rotation_6d",
         ).squeeze(0)
         target_up = np.concatenate(
-            [base_xyz + np.array([0.0, 0.0, 0.2], dtype=np.float32), base_rot6d],
+            [
+                current_pose[:3, 3].astype(np.float32)
+                + np.array([0.0, 0.0, 0.2], dtype=np.float32),
+                current_rot6d,
+            ],
             axis=0,
         ).astype(np.float32)
         robot.send_ee_pos(target_up)
         time.sleep(0.5)
-
-        base_xyz = target_up[:3]
-        target_forward = np.concatenate(
-            [base_xyz + np.array([0.1, 0.0, 0.0], dtype=np.float32), base_rot6d],
-            axis=0,
-        ).astype(np.float32)
-        target_backward = np.concatenate(
-            [base_xyz - np.array([0.1, 0.0, 0.0], dtype=np.float32), base_rot6d],
-            axis=0,
-        ).astype(np.float32)
         while True:
-            robot.send_ee_pos(target_forward)
-            time.sleep(0.5)
-            robot.send_ee_pos(target_backward)
+            # current_q = robot.current_joint_pos()
+            # print(f"current_q:{current_q}")
+            # current_pose = robot._kin.fk(current_q[:6])
+            # success, q_sol = robot._kin.ik(current_pose, "grasp_site", verbose=False)
+            # if not success:
+            #     raise RuntimeError("IK failed for current pose.")
+            # print(f"ik_q_from_current_pose:{q_sol[: robot.num_dofs()]}")
+            # current_rot6d = rotation_transform(
+            #     current_pose[:3, :3][None, ...],
+            #     "matrix",
+            #     "rotation_6d",
+            # ).squeeze(0)
+            # current_target = np.concatenate(
+            #     [current_pose[:3, 3].astype(np.float32), current_rot6d],
+            #     axis=0,
+            # ).astype(np.float32)
+            # # robot.send_ee_pos(current_target,compensate=False)
+            # robot.send_joint_pos_rad(q_sol[: robot.num_dofs()])
+            robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
             time.sleep(0.5)
     finally:
         robot.close()

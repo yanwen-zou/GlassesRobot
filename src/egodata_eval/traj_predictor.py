@@ -171,7 +171,7 @@ class TrajectoryPredictor:
         if self.model.enable_headpose_head:
             headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame
             self.last_headpose_pred = headpose_pred
-            print(f"[INFO] Predicted headpose: {headpose_pred[0]}")
+            #print(f"[INFO] Predicted headpose: {headpose_pred[0]}")
         else:
             self.last_headpose_pred = None
 

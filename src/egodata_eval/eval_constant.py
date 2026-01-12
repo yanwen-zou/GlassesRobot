@@ -11,10 +11,10 @@ I2RT_INIT_STEPS = 80
 # I2RT headpose-following parameters.
 I2RT_MAX_ROT = 0.1
 I2RT_CMD_DURATION = 0.2
-I2RT_CMD_STEPS = 50
+I2RT_CMD_STEPS = 100
 
 # Trajectory execution parameters.
-UPDATE_INTERVAL = 10
+UPDATE_INTERVAL = 5
 STEPS_TO_EXECUTE = 3
 GRIP_OPEN_THRESH = 0.8
 GRIPPER_OPEN_WIDTH_DEFAULT = 0.085
@@ -31,6 +31,7 @@ WIN_STREAM = "ZED Stream (click to segment)"
 # Default resource paths/topics.
 DEFAULT_POSE_TOPIC = "/glasses_pose"
 DEFAULT_BASE_TO_ROBOT_TXT = "glasses_hardware/calib/T_robot_base.txt"
+DEFAULT_GLASSES_ZED_TXT = "glasses_hardware/calib/T_glasses_zed.txt"
 DEFAULT_I2RT_ZED_TXT = "glasses_hardware/calib/T_i2rt_zed.txt"
 DEFAULT_MESH_NAME = "book"
 CALIB_DIR_REL = "glasses_hardware/calib"

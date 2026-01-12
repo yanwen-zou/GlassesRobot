@@ -210,7 +210,7 @@ def run():
     ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--mesh-name", type=str, default="book", help="Name of mesh folder under data/ containing mesh.obj.")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
-    ap.add_argument("--tcp-zed", type=str, default="glasses_hardware/calib/T_tcp_zed.txt", help="Path to T_tcp_zed (4x4 SE3).")
+    ap.add_argument("--tcp-zed", type=str, default="glasses_hardware/calib/T_glasses_zed.txt", help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = 10

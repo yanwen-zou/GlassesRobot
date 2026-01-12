@@ -17,9 +17,11 @@ if str(project_root) not in sys.path:
 from egodata_eval.eval_utils import (
     calibrate_from_three_balls,
     click_mask,
-    headpose_base_to_tcp_abs,
+    headpose_base_to_i2rt_rel,
+    headpose_to_tcp,
     move_i2rt_to_init_angles,
     save_mask,
+    _build_pose_mats,
 )  # type: ignore
 from egodata_eval.eval_hardware import EvalHardware
 
@@ -41,7 +43,7 @@ def main():
     ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--mesh-name", type=str, default=DEFAULT_MESH_NAME, help="Name of mesh folder under data/ containing mesh.obj.")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
-    ap.add_argument("--tcp-zed", type=str, default=DEFAULT_TCP_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
+    ap.add_argument("--tcp-zed", type=str, default=DEFAULT_I2RT_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = UPDATE_INTERVAL
@@ -54,28 +56,7 @@ def main():
     # Initialize depth estimator and load model at start
 
     print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator(scale=DEPTH_EST_SCALE) # no need to modify intrinsics;
-    try:
-        zed_handle = getattr(cam, "_zed", cam)
-        info = zed_handle.get_camera_information()
-        config = getattr(info, "camera_configuration", None)
-        calibration = config.calibration_parameters if config else info.calibration_parameters
-        left_cam = calibration.left_cam
-        fx = float(getattr(left_cam, "fx"))
-        fy = float(getattr(left_cam, "fy"))
-        cx = float(getattr(left_cam, "cx"))
-        cy = float(getattr(left_cam, "cy"))
-        depth_est.K = np.array(
-            [
-                [fx, 0.0, cx],
-                [0.0, fy, cy],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
-        )
-        print(f"[INFO] Loaded intrinsics from ZED: fx={fx:.3f}, fy={fy:.3f}, cx={cx:.3f}, cy={cy:.3f}")
-    except Exception as exc:
-        print(f"[WARN] Failed to load intrinsics from ZED; using file defaults. Reason: {exc}")
+
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
     calib_dir = project_root / CALIB_DIR_REL
@@ -84,6 +65,7 @@ def main():
 
     exec_ctx = EvalHardware()
     cam = exec_ctx.camera
+    depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=cam)
 
     T_base_cam0 = calibrate_from_three_balls(
         cam,
@@ -91,6 +73,8 @@ def main():
         move_robot_fn=lambda: move_i2rt_to_init_angles(exec_ctx.i2rt_robot),
         centroid_log_dir=out_dir,
     )
+    exec_ctx.i2rt_current_q = exec_ctx.i2rt_robot.current_joint_pos()
+    curr_headpose = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
     cam_size = cam.size
 
     disp_w = int(cam_size[0])
@@ -145,6 +129,7 @@ def main():
     executed_poses: list[np.ndarray] = []
     tcp_history: list[np.ndarray] = []
     pose_records: list[dict[str, object]] = []
+    headpose_pred_records: list[np.ndarray] = []
     T_base_cam_runtime: list[np.ndarray] = []
 
     frame_idx = 0
@@ -235,12 +220,33 @@ def main():
                                 headpose_cond=headpose_norm,
                             )
                             if args.enable_headpose_head and traj_pred.last_headpose_pred is not None: # execute headpose
-                                headpose_base = traj_pred.last_headpose_pred.astype(np.float32)
-                                headpose_tcp_abs = headpose_base_to_tcp_abs(headpose_base, T_base_cam)
+                                # Note that we predict delta headpose, but transform to abs in policy for further transformation
+                                headpose_base = traj_pred.last_headpose_pred.astype(np.float32) # abs in base frame
+                                headpose_pred_records.append(headpose_base.copy())
 
-                                end_idx = min(headpose_tcp_abs.shape[0], 1 + STEPS_TO_EXECUTE)
-                                for step_idx in range(1, end_idx):
-                                    exec_ctx.execute_headpose_delta(headpose_tcp_abs[step_idx:step_idx+1])
+                                T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
+                                # print(f"[INFO] T_i2rt_tcp:{T_i2rt_tcp}")
+                                headpose_i2rt_rel = headpose_base_to_i2rt_rel(
+                                    headpose_base,
+                                    T_base_cam,
+                                    T_i2rt_tcp,
+                                )
+                                pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel) # headpose traj -> tcp traj, both in i2rt frame
+                                
+                                end_idx = min(pred_tcp_i2rt_rel.shape[0], 1 + STEPS_TO_EXECUTE)
+                                print(f"[DEBUG] Executed pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[0:2]} ")
+                                exec_ctx.execute_pred_tcp_rel_open(
+                                    pred_tcp_i2rt_rel[0:end_idx],
+                                    curr_headpose,
+                                )
+                                if end_idx > 0:
+                                    last_rel = _build_pose_mats(
+                                        pred_tcp_i2rt_rel[end_idx - 1, :3][None, :],
+                                        pred_tcp_i2rt_rel[end_idx - 1, 3:3 + 6][None, :],
+                                    ).astype(np.float32)[0]
+                                    curr_headpose = last_rel @ curr_headpose
+                            
+
 
                             # Saving execution info
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
@@ -301,6 +307,11 @@ def main():
             executed_path = out_dir / "robot_executed_poses.npy"
             np.save(executed_path, np.stack(executed_poses, axis=0))
             print(f"[INFO] Saved executed robot poses to: {executed_path}")
+
+        if headpose_pred_records:
+            headpose_pred_path = out_dir / "headpose_pred.npy"
+            np.save(headpose_pred_path, np.stack(headpose_pred_records, axis=0))
+            print(f"[INFO] Saved headpose predictions to: {headpose_pred_path}")
 
         if tcp_history:
             tcp_path = out_dir / "robot_tcp_history.npy"

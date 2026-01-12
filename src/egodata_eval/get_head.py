@@ -75,7 +75,7 @@ def parse_cli(argv: Optional[list[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--tcp-zed",
         type=str,
-        default="glasses_hardware/calib/T_tcp_zed.txt",
+        default="glasses_hardware/calib/T_glasses_zed.txt",
         help="Path to T_tcp_zed (4x4 SE3).",
     )
     return parser.parse_args(argv)

@@ -383,7 +383,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tcp-to-zed",
         type=Path,
-        default=Path("glasses_hardware/calib/T_tcp_zed.txt"),
+        default=Path("glasses_hardware/calib/T_glasses_zed.txt"),
         help="Path to tcp->zed (camera) 4x4 transform (.txt or .npy).",
     )
     parser.add_argument(

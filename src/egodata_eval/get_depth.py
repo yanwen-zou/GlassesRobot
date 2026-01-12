@@ -31,7 +31,13 @@ def _load_intrinsics(default_path: Optional[Path] = None) -> Tuple[np.ndarray, f
 class DepthEstimator:
     """Encapsulates FoundationStereo model and provides disparity/depth inference."""
 
-    def __init__(self, ckpt_dir: Optional[Path] = None, device: Optional[str] = None, scale: float = 1.0):
+    def __init__(
+        self,
+        camera,
+        ckpt_dir: Optional[Path] = None,
+        device: Optional[str] = None,
+        scale: float = 0.75,
+    ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         assert scale > 0 and scale <= 1, "scale must be in (0,1]"
         self.scale = scale
@@ -55,7 +61,12 @@ class DepthEstimator:
         self.model.eval()
 
         # Camera intrinsics for depth conversion
-        self.K, self.baseline = _load_intrinsics()
+        if camera is not None:
+            from egodata_eval.eval_utils import read_zed_intrinsics_baseline
+            self.K, self.baseline = read_zed_intrinsics_baseline(camera)
+            print(f"[DEBUG] Loaded intrinsics from camera: baseline={self.baseline:.4f} m")
+        else:
+            self.K, self.baseline = _load_intrinsics()
 
     def disparity(self, left_bgr: np.ndarray, right_bgr: np.ndarray) -> np.ndarray:
         assert left_bgr is not None and right_bgr is not None

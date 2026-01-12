@@ -163,11 +163,10 @@ def main():
         return None
 
     def _cam_transform_for_frame(idx: int) -> np.ndarray | None:
-        update_idx = int(idx // UPDATE_INTERVAL)
-        # print(f"[DEBUG] frame idx: {idx}, update_idx: {update_idx}")
-        if update_idx < 0 or update_idx >= T_base_cam_seq.shape[0]:
+
+        if idx < 0 or idx >= T_base_cam_seq.shape[0]:
             return None
-        return _coerce_matrix(T_base_cam_seq[update_idx])
+        return _coerce_matrix(T_base_cam_seq[idx])
 
     def _transform_points_cam_to_robot(points_cam: np.ndarray) -> np.ndarray | None:
         if T_base_cam_seq.ndim == 3:
@@ -197,6 +196,10 @@ def main():
         frame_idx = rec.get("frame_idx", -1)
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
+
+        frame_idx /= UPDATE_INTERVAL # frames are only logged at intervals
+        frame_idx = int(frame_idx)
+
         if pose_robot is None:
             continue
         pose_robot = np.asarray(pose_robot, dtype=np.float32).reshape(4, 4)

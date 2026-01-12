@@ -262,7 +262,7 @@ def main() -> None:
     parser.add_argument(
         "--head-to-zed",
         type=Path,
-        default=Path("glasses_hardware/calib/T_tcp_zed.txt"),
+        default=Path("glasses_hardware/calib/T_glasses_zed.txt"),
         help="Path to tcp->zed calibration used when deriving cam_to_base.",
     )
     parser.add_argument(

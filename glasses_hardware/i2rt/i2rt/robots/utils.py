@@ -12,6 +12,7 @@ from i2rt.motor_drivers.dm_driver import DMChainCanInterface
 
 I2RT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 YAM_XML_PATH = os.path.join(I2RT_ROOT, "robot_models/yam/yam.xml")
+YAM_GLASS_PATH = os.path.join(I2RT_ROOT, "robot_models/yam/yam_glass.xml")
 YAM_XML_LW_GRIPPER_PATH = os.path.join(I2RT_ROOT, "robot_models/yam/yam_lw_gripper.xml")
 YAM_XML_LINEAR_4310_PATH = os.path.join(I2RT_ROOT, "robot_models/yam/yam_4310_linear.xml")
 YAM_TEACHING_HANDLE_PATH = os.path.join(I2RT_ROOT, "robot_models/yam/yam_teaching_handle.xml")
