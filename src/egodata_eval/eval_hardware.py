@@ -154,6 +154,8 @@ class EvalHardware:
             tcp_rel_seq[:, 3:3+6],
         ).astype(np.float32)
         base_pose = base_pose.astype(np.float32)
+        print(f"rel_seq:{rel_seq}")
+        print(f"base_pose:{base_pose}")
         for idx in range(rel_seq.shape[0]):
             new_pose = rel_seq[idx] @ base_pose
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)

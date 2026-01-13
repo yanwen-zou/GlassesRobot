@@ -60,7 +60,7 @@ class I2RT:
         self._home = home
         self._q_cmd = None
         self._dq_cmd = None
-        self._kin = Kinematics(YAM_XML_PATH, "grasp_site") #TODO: check payload
+        self._kin = Kinematics(YAM_GLASS_PATH, "grasp_site") #TODO: check payload
         self._ee_pos_error = np.zeros(3, dtype=np.float32)
 
         if self._home:
@@ -330,26 +330,36 @@ def main():
         robot.send_ee_pos(target_up)
         time.sleep(0.5)
         while True:
-            # current_q = robot.current_joint_pos()
-            # print(f"current_q:{current_q}")
-            # current_pose = robot._kin.fk(current_q[:6])
-            # success, q_sol = robot._kin.ik(current_pose, "grasp_site", verbose=False)
-            # if not success:
-            #     raise RuntimeError("IK failed for current pose.")
-            # print(f"ik_q_from_current_pose:{q_sol[: robot.num_dofs()]}")
-            # current_rot6d = rotation_transform(
-            #     current_pose[:3, :3][None, ...],
-            #     "matrix",
-            #     "rotation_6d",
-            # ).squeeze(0)
-            # current_target = np.concatenate(
-            #     [current_pose[:3, 3].astype(np.float32), current_rot6d],
-            #     axis=0,
-            # ).astype(np.float32)
-            # # robot.send_ee_pos(current_target,compensate=False)
-            # robot.send_joint_pos_rad(q_sol[: robot.num_dofs()])
-            robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
-            time.sleep(0.5)
+            offset = 0.1
+            current_q = robot.current_joint_pos()
+            current_pose = robot._kin.fk(current_q[:6])
+            current_rot6d = rotation_transform(
+                current_pose[:3, :3][None, ...],
+                "matrix",
+                "rotation_6d",
+            ).squeeze(0)
+            target_pos = current_pose[:3, 3].astype(np.float32)
+            target_forward = np.concatenate(
+                [target_pos + np.array([offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
+                axis=0,
+            ).astype(np.float32)
+            robot.send_ee_pos(target_forward)
+
+            current_q = robot.current_joint_pos()
+            current_pose = robot._kin.fk(current_q[:6])
+            current_rot6d = rotation_transform(
+                current_pose[:3, :3][None, ...],
+                "matrix",
+                "rotation_6d",
+            ).squeeze(0)
+            target_pos = current_pose[:3, 3].astype(np.float32)
+            target_back = np.concatenate(
+                [target_pos + np.array([-offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
+                axis=0,
+            ).astype(np.float32)
+            robot.send_ee_pos(target_back)
+            # robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
+            # time.sleep(0.5)
     finally:
         robot.close()
 

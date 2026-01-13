@@ -61,6 +61,7 @@ install/
 *.pkl
 *.pickle
 *.joblib
+glasses_hardware/calib/ball_centroids_*
 
 # Large media and archives typically produced during experiments
 *.zip

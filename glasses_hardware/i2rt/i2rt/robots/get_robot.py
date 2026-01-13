@@ -12,7 +12,7 @@ from i2rt.motor_drivers.dm_driver import (
     ReceiveMode,
 )
 from i2rt.robots.motor_chain_robot import MotorChainRobot
-from i2rt.robots.utils import GripperType
+from i2rt.robots.utils import GripperType, YAM_GLASS_PATH
 
 
 def get_encoder_chain(can_interface: CanInterface) -> EncoderChain:
@@ -34,7 +34,8 @@ def get_yam_robot(
         with_gripper = False
         with_teaching_handle = False
 
-    model_path = gripper_type.get_xml_path()
+    # model_path = gripper_type.get_xml_path()
+    model_path = YAM_GLASS_PATH # HARDCODE to payload version
     motor_list = [
         [0x01, "DM4340"],
         [0x02, "DM4340"],

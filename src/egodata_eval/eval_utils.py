@@ -99,9 +99,11 @@ def _denormalize_obj_traj(obj_traj: np.ndarray) -> np.ndarray:
 def _build_pose_mats(translation: np.ndarray, rotation_6d: np.ndarray) -> np.ndarray:
     if rotation_transform is None:
         raise RuntimeError("MBA not available: rotation_transform is required.")
-    mats = np.repeat(np.eye(4)[None, ...], len(translation), axis=0)
+    translation = np.asarray(translation, dtype=np.float32)
+    rotation_6d = np.asarray(rotation_6d, dtype=np.float32)
+    mats = np.repeat(np.eye(4, dtype=np.float32)[None, ...], len(translation), axis=0)
     rot_mats = rotation_transform(rotation_6d, "rotation_6d", "matrix")
-    mats[:, :3, :3] = rot_mats
+    mats[:, :3, :3] = rot_mats.astype(np.float32)
     mats[:, :3, 3] = translation
     return mats
 
@@ -257,6 +259,9 @@ def headpose_to_tcp(
         pose_seq_tcp[:, :3, :3],
         "matrix",
         "rotation_6d",
+
+
+        
     )
     return np.concatenate([xyz_tcp, r6_tcp], axis=1).astype(np.float32)
 
