@@ -250,7 +250,7 @@ def main() -> None:
     parser.add_argument(
         "--num_action",
         type=int,
-        default=20,
+        default=10,
         help="Number of action/object steps predicted by the checkpoint (must match training).",
     )
     parser.add_argument(

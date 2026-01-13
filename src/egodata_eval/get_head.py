@@ -6,7 +6,9 @@ ROS2 node: listen to /glasses_pose and compute T_world_cam = T_world_glasses * T
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Optional
+import sys
 
 import numpy as np
 import rclpy
@@ -14,6 +16,17 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as R
 
+here = Path(__file__).resolve()
+project_root = here.parents[2]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+src_root = project_root / "src"
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
+
+from egodata_eval.eval_constant import DEPTH_EST_SCALE, ZED_FPS, ZED_RESOLUTION
+from egodata_eval.eval_utils import calibrate_from_three_balls, _import_zed_class
+from egodata_eval.get_depth import DepthEstimator
 
 def _load_se3(path: str) -> np.ndarray:
     data = np.loadtxt(path).astype(np.float32)
@@ -62,7 +75,7 @@ class HeadPoseReader(Node):
         T_base_cam = self._T_base_cam0 @ T_cam0_cam
         self._last_base_cam = T_base_cam
         flat = np.array2string(T_base_cam, precision=4, suppress_small=True)
-        # self.get_logger().info(f"T_base_cam:\n{flat}")
+        print(f"T_base_cam:\n{flat}")
 
     def get_headpos(self, timeout_sec: float = 0.0) -> Optional[np.ndarray]:
         rclpy.spin_once(self, timeout_sec=timeout_sec)
@@ -83,13 +96,29 @@ def parse_cli(argv: Optional[list[str]]) -> argparse.Namespace:
 
 def main(args: Optional[list[str]] = None) -> None:
     cli_args = parse_cli(args)
+    ZEDCamera = _import_zed_class()
+    camera = ZEDCamera(resolution=ZED_RESOLUTION, fps=ZED_FPS)
+    depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=camera)
+    T_base_cam0 = calibrate_from_three_balls(
+        camera,
+        depth_est,
+        move_robot_fn=None,
+        centroid_log_dir=None,
+    )
+    if T_base_cam0 is None:
+        raise RuntimeError("Failed to calibrate T_base_cam0 from three balls.")
+
     rclpy.init(args=args)
-    node = HeadPoseReader(cli_args.pose_topic, cli_args.tcp_zed)
+    node = HeadPoseReader(cli_args.pose_topic, cli_args.tcp_zed, T_base_cam0)
     try:
         rclpy.spin(node)
     finally:
         node.destroy_node()
         rclpy.shutdown()
+        try:
+            camera.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

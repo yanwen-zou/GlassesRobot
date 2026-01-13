@@ -18,6 +18,7 @@ from egodata_eval.eval_utils import (
     calibrate_from_three_balls,
     click_mask,
     headpose_base_to_i2rt_rel,
+    headpose_base_seq_to_rel,
     headpose_to_tcp,
     move_i2rt_to_init_angles,
     save_mask,
@@ -43,7 +44,7 @@ def main():
     ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--mesh-name", type=str, default=DEFAULT_MESH_NAME, help="Name of mesh folder under data/ containing mesh.obj.")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
-    ap.add_argument("--tcp-zed", type=str, default=DEFAULT_I2RT_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
+    ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = UPDATE_INTERVAL
@@ -124,7 +125,7 @@ def main():
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
     if args.enable_headpose_head:
         rclpy.init(args=None)
-        headpose_reader = HeadPoseReader(headpose_topic, args.tcp_zed, T_base_cam0)
+        headpose_reader = HeadPoseReader(headpose_topic, args.glass_zed, T_base_cam0)
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
     tcp_history: list[np.ndarray] = []
@@ -201,7 +202,7 @@ def main():
                             # print("[INFO] Running trajectory prediction...")
                             headpose_norm = None
                             if args.enable_headpose_head:
-                                T_base_cam = headpose_reader.get_headpos(timeout_sec=0.0) if headpose_reader else None
+                                T_base_cam = headpose_reader.get_headpos(timeout_sec=0.2)
                                 if T_base_cam is None:
                                     raise RuntimeError("[eval] No headpose received yet from topic.")
                                 headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
@@ -210,6 +211,7 @@ def main():
                             else:
                                 T_base_cam = T_base_cam0 # fixed head
                             if T_base_cam is not None:
+                                # print(f"[DEBUG] T_base_cam:{T_base_cam[0:3,3]}")
                                 T_base_cam_runtime.append(T_base_cam.astype(np.float32))
                             frame = traj_pred.predict_and_overlay(
                                 frame,
@@ -217,24 +219,30 @@ def main():
                                 K_rs,
                                 pose_est.pose_cam_ob.astype(np.float32),
                                 T_base_cam=T_base_cam,
-                                headpose_cond=headpose_norm,
+                                headpose_cond=headpose_norm, # Semantically, here headpose_norm = norm(T_base_cam)
                             )
                             if args.enable_headpose_head and traj_pred.last_headpose_pred is not None: # execute headpose
                                 # Note that we predict delta headpose, but transform to abs in policy for further transformation
-                                headpose_base = traj_pred.last_headpose_pred.astype(np.float32) # abs in base frame
-                                headpose_pred_records.append(headpose_base.copy())
+                                headpose_base_seq = traj_pred.last_headpose_pred.astype(np.float32) # abs in base frame
+                                # print(f"[DEBUG] headpose_base_abs:{np.round(headpose_base_seq[0:STEPS_TO_EXECUTE,0:3]*100,2)}")
+                                headpose_pred_records.append(headpose_base_seq.copy())
 
                                 T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
                                 # print(f"[INFO] T_i2rt_tcp:{T_i2rt_tcp}")
+                                headpose_rel_seq = headpose_base_seq_to_rel(
+                                    headpose_base_seq,
+                                    T_base_cam,
+                                )
+                                # print(f"[DEBUG] headpose_rel_seq:{np.round(headpose_rel_seq[0:STEPS_TO_EXECUTE,0:3]*100,2)} ")
                                 headpose_i2rt_rel = headpose_base_to_i2rt_rel(
-                                    headpose_base,
+                                    headpose_rel_seq,
                                     T_base_cam,
                                     T_i2rt_tcp,
                                 )
                                 pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel) # headpose traj -> tcp traj, both in i2rt frame
                                 
                                 end_idx = min(pred_tcp_i2rt_rel.shape[0], 1 + STEPS_TO_EXECUTE)
-                                print(f"[DEBUG] Executed pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[0:2]} ")
+                                # print(f"[DEBUG] Executed pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0:STEPS_TO_EXECUTE,:]*100,2)} ")
                                 exec_ctx.execute_pred_tcp_rel_open(
                                     pred_tcp_i2rt_rel[0:end_idx],
                                     curr_headpose,
@@ -244,9 +252,9 @@ def main():
                                         pred_tcp_i2rt_rel[end_idx - 1, :3][None, :],
                                         pred_tcp_i2rt_rel[end_idx - 1, 3:3 + 6][None, :],
                                     ).astype(np.float32)[0]
-                                    curr_headpose = last_rel @ curr_headpose
-                            
-
+                                    curr_headpose = last_rel @ curr_headpose # in i2rt frame
+                                print('waiting for head moving...')
+                                # print(f"[DEBUG] curr_headpose after moving:{np.round(curr_headpose[:3,3]*100,2)}")
 
                             # Saving execution info
                             pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)

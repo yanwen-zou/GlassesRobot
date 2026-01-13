@@ -154,11 +154,8 @@ class EvalHardware:
             tcp_rel_seq[:, 3:3+6],
         ).astype(np.float32)
         base_pose = base_pose.astype(np.float32)
-        base_pose_inv = np.linalg.inv(base_pose)
         for idx in range(rel_seq.shape[0]):
-            rel_tcp = base_pose_inv @ rel_seq[idx] @ base_pose
-            print(f"[DEBUG] Rel seq translation:{np.round(rel_tcp[:3, 3],4)}")
-            new_pose = base_pose @ rel_tcp
+            new_pose = rel_seq[idx] @ base_pose
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
             if not success:
                 print("[WARN] I2RT IK failed for relative tcp pose.")

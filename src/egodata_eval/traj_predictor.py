@@ -166,7 +166,7 @@ class TrajectoryPredictor:
         obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
         if self.model.enable_headpose_head:
             headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
-        # In delta mode, model already returns absolute poses relative to current pose; just denormalize translation.
+
         obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
         if self.model.enable_headpose_head:
             headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame

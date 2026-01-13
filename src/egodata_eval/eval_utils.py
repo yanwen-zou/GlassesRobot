@@ -186,7 +186,7 @@ def headpose_base_to_i2rt_rel( # headpose_base: rel traj in base frame
         @ T_cam_base.astype(np.float32)
     )
     T_base_i2rt = np.linalg.inv(T_i2rt_base)
-    print(f"T_i2rt_base:{T_i2rt_base}")
+    # print(f"T_i2rt_base:{T_i2rt_base}")
     pose_seq_i2rt = np.einsum(
         "ij,njk,kl->nil",
         T_i2rt_base,
@@ -200,6 +200,33 @@ def headpose_base_to_i2rt_rel( # headpose_base: rel traj in base frame
         "rotation_6d",
     )
     return np.concatenate([xyz_i2rt, r6_i2rt], axis=1).astype(np.float32)
+
+
+def headpose_base_seq_to_rel(
+    headpose_base_seq: np.ndarray,
+    T_base_cam: np.ndarray,
+) -> np.ndarray:
+    """Convert absolute base-frame headpose sequence to relative poses wrt base pose."""
+    base_pose = T_base_cam.astype(np.float32)
+    base_xyz = base_pose[:3, 3]
+    base_rot = base_pose[:3, :3]
+
+    pose_seq_base = _build_pose_mats(
+        headpose_base_seq[:, :3],
+        headpose_base_seq[:, 3:3 + 6],
+    ).astype(np.float32)
+    xyz_rel = pose_seq_base[:, :3, 3] - base_xyz[None, :]
+    rel_rot = np.einsum(
+        "nij,jk->nik",
+        pose_seq_base[:, :3, :3],
+        base_rot.T,
+    )
+    r6_rel = rotation_transform(
+        rel_rot,
+        "matrix",
+        "rotation_6d",
+    )
+    return np.concatenate([xyz_rel, r6_rel], axis=1).astype(np.float32)
 
 
 def headpose_to_tcp(

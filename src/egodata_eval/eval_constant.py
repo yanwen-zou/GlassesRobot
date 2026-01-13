@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 # I2RT initial joint configuration.
-I2RT_TARGET_DEG = [-17, 25, 61, -42, 0, -2, 0]
+I2RT_TARGET_DEG = [-0.1314, 59.9407, 50.3597, 10.8160, -0.1314, -1.1748]
 I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
 I2RT_INIT_DURATION = 2.0
 I2RT_INIT_STEPS = 80
