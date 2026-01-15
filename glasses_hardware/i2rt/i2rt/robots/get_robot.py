@@ -50,7 +50,7 @@ def get_yam_robot(
     joint_limits[:,1] += 0.15
 
     motor_directions = [1, 1, 1, 1, 1, 1]
-    kp = np.array([90, 90,90, 80, 10, 10]) # need adjustment
+    kp = np.array([90, 150,150, 120, 10, 10]) # need adjustment
     kd = np.array([5, 5, 5, 1.5, 1.5, 1.5])
     if with_gripper:
         motor_type = gripper_type.get_motor_type()

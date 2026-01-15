@@ -57,7 +57,7 @@ from glasses_hardware.hardware.my_device.i2rt_robo import (
     DEFAULT_ROBOT_PORT,
 )  # type: ignore
 from i2rt.robots.kinematics_mj import Kinematics
-from i2rt.robots.utils import YAM_XML_PATH
+from i2rt.robots.utils import YAM_XML_PATH,YAM_GLASS_PATH
 import rclpy
 
 
@@ -100,7 +100,7 @@ class EvalHardware:
         self.i2rt_robot = I2RTClient(port=i2rt_port)
         time.sleep(3)
 
-        self.i2rt_kin = Kinematics(YAM_XML_PATH, "grasp_site")
+        self.i2rt_kin = Kinematics(YAM_GLASS_PATH, "grasp_site")
         self.i2rt_arm_dofs = min(6, self.i2rt_robot.num_dofs())
         self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
         self.i2rt_target_pose = None
@@ -122,9 +122,8 @@ class EvalHardware:
         for idx in range(rel_seq.shape[0]):
             self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
             current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
-            rel_tcp = np.linalg.inv(current_pose) @ rel_seq[idx] @ current_pose # transform rel traj to tcp frame
-            print(f"[DEBUG] Rel seq translation:{np.round(rel_tcp[:3, 3],4)}")
-            new_pose = current_pose @ rel_tcp
+            # print(f"[DEBUG] Rel seq translation:{np.round(rel_seq[idx,:3, 3],4)}")
+            new_pose = rel_seq[idx] @ current_pose
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
             if not success:
                 print("[WARN] I2RT IK failed for relative tcp pose.")
@@ -154,8 +153,8 @@ class EvalHardware:
             tcp_rel_seq[:, 3:3+6],
         ).astype(np.float32)
         base_pose = base_pose.astype(np.float32)
-        print(f"rel_seq:{rel_seq}")
-        print(f"base_pose:{base_pose}")
+        # print(f"rel_seq:{rel_seq}")
+        # print(f"base_pose:{base_pose}")
         for idx in range(rel_seq.shape[0]):
             new_pose = rel_seq[idx] @ base_pose
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
@@ -238,6 +237,7 @@ class EvalHardware:
 
 
 def main() -> None:
+    '''Test headpose_base -> tcp_i2rt rel traj transformation'''
     import argparse
     ap = argparse.ArgumentParser(description="Move I2RT up/down around current headpose.")
     ap.add_argument("--base-to-robot-txt", type=str, default=DEFAULT_BASE_TO_ROBOT_TXT)
@@ -284,33 +284,37 @@ def main() -> None:
     base_pose = hw.i2rt_kin.fk(base_q[:hw.i2rt_arm_dofs]).astype(np.float32)
     if T_base_cam is None:
         raise RuntimeError("Failed to calibrate T_base_cam from three balls.")
+    rclpy.init(args=None)
+    head_reader = HeadPoseReader(args.pose_topic, DEFAULT_GLASSES_ZED_TXT, T_base_cam)
     try:
         with _StdinCbreak():
-            curr_pose = base_pose
             offset = 0.05
             base_rel_traj = np.array(
                 [
-                    [0, 0, offset, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    [0, 0, -offset, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    [0, 0, 0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0, offset, 0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0, -offset, 0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 ],
                 dtype=np.float32,
             )
-            headpose_i2rt_rel = headpose_base_to_i2rt_rel(base_rel_traj, T_base_cam, base_pose)
-            tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
+
             while True:
-                # hw.execute_pred_tcp_rel(headpose_i2rt_rel)
-                hw.execute_pred_tcp_rel_open(tcp_i2rt_rel, curr_pose)
-                last_rel = _build_pose_mats(
-                    tcp_i2rt_rel[-1:, :3],
-                    tcp_i2rt_rel[-1:, 3:3 + 6],
-                ).astype(np.float32)[0]
-                curr_pose = last_rel @ curr_pose
+                latest_base_cam = head_reader.get_headpos(timeout_sec=0.0)
+                if latest_base_cam is not None:
+                    T_base_cam = latest_base_cam.astype(np.float32)
+                print(f"base_rel_traj:\n{base_rel_traj}")
+                headpose_i2rt_rel = headpose_base_to_i2rt_rel(base_rel_traj, T_base_cam, base_pose)
+                print(f"after trans:\n{headpose_i2rt_rel}")
+                tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
+                hw.execute_pred_tcp_rel(tcp_i2rt_rel)
+                base_q = hw.i2rt_robot.current_joint_pos()
+                base_pose = hw.i2rt_kin.fk(base_q[:hw.i2rt_arm_dofs]).astype(np.float32)
                 if _check_quit():
                     print("[INFO] 收到 q，退出控制循环。")
                     hw.close_i2rt(timeout_s=20.0)
                     break
     finally:
+        head_reader.destroy_node()
+        rclpy.shutdown()
         if hw.i2rt_server_proc is not None and hw.i2rt_server_proc.is_alive():
             hw.i2rt_server_proc.terminate()
             hw.i2rt_server_proc.join(timeout=2.0)

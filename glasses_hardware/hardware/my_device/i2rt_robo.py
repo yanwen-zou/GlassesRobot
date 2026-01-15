@@ -330,36 +330,36 @@ def main():
         robot.send_ee_pos(target_up)
         time.sleep(0.5)
         while True:
-            offset = 0.1
-            current_q = robot.current_joint_pos()
-            current_pose = robot._kin.fk(current_q[:6])
-            current_rot6d = rotation_transform(
-                current_pose[:3, :3][None, ...],
-                "matrix",
-                "rotation_6d",
-            ).squeeze(0)
-            target_pos = current_pose[:3, 3].astype(np.float32)
-            target_forward = np.concatenate(
-                [target_pos + np.array([offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
-                axis=0,
-            ).astype(np.float32)
-            robot.send_ee_pos(target_forward)
+            # offset = 0.1
+            # current_q = robot.current_joint_pos()
+            # current_pose = robot._kin.fk(current_q[:6])
+            # current_rot6d = rotation_transform(
+            #     current_pose[:3, :3][None, ...],
+            #     "matrix",
+            #     "rotation_6d",
+            # ).squeeze(0)
+            # target_pos = current_pose[:3, 3].astype(np.float32)
+            # target_forward = np.concatenate(
+            #     [target_pos + np.array([offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
+            #     axis=0,
+            # ).astype(np.float32)
+            # robot.send_ee_pos(target_forward)
 
-            current_q = robot.current_joint_pos()
-            current_pose = robot._kin.fk(current_q[:6])
-            current_rot6d = rotation_transform(
-                current_pose[:3, :3][None, ...],
-                "matrix",
-                "rotation_6d",
-            ).squeeze(0)
-            target_pos = current_pose[:3, 3].astype(np.float32)
-            target_back = np.concatenate(
-                [target_pos + np.array([-offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
-                axis=0,
-            ).astype(np.float32)
-            robot.send_ee_pos(target_back)
-            # robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
-            # time.sleep(0.5)
+            # current_q = robot.current_joint_pos()
+            # current_pose = robot._kin.fk(current_q[:6])
+            # current_rot6d = rotation_transform(
+            #     current_pose[:3, :3][None, ...],
+            #     "matrix",
+            #     "rotation_6d",
+            # ).squeeze(0)
+            # target_pos = current_pose[:3, 3].astype(np.float32)
+            # target_back = np.concatenate(
+            #     [target_pos + np.array([-offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
+            #     axis=0,
+            # ).astype(np.float32)
+            # robot.send_ee_pos(target_back)
+            robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
+            time.sleep(0.5)
     finally:
         robot.close()
 

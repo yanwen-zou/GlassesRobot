@@ -233,30 +233,20 @@ def main():
                                     headpose_base_seq,
                                     T_base_cam,
                                 )
-                                # print(f"[DEBUG] headpose_rel_seq:{np.round(headpose_rel_seq[0:STEPS_TO_EXECUTE,0:3]*100,2)} ")
+                                headpose_rel_seq = np.array([[0.0204,-0.0096,0.0063,1,0,0,-0.0,1,-0.0]]) # DEBUG Transform
+                                print(f"[DEBUG] headpose_rel_seq:{np.round(headpose_rel_seq[0:STEPS_TO_EXECUTE,:]*100,2)} ") #base frame
                                 headpose_i2rt_rel = headpose_base_to_i2rt_rel(
                                     headpose_rel_seq,
                                     T_base_cam,
                                     T_i2rt_tcp,
                                 )
+                                print(f"[DEBUG] Executed pred_headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0:STEPS_TO_EXECUTE,:]*100,2)} ")
                                 pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel) # headpose traj -> tcp traj, both in i2rt frame
-                                
-                                end_idx = min(pred_tcp_i2rt_rel.shape[0], 1 + STEPS_TO_EXECUTE)
+                                end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
                                 # print(f"[DEBUG] Executed pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0:STEPS_TO_EXECUTE,:]*100,2)} ")
-                                # exec_ctx.execute_pred_tcp_rel_open(
-                                #     pred_tcp_i2rt_rel[0:end_idx],
-                                #     curr_headpose,
-                                # )
-                                exec_ctx.execute_pred_tcp_rel_open(
-                                    np.array([[0,0,0,1,0,0,0,1,0]]),
-                                    curr_headpose,
+                                exec_ctx.execute_pred_tcp_rel(
+                                    pred_tcp_i2rt_rel[0:end_idx],
                                 )
-                                if end_idx > 0:
-                                    last_rel = _build_pose_mats(
-                                        pred_tcp_i2rt_rel[end_idx - 1, :3][None, :],
-                                        pred_tcp_i2rt_rel[end_idx - 1, 3:3 + 6][None, :],
-                                    ).astype(np.float32)[0]
-                                    curr_headpose = last_rel @ curr_headpose # in i2rt frame
                                 # print('waiting for head moving...')
                                 # print(f"[DEBUG] curr_headpose after moving:{np.round(curr_headpose[:3,3]*100,2)}")
 

@@ -187,8 +187,8 @@ def headpose_base_to_i2rt_rel( # headpose_base: rel traj in base frame
         @ T_tcp_zed.astype(np.float32)
         @ T_cam_base.astype(np.float32)
     )
+    # print(f"[INFO] T_i2rt_base:\n{T_i2rt_base}")
     T_base_i2rt = np.linalg.inv(T_i2rt_base)
-    # print(f"T_i2rt_base:{T_i2rt_base}")
     pose_seq_i2rt = np.einsum(
         "ij,njk,kl->nil",
         T_i2rt_base,
@@ -259,9 +259,6 @@ def headpose_to_tcp(
         pose_seq_tcp[:, :3, :3],
         "matrix",
         "rotation_6d",
-
-
-        
     )
     return np.concatenate([xyz_tcp, r6_tcp], axis=1).astype(np.float32)
 
