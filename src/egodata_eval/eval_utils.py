@@ -19,7 +19,7 @@ from egodata_eval.eval_constant import (
     WIN_CALIB,
 )
 from egodata_eval.get_depth import DepthEstimator  # type: ignore
-from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
+# from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
 
 RDF_TO_ROBOT = np.array(
     [
@@ -167,41 +167,74 @@ def read_zed_intrinsics_baseline(camera) -> Tuple[np.ndarray, float]:
     return K, baseline
 
 
-def headpose_base_to_i2rt_rel( # headpose_base: rel traj in base frame
+def headpose_base_to_i2rt_rel(
     headpose_base: np.ndarray,
     T_base_cam: np.ndarray,
     T_i2rt_tcp: np.ndarray,
     T_tcp_zed: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    pose_seq_base = _build_pose_mats(
-        headpose_base[:, :3],
-        headpose_base[:, 3:3+6],
-    )
-    T_cam_base = np.linalg.inv(T_base_cam.astype(np.float32))
+    """
+    将base坐标系下的相对轨迹变换到i2rt坐标系下
+    
+    Args:
+        headpose_base: [N, 9] 相对轨迹，每行包含 [dx, dy, dz, rotation_6d...]
+        T_base_cam: 从相机到base坐标系的变换矩阵
+        T_i2rt_tcp: 从TCP到i2rt坐标系的变换矩阵
+        T_tcp_zed: 从ZED相机到TCP的变换矩阵（可选）
+    
+    Returns:
+        [N, 9] 在i2rt坐标系下的相对轨迹
+    """
+    # 提取平移和旋转部分
+    trans_base = headpose_base[:, :3]  # [N, 3] 相对平移
+    rot6d_base = headpose_base[:, 3:9]  # [N, 6] 旋转6D
+    
+    # 构建相对旋转矩阵
+    rot_mat_base = rotation_transform(
+        rot6d_base,
+        "rotation_6d",
+        "matrix",
+    )  # [N, 3, 3]
+    
+    # 计算从base到i2rt的旋转矩阵
     if T_tcp_zed is None:
         T_tcp_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
         if T_tcp_zed is None:
             raise ValueError(f"Failed to load T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}")
+    
+    # 计算从base到i2rt的变换链
+    # T_i2rt_base = T_i2rt_tcp @ T_tcp_zed @ T_cam_base
+    T_cam_base = np.linalg.inv(T_base_cam.astype(np.float32))
     T_i2rt_base = (
         T_i2rt_tcp.astype(np.float32)
         @ T_tcp_zed.astype(np.float32)
         @ T_cam_base.astype(np.float32)
     )
-    # print(f"[INFO] T_i2rt_base:\n{T_i2rt_base}")
-    T_base_i2rt = np.linalg.inv(T_i2rt_base)
-    pose_seq_i2rt = np.einsum(
+    
+    # 提取旋转部分
+    R_i2rt_base = T_i2rt_base[:3, :3]  # [3, 3]
+    
+    # 对于相对平移向量，只应用旋转变换，不改变量级
+    # 注意：相对平移是向量，坐标系变换时只受旋转影响
+    trans_i2rt = np.einsum("ij,nj->ni", R_i2rt_base, trans_base)
+    
+    # 对于相对旋转，进行相似变换：R_i2rt = R_i2rt_base @ R_base @ R_i2rt_base.T
+    rot_mat_i2rt = np.einsum(
         "ij,njk,kl->nil",
-        T_i2rt_base,
-        pose_seq_base.astype(np.float32),
-        T_base_i2rt,
+        R_i2rt_base,
+        rot_mat_base,
+        R_i2rt_base.T,
     )
-    xyz_i2rt = pose_seq_i2rt[:, :3, 3]
-    r6_i2rt = rotation_transform(
-        pose_seq_i2rt[:, :3, :3],
+    
+    # 转换回6D表示
+    rot6d_i2rt = rotation_transform(
+        rot_mat_i2rt,
         "matrix",
         "rotation_6d",
     )
-    return np.concatenate([xyz_i2rt, r6_i2rt], axis=1).astype(np.float32)
+    
+    # 组合结果
+    return np.concatenate([trans_i2rt, rot6d_i2rt], axis=1).astype(np.float32)
 
 
 def headpose_base_seq_to_rel(

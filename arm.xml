@@ -1,0 +1,59 @@
+<mujoco model="simple_arm">
+    <compiler angle="radian"/>
+    <option timestep="0.002" gravity="0 0 -9.81"/>
+
+    <worldbody>
+        <light pos="0 0 2"/>
+
+        <body name="base" pos="0 0 0">
+            <geom type="box" size="0.1 0.1 0.05" rgba="0.3 0.3 0.3 1"/>
+
+            <!-- 7-DoF arm -->
+            <body name="link1" pos="0 0 0.05">
+                <joint name="j1" type="hinge" axis="0 0 1"/>
+                <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.03"/>
+
+                <body name="link2" pos="0 0 0.3">
+                    <joint name="j2" type="hinge" axis="0 1 0"/>
+                    <geom type="capsule" fromto="0 0 0 0 0 0.3" size="0.03"/>
+
+                    <body name="link3" pos="0 0 0.3">
+                        <joint name="j3" type="hinge" axis="0 1 0"/>
+                        <geom type="capsule" fromto="0 0 0 0 0 0.25" size="0.03"/>
+
+                        <body name="link4" pos="0 0 0.25">
+                            <joint name="j4" type="hinge" axis="1 0 0"/>
+                            <geom type="capsule" fromto="0 0 0 0 0 0.2" size="0.03"/>
+
+                            <body name="link5" pos="0 0 0.2">
+                                <joint name="j5" type="hinge" axis="0 1 0"/>
+                                <geom type="capsule" fromto="0 0 0 0 0 0.2" size="0.03"/>
+
+                                <body name="link6" pos="0 0 0.2">
+                                    <joint name="j6" type="hinge" axis="1 0 0"/>
+                                    <geom type="capsule" fromto="0 0 0 0 0 0.15" size="0.03"/>
+
+                                    <body name="link7" pos="0 0 0.15">
+                                        <joint name="j7" type="hinge" axis="0 1 0"/>
+                                        <geom type="sphere" size="0.04"/>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <position joint="j1" kp="50"/>
+        <position joint="j2" kp="50"/>
+        <position joint="j3" kp="50"/>
+        <position joint="j4" kp="50"/>
+        <position joint="j5" kp="50"/>
+        <position joint="j6" kp="50"/>
+        <position joint="j7" kp="50"/>
+    </actuator>
+</mujoco>
+
