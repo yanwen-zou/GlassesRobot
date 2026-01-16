@@ -19,7 +19,7 @@ default_args = edict({
     "data_path": "data",
     "aug": False,
     "aug_jitter": False,
-    "num_action": 20,
+    "num_action": 10,
     "voxel_size": 0.005,
     "obs_feature_dim": 512,
     "hidden_dim": 512,
