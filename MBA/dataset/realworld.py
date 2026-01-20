@@ -363,7 +363,11 @@ class RealWorldDataset(Dataset):
             width = w, height = h, fx = fx, fy = fy, cx = cx, cy = cy
         )
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            colors, depths, depth_scale, convert_rgb_to_intensity = False
+            colors,
+            depths,
+            depth_scale,
+            depth_trunc=2.0,
+            convert_rgb_to_intensity=False,
         )
         cloud = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, camera_intrinsics)
         cloud = cloud.voxel_down_sample(self.voxel_size)

@@ -18,6 +18,7 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 import sys
 import portal
+import threading
 
 # Make repo modules importable when run as a script.
 here = Path(__file__).resolve()
@@ -62,6 +63,14 @@ class I2RT:
         self._dq_cmd = None
         self._kin = Kinematics(YAM_GLASS_PATH, "grasp_site") #TODO: check payload
         self._ee_pos_error = np.zeros(3, dtype=np.float32)
+        self._cmd_lock = threading.Lock()
+        self._cmd_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._cmd_target = None
+        self._cmd_duration = None
+        self._cmd_steps = None
+        self._worker = threading.Thread(target=self._motion_worker, daemon=True)
+        self._worker.start()
 
         if self._home:
             zero_pose = np.zeros(self.num_dofs(), dtype=np.float64)
@@ -77,10 +86,14 @@ class I2RT:
         """Send arm to home pose before closing, with a timeout."""
         duration = self._default_duration
         steps = self._default_steps
+        self._stop_event.set()
+        self._cmd_event.set()
+        if self._worker.is_alive():
+            self._worker.join(timeout=1.0)
         try:
             print("Start go back to 0")
             home_q = np.zeros(self.num_dofs(), dtype=np.float64)
-            self.send_joint_pos_rad(home_q, duration=duration, steps=steps)
+            self._send_joint_pos_rad_sync(home_q, duration=duration, steps=steps)
             if timeout_s is None:
                 timeout_s = max(duration + 1.0, 3.0)
             t0 = time.time()
@@ -162,6 +175,45 @@ class I2RT:
             duration = self._default_duration
         if steps is None:
             steps = self._default_steps
+        with self._cmd_lock:
+            self._cmd_target = np.asarray(target_joint_pos_rad, dtype=np.float64).copy()
+            self._cmd_duration = float(duration)
+            self._cmd_steps = int(steps)
+        self._cmd_event.set()
+
+    def _send_joint_pos_rad_sync(
+        self,
+        target_joint_pos_rad: Iterable[float],
+        duration: Optional[float],
+        steps: Optional[int],
+    ) -> None:
+        self._execute_joint_pos_rad(target_joint_pos_rad, duration, steps, allow_preempt=False)
+
+    def _motion_worker(self) -> None:
+        while not self._stop_event.is_set():
+            self._cmd_event.wait()
+            if self._stop_event.is_set():
+                break
+            with self._cmd_lock:
+                target = None if self._cmd_target is None else self._cmd_target.copy()
+                duration = self._cmd_duration
+                steps = self._cmd_steps
+            self._cmd_event.clear()
+            if target is None:
+                continue
+            self._execute_joint_pos_rad(target, duration, steps, allow_preempt=True)
+
+    def _execute_joint_pos_rad(
+        self,
+        target_joint_pos_rad: Iterable[float],
+        duration: Optional[float],
+        steps: Optional[int],
+        allow_preempt: bool,
+    ) -> None:
+        if duration is None:
+            duration = self._default_duration
+        if steps is None:
+            steps = self._default_steps
 
         if steps <= 0:
             raise ValueError("steps must be greater than zero")
@@ -192,6 +244,8 @@ class I2RT:
         dt = total_time / steps
 
         for idx in range(steps):
+            if allow_preempt and self._cmd_event.is_set():
+                break
             t = min((idx + 1) * dt, total_time)
             q_ref = q_start.copy()
             dq_ref = np.zeros_like(q_start)
@@ -310,56 +364,51 @@ class I2RTClient:
 
 
 def main():
+    """
+    test high frequency control and read/write conflict solving
+    """
     robot = I2RT(channel="can0", zero_gravity_mode=False)
+    robot.send_joint_pos_deg([-17, 55, 41, 22, 0, -2, 0], duration=3.0, steps=150)
+    time.sleep(3.0)
+    print("Move to initial position")
     try:
         current_q = robot.current_joint_pos()
         current_pose = robot._kin.fk(current_q[:6])
-        current_rot6d = rotation_transform(
-            current_pose[:3, :3][None, ...],
-            "matrix",
-            "rotation_6d",
-        ).squeeze(0)
-        target_up = np.concatenate(
+        current_rot = current_pose[:3, :3].astype(np.float32)
+        pitch_rad = np.deg2rad(5.0)
+        pitch_rot = np.array(
             [
-                current_pose[:3, 3].astype(np.float32)
-                + np.array([0.0, 0.0, 0.2], dtype=np.float32),
-                current_rot6d,
+                [np.cos(pitch_rad), 0.0, np.sin(pitch_rad)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(pitch_rad), 0.0, np.cos(pitch_rad)],
             ],
-            axis=0,
-        ).astype(np.float32)
-        robot.send_ee_pos(target_up)
-        time.sleep(0.5)
-        while True:
-            # offset = 0.1
-            # current_q = robot.current_joint_pos()
-            # current_pose = robot._kin.fk(current_q[:6])
-            # current_rot6d = rotation_transform(
-            #     current_pose[:3, :3][None, ...],
-            #     "matrix",
-            #     "rotation_6d",
-            # ).squeeze(0)
-            # target_pos = current_pose[:3, 3].astype(np.float32)
-            # target_forward = np.concatenate(
-            #     [target_pos + np.array([offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
-            #     axis=0,
-            # ).astype(np.float32)
-            # robot.send_ee_pos(target_forward)
+            dtype=np.float32,
+        )
+        offsets = [
+            (np.array([0.0, 0.0, 0.0], dtype=np.float32), pitch_rot),
+            (np.array([0.0, 0.0, 0.0], dtype=np.float32), pitch_rot.T),
+        ]
+        while True: 
+            for idx, (offset, rot_delta) in enumerate(offsets):
+                target_rot = current_rot @ rot_delta
+                target_rot6d = rotation_transform(
+                    target_rot[None, ...],
+                    "matrix",
+                    "rotation_6d",
+                ).squeeze(0)
+                target = np.concatenate(
+                    [
+                        current_pose[:3, 3].astype(np.float32) + offset,
+                        target_rot6d,
+                    ],
+                    axis=0,
+                ).astype(np.float32)
 
-            # current_q = robot.current_joint_pos()
-            # current_pose = robot._kin.fk(current_q[:6])
-            # current_rot6d = rotation_transform(
-            #     current_pose[:3, :3][None, ...],
-            #     "matrix",
-            #     "rotation_6d",
-            # ).squeeze(0)
-            # target_pos = current_pose[:3, 3].astype(np.float32)
-            # target_back = np.concatenate(
-            #     [target_pos + np.array([-offset, 0.0, 0.0], dtype=np.float32), current_rot6d],
-            #     axis=0,
-            # ).astype(np.float32)
-            # robot.send_ee_pos(target_back)
-            robot._test_send_joint(robot.current_joint_pos()) #DEBUG: The arm will fall because of payload
-            time.sleep(0.5)
+                robot.send_ee_pos(target)
+                # for i in range(5):
+                #     print(f"current pose {i}:{robot.current_joint_pos()}")
+                #     time.sleep(0.2)
+                time.sleep(1.0)
     finally:
         robot.close()
 

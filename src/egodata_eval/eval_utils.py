@@ -19,7 +19,7 @@ from egodata_eval.eval_constant import (
     WIN_CALIB,
 )
 from egodata_eval.get_depth import DepthEstimator  # type: ignore
-# from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
+from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
 
 RDF_TO_ROBOT = np.array(
     [
@@ -452,3 +452,11 @@ def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
             robot.close()
         except Exception:
             pass
+
+
+# VERY IMPORTANT 
+def add_relative(rel_mat: np.ndarray, base_mat: np.ndarray) -> np.ndarray: 
+    res_mat = np.eye(4, dtype=np.float32)
+    res_mat[:3, :3] = rel_mat[:3, :3] @ base_mat[:3, :3]
+    res_mat[:3, 3] = rel_mat[:3, 3] + base_mat[:3, 3]
+    return res_mat

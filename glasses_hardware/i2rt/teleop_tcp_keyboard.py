@@ -12,6 +12,7 @@ Press Ctrl+C to quit. Each key applies a small delta and solves IK to move there
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import termios
 import tty
@@ -66,17 +67,31 @@ def get_key() -> str:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description="Keyboard teleop for I2RT.")
+    ap.add_argument(
+        "--mode",
+        choices=("tcp", "joint"),
+        default="tcp",
+        help="Control mode: TCP pose via IK or direct joint increments.",
+    )
+    ap.add_argument("--pos-step", type=float, default=0.02, help="TCP position step (m).")
+    ap.add_argument("--rot-step", type=float, default=0.05, help="TCP rotation step (rad).")
+    ap.add_argument("--joint-step", type=float, default=0.05, help="Joint step (rad).")
+    args = ap.parse_args()
+
     robot = I2RT(channel="can0", zero_gravity_mode=False, home=True)
     model = Kinematics(YAM_XML_PATH, "grasp_site")
 
     q_start = robot.current_joint_pos()
     target_pose = model.fk(q_start[:6])
+    target_q = q_start.copy()
 
-    pos_step = 0.02
-    rot_step = 0.05
-
-    print("TCP keyboard teleop started.")
-    print("q/e:+/-X  a/d:+/-Y  w/s:+/-Z  u/o:+/-roll  i/k:+/-pitch  j/l:+/-yaw  Ctrl+C to exit.")
+    if args.mode == "tcp":
+        print("TCP keyboard teleop started.")
+        print("q/e:+/-X  a/d:+/-Y  w/s:+/-Z  u/o:+/-roll  i/k:+/-pitch  j/l:+/-yaw  Ctrl+C to exit.")
+    else:
+        print("Joint keyboard teleop started.")
+        print("q/e:j0  a/d:j1  w/s:j2  u/o:j3  i/k:j4  j/l:j5  Ctrl+C to exit.")
 
     while True:
         key = get_key()
@@ -84,41 +99,74 @@ def main() -> None:
             print("Exiting teleop.")
             break
 
-        dpos = np.zeros(3, dtype=np.float32)
-        drot = np.zeros(3, dtype=np.float32)
-        if key == "q":
-            dpos[0] += pos_step
-        elif key == "e":
-            dpos[0] -= pos_step
-        elif key == "a":
-            dpos[1] += pos_step
-        elif key == "d":
-            dpos[1] -= pos_step
-        elif key == "w":
-            dpos[2] += pos_step
-        elif key == "s":
-            dpos[2] -= pos_step
-        elif key == "u":
-            drot[0] += rot_step
-        elif key == "o":
-            drot[0] -= rot_step
-        elif key == "i":
-            drot[1] += rot_step
-        elif key == "k":
-            drot[1] -= rot_step
-        elif key == "j":
-            drot[2] += rot_step
-        elif key == "l":
-            drot[2] -= rot_step
-        else:
-            continue
+        if args.mode == "tcp":
+            dpos = np.zeros(3, dtype=np.float32)
+            drot = np.zeros(3, dtype=np.float32)
+            if key == "q":
+                dpos[0] += args.pos_step
+            elif key == "e":
+                dpos[0] -= args.pos_step
+            elif key == "a":
+                dpos[1] += args.pos_step
+            elif key == "d":
+                dpos[1] -= args.pos_step
+            elif key == "w":
+                dpos[2] += args.pos_step
+            elif key == "s":
+                dpos[2] -= args.pos_step
+            elif key == "u":
+                drot[0] += args.rot_step
+            elif key == "o":
+                drot[0] -= args.rot_step
+            elif key == "i":
+                drot[1] += args.rot_step
+            elif key == "k":
+                drot[1] -= args.rot_step
+            elif key == "j":
+                drot[2] += args.rot_step
+            elif key == "l":
+                drot[2] -= args.rot_step
+            else:
+                continue
 
-        target_pose = apply_delta(target_pose, dpos, drot)
-        success, q_sol = model.ik(target_pose, "grasp_site", verbose=False)
-        if not success:
-            print(f"[WARN] IK failed for key '{key}', skipping.")
-            continue
-        robot.send_joint_pos_rad(q_sol, duration=0.1, steps=20)
+            target_pose = apply_delta(target_pose, dpos, drot)
+            success, q_sol = model.ik(target_pose, "grasp_site", verbose=False)
+            if not success:
+                print(f"[WARN] IK failed for key '{key}', skipping.")
+                continue
+            target_q = q_sol
+        else:
+            dq = np.zeros_like(target_q)
+            if key == "q":
+                dq[0] += args.joint_step
+            elif key == "e":
+                dq[0] -= args.joint_step
+            elif key == "a":
+                dq[1] += args.joint_step
+            elif key == "d":
+                dq[1] -= args.joint_step
+            elif key == "w":
+                dq[2] += args.joint_step
+            elif key == "s":
+                dq[2] -= args.joint_step
+            elif key == "u":
+                dq[3] += args.joint_step
+            elif key == "o":
+                dq[3] -= args.joint_step
+            elif key == "i":
+                dq[4] += args.joint_step
+            elif key == "k":
+                dq[4] -= args.joint_step
+            elif key == "j":
+                dq[5] += args.joint_step
+            elif key == "l":
+                dq[5] -= args.joint_step
+            else:
+                continue
+            target_q = target_q + dq
+
+        robot.send_joint_pos_rad(target_q, duration=0.1, steps=20)
+        print(f"Sent target joint pos: {np.round(target_q, 4)}")
         time.sleep(0.01)
 
 

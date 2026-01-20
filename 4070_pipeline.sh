@@ -15,16 +15,16 @@ BALL_PIPELINE="${PROJECT_ROOT}/scripts_calib_balls/run_ball_pipeline.sh"
 DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data"
 DATA_ROOT="$DEFAULT_DATA_ROOT"
 SCALE=0.75
-INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
+ZED_INTR_READER="${PROJECT_ROOT}/scripts_data_processing/zed_intr_reader.py"
 
-if [ ! -f "$INTRINSICS_SRC" ]; then
-  echo "❌ Missing camera intrinsics: $INTRINSICS_SRC" >&2
+if [ ! -f "$ZED_INTR_READER" ]; then
+  echo "❌ Missing ZED intrinsics reader: $ZED_INTR_READER" >&2
   exit 1
 fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME] [--mesh-root PATH]
+Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME] [--mesh-root PATH] [--clear]
 
 Without episode arguments, all directories under the selected data root are processed.
 Specify one or more episode names (matching subdirectories of the data root) to
@@ -32,9 +32,14 @@ limit processing to those recordings.
 EOF
 }
 
+run_glasses() {
+  conda run --no-capture-output -n glasses "$@" 2> >(sed -e '/zstandard could not be imported/d' -e '/Install zstandard Python bindings/d' >&2)
+}
+
 POSITIONAL_ARGS=()
 MESH_NAME="book" # Set Mesh Name
 MESH_ROOT="${PROJECT_ROOT}/data"
+CLEAR_EPISODE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --data-root|--data_root)
@@ -52,6 +57,18 @@ while [ "$#" -gt 0 ]; do
       fi
       MESH_ROOT="$2"
       shift 2
+      ;;
+    --mesh-name|--mesh_name)
+      if [ "${2:-}" = "" ]; then
+        echo "❌ Missing name argument for --mesh-name" >&2
+        exit 1
+      fi
+      MESH_NAME="$2"
+      shift 2
+      ;;
+    --clear)
+      CLEAR_EPISODE=1
+      shift
       ;;
     -h|--help)
       usage
@@ -130,6 +147,42 @@ if [ "${#EPISODES[@]}" -eq 0 ]; then
   exit 0
 fi
 
+clear_episode_dirs() {
+  local episode_dir="$1"
+  local entry
+  shopt -s nullglob
+  for entry in "${episode_dir}"/*; do
+    if [ ! -d "$entry" ]; then
+      continue
+    fi
+    case "$(basename "$entry")" in
+      head_pos|zed_left|zed_right)
+        ;;
+      *)
+        rm -rf "$entry"
+        ;;
+    esac
+  done
+  shopt -u nullglob
+}
+
+if [ "$CLEAR_EPISODE" -eq 1 ]; then
+  echo "🧹 Clearing episode directories (keep: head_pos, zed_left, zed_right)..."
+  for episode in "${EPISODES[@]}"; do
+    episode_dir="${DATA_ROOT}/${episode}"
+    clear_episode_dirs "$episode_dir"
+  done
+fi
+
+if ! run_glasses python "$ZED_INTR_READER" --resolution WVGA >/dev/null; then
+  echo "❌ Failed to read ZED intrinsics from camera." >&2
+  exit 1
+fi
+INTRINSICS_SRC="${FOUNDATION_STEREO_DIR}/assets/K_ZED.txt"
+if [ ! -f "$INTRINSICS_SRC" ]; then
+  echo "❌ Missing camera intrinsics: $INTRINSICS_SRC" >&2
+  exit 1
+fi
 read -r -a K_VALUES <<<"$(head -n 1 "$INTRINSICS_SRC")"
 
 if [ "${#K_VALUES[@]}" -ne 9 ]; then
@@ -158,7 +211,15 @@ fill_head_pose_nans() {
   if ! find "$head_dir" -maxdepth 1 -type f -name '*.txt' -print -quit >/dev/null; then
     return
   fi
-  conda run --no-capture-output -n glasses python - "$head_dir" <<'PY'
+  conda run --no-capture-output -n glasses python - "$head_dir" 2>&1 <<'PY' | sed \
+    -e '/zstandard could not be imported/d' \
+    -e '/Install zstandard Python bindings/d' \
+    -e '/CUDA environment configured/d' \
+    -e '/^nvcc: NVIDIA (R) Cuda compiler driver/d' \
+    -e '/^Copyright (c) 2005-2024 NVIDIA Corporation/d' \
+    -e '/^Built on Thu_Mar_28_02:18:24_PDT_2024/d' \
+    -e '/^Cuda compilation tools, release 12.4, V12.4.131/d' \
+    -e '/^Build cuda_12.4.r12.4\/compiler.34097967_0/d'
 import os
 import sys
 import numpy as np
@@ -272,37 +333,38 @@ prepare_frames() {
     return
   fi
 
-  if [ -L "$rgb_dir" ]; then
-    rm -f "$rgb_dir"
-  fi
-
-  mkdir -p "$rgb_dir"
-  shopt -s nullglob
-  local src_file
   local copied=0
-  for src_file in "${left_dir}"/*; do
-    if [ -f "$src_file" ]; then
-      cp -f "$src_file" "${rgb_dir}/"
-      copied=1
-    fi
-  done
-  shopt -u nullglob
-
-  if [ "$copied" -eq 1 ]; then
-    echo "📁 Copied left camera frames into ${rgb_dir}"
+  if [ -d "$rgb_dir" ]; then
+    echo "⏭️  RGB directory already exists at ${rgb_dir}; skipping copy."
+    copied=1
   else
-    echo "⚠️  No files copied into ${rgb_dir}; check ${left_dir}" >&2
-    return
+    mkdir -p "$rgb_dir"
+    shopt -s nullglob
+    local src_file
+    for src_file in "${left_dir}"/*; do
+      if [ -f "$src_file" ]; then
+        cp -f "$src_file" "${rgb_dir}/"
+        copied=1
+      fi
+    done
+    shopt -u nullglob
+
+    if [ "$copied" -eq 1 ]; then
+      echo "📁 Copied left camera frames into ${rgb_dir}"
+    else
+      echo "⚠️  No files copied into ${rgb_dir}; check ${left_dir}" >&2
+      return
+    fi
   fi
 
-  if [ ! -d "$jpg_dir" ] || ! find "$jpg_dir" -maxdepth 1 -name '*.jpg' -print -quit >/dev/null; then
-    echo "🖼️ Converting PNG -> JPG for $episode..."
-    conda run --no-capture-output -n glasses python -u \
+  if [ -d "$jpg_dir" ]; then
+    echo "⏭️  JPG directory already exists at ${jpg_dir}; skipping conversion."
+  else
+    echo "🖼️ Converting PNG -> JPG for $episode (overwrite)..."
+    run_glasses python -u \
       "${FOUNDATION_STEREO_DIR}/scripts/png2jpg.py" \
       --input_dir "$left_dir" \
       --output_dir "$jpg_dir"
-  else
-    echo "✅ JPG frames already present in ${jpg_dir}"
   fi
 
   READY_EPISODES+=("$episode")
@@ -341,7 +403,7 @@ if [ "${#SAM_EPISODES[@]}" -gt 0 ]; then
 
   echo "=============================="
   echo "🪄 Launching SAM for selected episodes..."
-  conda run --no-capture-output -n glasses python -u \
+  run_glasses python -u \
     "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
     --data_root "$SAM_TEMP_ROOT"
 
@@ -382,7 +444,7 @@ if [ "${#BALL_EPISODES[@]}" -gt 0 ]; then
 
   echo "=============================="
   echo "🟢 Launching SAM for balls (3 objects) ..."
-  conda run --no-capture-output -n glasses python -u \
+  run_glasses python -u \
     "${FOUNDATION_STEREO_DIR}/scripts/multi_object_sam_segmentation.py" \
     --data_root "$BALL_TEMP_ROOT" \
     --num_objects 3 \
@@ -425,7 +487,7 @@ if [ "${#BALL_PIPELINE_EPISODES[@]}" -gt 0 ]; then
   echo "=============================="
   echo "🎯 Running ball post-processing pipeline (masks -> centers -> cam_to_base)..."
   for episode in "${BALL_PIPELINE_EPISODES[@]}"; do
-    conda run --no-capture-output -n glasses bash "$BALL_PIPELINE" --data-dir "${DATA_ROOT}/${episode}"
+    run_glasses bash "$BALL_PIPELINE" --data-dir "${DATA_ROOT}/${episode}"
   done
 
   # echo "=============================="
@@ -471,7 +533,7 @@ for episode in "${READY_EPISODES[@]}"; do
     --demo-name "$episode" \
     --data-root "$DATA_ROOT" \
     --mesh-root "$MESH_ROOT" \
-    --mesh-name "$MESH_NAME" 2>&1)
+    --mesh-name "$MESH_NAME" 2>&1 | sed -e '/zstandard could not be imported/d' -e '/Install zstandard Python bindings/d')
   fp_status=$?
   set -e
 

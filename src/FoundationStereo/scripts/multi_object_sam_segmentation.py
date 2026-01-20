@@ -116,7 +116,7 @@ def prompt_objects(frame_path: Path, num_objects: int) -> List[Tuple[np.ndarray,
 
     for obj_id in range(1, num_objects + 1):
         while True:
-            plt.figure(figsize=(9, 6))
+            plt.figure(figsize=(14, 9))
             plt.title(f"{frame_path.name} - Object ID {obj_id}: click all points then press Enter")
             plt.imshow(image)
             clicks = plt.ginput(n=-1, timeout=0)

@@ -8,8 +8,10 @@ import time
 import select
 import termios
 import tty
+import threading
 
 import numpy as np
+from std_msgs.msg import Float32MultiArray
 
 here = Path(__file__).resolve()
 project_root = here.parents[2]
@@ -49,19 +51,82 @@ from egodata_eval.eval_utils import (
     headpose_to_tcp,
 )
 from egodata_eval.get_depth import DepthEstimator
-from egodata_eval.traj_predictor import TrajectoryPredictor  # type: ignore
 from egodata_eval.get_head import HeadPoseReader
+from egodata_eval.eval_utils import add_relative
 from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
 from glasses_hardware.hardware.my_device.i2rt_robo import (
     I2RTClient,
     DEFAULT_ROBOT_PORT,
 )  # type: ignore
 from i2rt.robots.kinematics_mj import Kinematics
-from i2rt.robots.utils import YAM_XML_PATH,YAM_GLASS_PATH
+from i2rt.robots.utils import YAM_XML_PATH, YAM_GLASS_PATH
 import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+
+
+class I2RTHeadCmdNode(Node):
+    def __init__(self, i2rt_port: int, cmd_duration: float, cmd_steps: int) -> None:
+        super().__init__("i2rt_head_cmd")
+        self._client = I2RTClient(port=i2rt_port)
+        self._cmd_duration = cmd_duration
+        self._cmd_steps = cmd_steps
+        self._sub = self.create_subscription(Float32MultiArray, "head_cmd", self._on_head_cmd, 10)
+
+    def _on_head_cmd(self, msg: Float32MultiArray) -> None:
+        data = np.asarray(msg.data, dtype=np.float32)
+        if data.size != 9:
+            return
+        self._client.send_ee_pos(data.tolist(), duration=self._cmd_duration, steps=self._cmd_steps)
+
+    def num_dofs(self) -> int:
+        return self._client.num_dofs()
+
+    def current_joint_pos(self) -> np.ndarray:
+        return self._client.current_joint_pos()
+
+    def send_joint_pos_rad(self, target_joint_pos_rad, duration: Optional[float] = None, steps: Optional[int] = None) -> None:
+        self._client.send_joint_pos_rad(target_joint_pos_rad, duration=duration, steps=steps)
+
+    def close(self, timeout_s: float = 15.0) -> None:
+        self._client.close(timeout_s=timeout_s)
+
+
+class FlexivArmCmdNode(Node):
+    def __init__(self) -> None:
+        super().__init__("flexiv_arm_cmd")
+        self._robot = FlexivRobot(home=False)
+        self._gripper = FlexivGripper(self._robot)
+        self._sub = self.create_subscription(Float32MultiArray, "arm_cmd", self._on_arm_cmd, 10)
+        self.max_width = getattr(self._gripper, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
+
+    def _on_arm_cmd(self, msg: Float32MultiArray) -> None:
+        data = np.asarray(msg.data, dtype=np.float32)
+        if data.size != 8:
+            return
+        pose7 = data[:7]
+        grip_val = float(data[7])
+        self._robot.send_tcp_pose(pose7.astype(np.float32))
+        self._gripper.move(grip_val)
+
+    def get_tcp_pose(self) -> np.ndarray:
+        return self._robot.get_tcp_pose().astype(np.float32)
+
+    def get_gripper_state(self) -> float:
+        return float(self._gripper.get_gripper_state())
+
+    def close(self) -> None:
+        try:
+            self._robot.close()
+        except Exception:
+            pass
 
 
 class EvalHardware:
+    """
+    Wrapper of I2RT(head) and Flexiv(manipulator), communicate with separate nodes.
+    """
     def __init__(
         self,
         base_to_robot_txt: Optional[str] = DEFAULT_BASE_TO_ROBOT_TXT,
@@ -87,8 +152,14 @@ class EvalHardware:
         self.steps_to_execute = steps_to_execute
         self.i2rt_server_proc: Optional[mp.Process] = None
         print("[INFO] Initializing Flexiv and gripper...") # First initialize Flexiv, or I2RT comm will go error
-        self.flexiv_robot = FlexivRobot(home=False)
-        self.flexiv_gripper = FlexivGripper(self.flexiv_robot)
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        self.flexiv_robot = FlexivArmCmdNode()
+        self._arm_cmd_pub = self.flexiv_robot.create_publisher(Float32MultiArray, "arm_cmd", 10)
+        self._flexiv_executor = SingleThreadedExecutor()
+        self._flexiv_executor.add_node(self.flexiv_robot)
+        self._flexiv_thread = threading.Thread(target=self._spin_executor, args=(self._flexiv_executor,), daemon=True)
+        self._flexiv_thread.start()
 
         print("[INFO] Initializing I2RT (RPC)...")
         self.i2rt_server_proc = mp.Process(
@@ -97,7 +168,14 @@ class EvalHardware:
             daemon=True,
         )
         self.i2rt_server_proc.start()
-        self.i2rt_robot = I2RTClient(port=i2rt_port)
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        self.i2rt_robot = I2RTHeadCmdNode(i2rt_port, i2rt_cmd_duration, i2rt_cmd_steps)
+        self._head_cmd_pub = self.i2rt_robot.create_publisher(Float32MultiArray, "head_cmd", 10)
+        self._head_executor = SingleThreadedExecutor()
+        self._head_executor.add_node(self.i2rt_robot)
+        self._head_thread = threading.Thread(target=self._spin_executor, args=(self._head_executor,), daemon=True)
+        self._head_thread.start()
         time.sleep(3)
 
         self.i2rt_kin = Kinematics(YAM_GLASS_PATH, "grasp_site")
@@ -123,7 +201,8 @@ class EvalHardware:
             self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
             current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
             # print(f"[DEBUG] Rel seq translation:{np.round(rel_seq[idx,:3, 3],4)}")
-            new_pose = rel_seq[idx] @ current_pose
+            # new_pose = rel_seq[idx] @ current_pose
+            new_pose = add_relative(rel_seq[idx], current_pose)
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
             if not success:
                 print("[WARN] I2RT IK failed for relative tcp pose.")
@@ -136,56 +215,21 @@ class EvalHardware:
                 "rotation_6d",
             ).squeeze(0)
             target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
-            self.i2rt_robot.send_ee_pos(
-                target_xyz_rot6d,
-                duration=self.i2rt_cmd_duration,
-                steps=self.i2rt_cmd_steps,
-            )
-
-    def execute_pred_tcp_rel_open(self, tcp_rel_seq: np.ndarray, base_pose: np.ndarray) -> None:
-        """Execute relative TCP sequence using provided base pose as reference."""
-        if tcp_rel_seq is None or tcp_rel_seq.shape[0] == 0:
-            return
-        if base_pose is None or base_pose.shape != (4, 4):
-            raise ValueError(f"base_pose must be 4x4, got {None if base_pose is None else base_pose.shape}")
-        rel_seq = _build_pose_mats(
-            tcp_rel_seq[:, :3],
-            tcp_rel_seq[:, 3:3+6],
-        ).astype(np.float32)
-        base_pose = base_pose.astype(np.float32)
-        # print(f"rel_seq:{rel_seq}")
-        # print(f"base_pose:{base_pose}")
-        for idx in range(rel_seq.shape[0]):
-            new_pose = rel_seq[idx] @ base_pose
-            success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
-            if not success:
-                print("[WARN] I2RT IK failed for relative tcp pose.")
-                continue
-            self.i2rt_target_pose = new_pose
-            target_rot6d = rotation_transform(
-                new_pose[:3, :3][None, ...],
-                "matrix",
-                "rotation_6d",
-            ).squeeze(0)
-            target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
-            self.i2rt_robot.send_ee_pos(
-                target_xyz_rot6d,
-                duration=self.i2rt_cmd_duration,
-                steps=self.i2rt_cmd_steps,
-            )
+            self._publish_head_cmd(target_xyz_rot6d)
+            time.sleep(0.2)
 
     def execute_robot_traj(
         self,
-        traj_pred: TrajectoryPredictor,
+        traj_denorm: np.ndarray,
         pose_cam_ob: np.ndarray,
         T_base_cam: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], list[np.ndarray]]:
-        grip_seq = traj_pred.last_traj_denorm[:, 9].astype(np.float32)
+        grip_seq = traj_denorm[:, 9].astype(np.float32)
         pose_base_ob = T_base_cam @ pose_cam_ob
         pose_robot_ob = self.T_robot_base @ pose_base_ob # [4,4]
         pose_seq_base = _build_pose_mats(
-            traj_pred.last_traj_denorm[:, :3],
-            traj_pred.last_traj_denorm[:, 3:3+6],
+            traj_denorm[:, :3],
+            traj_denorm[:, 3:3+6],
         )
         pose_seq_robot = np.einsum(
             'ij,njk->nik',
@@ -206,7 +250,7 @@ class EvalHardware:
             start_quat = curr_pose7[3:7].astype(np.float32)
             start_rot = rotation_transform(start_quat[None, :], "quaternion", "matrix").squeeze(0)
             base_obj_rot = pose_robot_ob[:3, :3].astype(np.float32)
-            open_width = getattr(self.flexiv_gripper, 'max_width', GRIPPER_OPEN_WIDTH_DEFAULT)
+            open_width = getattr(self.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
             open_thresh = GRIP_OPEN_THRESH
             for i in range(robot_rel_pts.shape[0]):
                 xyz = start_xyz + robot_rel_pts[i]
@@ -215,35 +259,62 @@ class EvalHardware:
                 target_rot = rel_rot @ start_rot
                 target_quat = rotation_transform(target_rot[None, ...], "matrix", "quaternion").squeeze(0)
                 pose7 = np.concatenate([xyz, target_quat], axis=0).astype(np.float32)
+                width_cmd = 0.0
                 if steps_grip is not None and i < len(steps_grip):
                     grip_val = float(steps_grip[i])
                     width_cmd = open_width if grip_val > open_thresh else 0.0
-                    self.flexiv_gripper.move(width_cmd)
-
-                self.flexiv_robot.send_tcp_pose(pose7)
+                self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
                 tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))
                 time.sleep(LOOP_SLEEP_SEC)
         return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses, tcp_history
 
-    def close_i2rt(self, timeout_s: float = 15.0) -> None:
-        """Return I2RT to home pose before closing the client."""
+    def close(self, timeout_s: float = 15.0) -> None:
+        """Return I2RT to home pose before closing the clients."""
         if self.i2rt_robot is None:
             return
         try:
             self.i2rt_robot.close(timeout_s=timeout_s)
         except Exception as exc:
             print(f"[WARN] I2RT close 失败: {exc}")
+        finally:
+            self._head_executor.shutdown()
+            self._head_thread.join(timeout=1.0)
+            self.i2rt_robot.destroy_node()
+            self._flexiv_executor.shutdown()
+            self._flexiv_thread.join(timeout=1.0)
+            self.flexiv_robot.destroy_node()
+            self.flexiv_robot.close()
+
+    @staticmethod
+    def _spin_executor(executor: SingleThreadedExecutor) -> None:
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            pass
+
+    def _publish_head_cmd(self, target_xyz_rot6d: np.ndarray) -> None:
+        msg = Float32MultiArray()
+        msg.data = target_xyz_rot6d.astype(np.float32).ravel().tolist()
+        self._head_cmd_pub.publish(msg)
+
+    def _publish_arm_cmd(self, pose7: np.ndarray, grip_val: float) -> None:
+        msg = Float32MultiArray()
+        payload = np.concatenate([pose7.astype(np.float32), np.array([grip_val], dtype=np.float32)], axis=0)
+        msg.data = payload.ravel().tolist()
+        self._arm_cmd_pub.publish(msg)
 
 
 def main() -> None:
-    '''Test headpose_base -> tcp_i2rt rel traj transformation'''
+    '''
+    Test headpose_base -> tcp_i2rt rel traj transformation
+    '''
     import argparse
     ap = argparse.ArgumentParser(description="Move I2RT up/down around current headpose.")
     ap.add_argument("--base-to-robot-txt", type=str, default=DEFAULT_BASE_TO_ROBOT_TXT)
     ap.add_argument("--pose-topic", type=str, default="/glasses_pose")
     ap.add_argument("--cycles", type=int, default=5)
-    ap.add_argument("--dwell-sec", type=float, default=0.5)
+    ap.add_argument("--dwell-sec", type=float, default=1)
     args = ap.parse_args()
 
     class _StdinCbreak:
@@ -271,6 +342,8 @@ def main() -> None:
         ch = sys.stdin.read(1)
         return ch.lower() == "q"
 
+    if not rclpy.ok():
+        rclpy.init(args=None)
     hw = EvalHardware(base_to_robot_txt=args.base_to_robot_txt)
     move_i2rt_to_init_angles(hw.i2rt_robot)
     depth_est = DepthEstimator(camera=hw.camera,scale=DEPTH_EST_SCALE)
@@ -284,15 +357,26 @@ def main() -> None:
     base_pose = hw.i2rt_kin.fk(base_q[:hw.i2rt_arm_dofs]).astype(np.float32)
     if T_base_cam is None:
         raise RuntimeError("Failed to calibrate T_base_cam from three balls.")
-    rclpy.init(args=None)
     head_reader = HeadPoseReader(args.pose_topic, DEFAULT_GLASSES_ZED_TXT, T_base_cam)
     try:
         with _StdinCbreak():
-            offset = 0.05
+            offset = 0
+            pitch_rad = np.deg2rad(10.0)
+            pitch_rot6d = rotation_transform(
+                R.from_euler("y", pitch_rad).as_matrix()[None, ...],
+                "matrix",
+                "rotation_6d",
+            ).squeeze(0).astype(np.float32)
+            minus_pitch_rad = np.deg2rad(-10.0)
+            minus_pitch_rot6d = rotation_transform(
+                R.from_euler("y", minus_pitch_rad).as_matrix()[None, ...],
+                "matrix",
+                "rotation_6d",
+            ).squeeze(0).astype(np.float32)
             base_rel_traj = np.array(
                 [
-                    [0, offset, 0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    [0, -offset, 0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    np.concatenate([[0, offset, 0], pitch_rot6d], axis=0),
+                    np.concatenate([[0, -offset, 0], minus_pitch_rot6d], axis=0),
                 ],
                 dtype=np.float32,
             )
@@ -310,7 +394,7 @@ def main() -> None:
                 base_pose = hw.i2rt_kin.fk(base_q[:hw.i2rt_arm_dofs]).astype(np.float32)
                 if _check_quit():
                     print("[INFO] 收到 q，退出控制循环。")
-                    hw.close_i2rt(timeout_s=20.0)
+                    hw.close(timeout_s=20.0)
                     break
     finally:
         head_reader.destroy_node()

@@ -88,6 +88,7 @@ def main():
     try:
         headpose_preds = load_array(data_dir / "headpose_pred.npy")
     except Exception:
+        print("No headpose predictions found.")
         headpose_preds = None
 
     T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
@@ -224,8 +225,15 @@ def main():
             )
         if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
             headpose_entry = None
-            if 0 <= frame_idx < headpose_preds.shape[0]:
-                headpose_entry = headpose_preds[frame_idx]
+            print(f"Headpose_pred_shape: {headpose_preds.shape}")
+            print(f"Frame_idx: {frame_idx}")
+            print(f"Headpose_preds: {headpose_preds.shape[0]}")
+            if "headpose_pred_cursor" not in locals():
+                headpose_pred_cursor = 0
+            cursor = headpose_pred_cursor
+            if 0 <= cursor < headpose_preds.shape[0]:
+                headpose_entry = headpose_preds[cursor]
+                headpose_pred_cursor = cursor + 1
             if headpose_entry is not None:
                 headpose_entry = np.asarray(headpose_entry, dtype=np.float32)
                 headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
@@ -233,6 +241,7 @@ def main():
                 for headpose_T in headpose_mats:
                     headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
                     headpose_points.append(headpose_robot[:3, 3])
+                print(f"Logging {len(headpose_points)} headpose points for pred idx {cursor}")
                 rr.log(
                     f"frames/frame_{frame_idx}/headpose_pred/points",
                     rr.Points3D(

@@ -8,6 +8,8 @@ import signal
 import numpy as np
 import torch
 import rclpy
+import multiprocessing as mp
+import queue
 
 here = Path(__file__).resolve()
 project_root = here.parents[2] # 指向仓库根目录
@@ -27,18 +29,103 @@ from egodata_eval.eval_utils import (
 from egodata_eval.eval_hardware import EvalHardware
 
 from egodata_eval.get_depth import DepthEstimator  # type: ignore
-from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
+from egodata_eval.get_pose import PoseEstimatorFP
 from egodata_eval.get_head import HeadPoseReader
+from egodata_eval.traj_predictor import TrajectoryPredictor
 
-# ========== MBA Trajectory Prediction (RISE) ==========
 
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
-from egodata_eval.traj_predictor import TrajectoryPredictor  # type: ignore
 from egodata_eval.eval_constant import *
+
+infer_in = None
+infer_out = None
+infer_proc = None
+last_overlay = None
+
+def _depth_traj_worker(in_q, out_q, cfg: dict) -> None:
+    print("[INFO] Enter inference!")
+    depth_est = DepthEstimator(camera=None, scale=cfg["depth_scale"])
+    depth_est.K = cfg["K"]
+    depth_est.baseline = cfg["baseline"]
+
+    traj_pred = TrajectoryPredictor(
+        ckpt_path=cfg["ckpt_path"],
+        num_action=cfg["num_action"],
+        enable_headpose_head=cfg["enable_headpose_head"],
+    )
+
+    pose_est = None
+    pose_ready = False
+    last_mask = None
+    last_depth_m = None
+    K_rs = cfg["K"]
+    mesh_path = cfg["mesh_path"]
+
+    while True:
+        item = in_q.get()
+        if item is None:
+            break
+        frame = item["frame"]
+        frame_right = item["frame_right"]
+        if item.get("mask") is not None:
+            last_mask = item["mask"]
+        # print(f"[DEBUG] item_mask:{item['mask']}")
+        with torch.no_grad():
+            last_depth_m = depth_est.depth(frame, frame_right)
+        depth_m = last_depth_m
+        if depth_m is None:
+            continue
+
+        if (not pose_ready) and (last_mask is not None):
+            if pose_est is None:
+                pose_est = PoseEstimatorFP(mesh_path)
+            pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
+            pose_ready = pose is not None
+
+        frame_overlay = frame
+        pred_state = None
+        if pose_ready and pose_est is not None:
+            pose_est.track(frame, depth_m, K_rs)
+            frame_overlay = pose_est.draw_overlay(frame, K_rs)
+
+            if traj_pred is not None and pose_est.pose_cam_ob is not None:
+                T_base_cam = item["T_base_cam"]
+                headpose_norm = item.get("headpose_norm")
+                frame_overlay = traj_pred.predict_and_overlay(
+                    frame_overlay,
+                    depth_m,
+                    K_rs,
+                    pose_est.pose_cam_ob.astype(np.float32),
+                    T_base_cam=T_base_cam,
+                    headpose_cond=headpose_norm,
+                )
+                pred_state = {
+                    "pose_cam_ob": pose_est.pose_cam_ob.astype(np.float32),
+                    "traj_denorm": traj_pred.last_traj_denorm.astype(np.float32),
+                    "headpose_pred": None if traj_pred.last_headpose_pred is None else traj_pred.last_headpose_pred.astype(np.float32),
+                    "T_base_cam": T_base_cam.astype(np.float32),
+                }
+        else:
+            print("[DEBUG] Pose not ready...")
+
+        out = {"frame": frame_overlay, "pred": pred_state}
+        try:
+            out_q.put_nowait(out)
+        except queue.Full:
+            try:
+                _ = out_q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                out_q.put_nowait(out)
+            except queue.Full:
+                pass
+
 
 def main():
     import argparse
+    global infer_in, infer_out, infer_proc, last_overlay
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--num_action", type=int, default=10)
@@ -46,6 +133,8 @@ def main():
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
+    infer_in = mp.Queue(maxsize=1)
+    infer_out = mp.Queue(maxsize=1)
     # Shared interval controlling how often heavy ops run
     update_interval = UPDATE_INTERVAL
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -67,6 +156,8 @@ def main():
     exec_ctx = EvalHardware()
     cam = exec_ctx.camera
     depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=cam)
+    K_rs = depth_est.K.astype(np.float32)
+    baseline = float(depth_est.baseline)
 
     T_base_cam0 = calibrate_from_three_balls(
         cam,
@@ -110,22 +201,28 @@ def main():
     cv2.setMouseCallback(win, on_mouse)
 
     depth_enabled = False
-    pose_est = None
-    pose_ready = False
-    last_mask = None
-    last_depth_m = None  # cache last computed depth
-    traj_pred = None
     headpose_reader = None
 
-    # Try initialize trajectory predictor (optional)
-
-    traj_pred = TrajectoryPredictor(ckpt_path = Path(args.ckpt), 
-                                    num_action = args.num_action, 
-                                    enable_headpose_head = args.enable_headpose_head) # current traj pred is under base frame
-    print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
     if args.enable_headpose_head:
-        rclpy.init(args=None)
+        if not rclpy.ok():
+            rclpy.init(args=None)
         headpose_reader = HeadPoseReader(headpose_topic, args.glass_zed, T_base_cam0)
+    def _start_infer_worker():
+        mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj"
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"Mesh not found: {mesh_path}")
+        cfg = {
+            "ckpt_path": Path(args.ckpt),
+            "num_action": args.num_action,
+            "enable_headpose_head": args.enable_headpose_head,
+            "mesh_path": mesh_path,
+            "depth_scale": DEPTH_EST_SCALE,
+            "K": K_rs,
+            "baseline": baseline,
+        }
+        proc = mp.Process(target=_depth_traj_worker, args=(infer_in, infer_out, cfg), daemon=True)
+        proc.start()
+        return proc
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
     tcp_history: list[np.ndarray] = []
@@ -140,8 +237,6 @@ def main():
             if stereo is None:
                 continue
             frame, frame_right = stereo
-
-            K_rs = depth_est.K.astype(np.float32)
 
             # Prepare an RGB copy if needed downstream (already resized)
             image_bgr = frame
@@ -165,116 +260,104 @@ def main():
                 if mask is not None:
                     # Save mask into eval_output directory
                     save_mask(mask,ts)
-                    last_mask = mask
                     depth_enabled = True
+                    if infer_proc is None:
+                        infer_proc = _start_infer_worker()
                     
 
             if depth_enabled:
                 do_update = (frame_idx % update_interval == 0)
-                # print(f"[INFO] Frame {frame_idx}: depth/pred update={do_update}")
+                headpose_norm = None
+                T_base_cam = T_base_cam0
                 if do_update:
-                    with torch.no_grad():
-                        # Depth on resized stereo
-                        last_depth_m = depth_est.depth(frame, frame_right)
-                depth_m = last_depth_m
-                if depth_m is None:
-                    continue
-                # Initialize FoundationPose once we have a mask and depth
-                if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
-                    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj" #TODO: Hardcode
-                    if not mesh_path.exists():
-                        raise FileNotFoundError(f"Mesh not found: {mesh_path}")
-                    if pose_est is None:
-                        pose_est = PoseEstimatorFP(mesh_path)
-                    pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
-                    pose_ready = pose is not None
+                    if args.enable_headpose_head:
+                        T_base_cam = headpose_reader.get_headpos(timeout_sec=0.2)
+                        if T_base_cam is None:
+                            raise RuntimeError("[eval] No headpose received yet from topic.")
+                        headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
+                        headpose_norm = headpose_raw.copy()
+                        headpose_norm[:3] = (headpose_norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+                    if T_base_cam is not None:
+                        T_base_cam_runtime.append(T_base_cam.astype(np.float32))
 
-                # Track every 10 frames; overlay every frame using last pose
-                if pose_ready and pose_est is not None:
-                    # Use the same `update_interval` for pose tracking
-                    if do_update:
-                        pose_est.track(frame, depth_m, K_rs)
-                    frame = pose_est.draw_overlay(frame, K_rs)
+                if do_update:
+                    state = {
+                        "frame": frame,
+                        "frame_right": frame_right,
+                        "T_base_cam": T_base_cam,
+                        "headpose_norm": headpose_norm,
+                        "mask": mask,
+                    }
 
-                    # Overlay trajectory prediction; then execute a few steps on robot
-                    if traj_pred is not None and pose_est.pose_cam_ob is not None:
-                        if do_update:
-                            # print("[INFO] Running trajectory prediction...")
-                            headpose_norm = None
-                            if args.enable_headpose_head:
-                                T_base_cam = headpose_reader.get_headpos(timeout_sec=0.2)
-                                if T_base_cam is None:
-                                    raise RuntimeError("[eval] No headpose received yet from topic.")
-                                headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
-                                headpose_norm = headpose_raw.copy() # [x,y,z,r6d] 9-dim
-                                headpose_norm[:3] = (headpose_norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
-                            else:
-                                T_base_cam = T_base_cam0 # fixed head
-                            if T_base_cam is not None:
-                                # print(f"[DEBUG] T_base_cam:{T_base_cam[0:3,3]}")
-                                T_base_cam_runtime.append(T_base_cam.astype(np.float32))
-                            frame = traj_pred.predict_and_overlay(
-                                frame,
-                                depth_m,
-                                K_rs,
-                                pose_est.pose_cam_ob.astype(np.float32),
-                                T_base_cam=T_base_cam,
-                                headpose_cond=headpose_norm, # Semantically, here headpose_norm = norm(T_base_cam)
+                    try:
+                        while True:
+                            _ = infer_in.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        # print(f"frame_idx:{frame_idx}")
+                        infer_in.put_nowait(state)
+                    except queue.Full:
+                        pass
+
+                try:
+                    while True:
+                        out = infer_out.get_nowait()
+                        last_overlay = out["frame"]
+                        pred_state = out.get("pred")
+                        if pred_state is None:
+                            continue
+                        pose_cam_ob = pred_state["pose_cam_ob"]
+                        traj_denorm = pred_state["traj_denorm"]
+                        headpose_pred = pred_state["headpose_pred"]
+                        T_base_cam_used = pred_state["T_base_cam"]
+                        # print(f"[INFO] pred_state:{pred_state}")
+                        if args.enable_headpose_head and headpose_pred is not None:
+                            headpose_base_seq = headpose_pred.astype(np.float32)
+                            headpose_pred_records.append(headpose_base_seq.copy())
+                            T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
+                            headpose_rel_seq = headpose_base_seq_to_rel(
+                                headpose_base_seq,
+                                T_base_cam_used,
                             )
-                            if args.enable_headpose_head and traj_pred.last_headpose_pred is not None: # execute headpose
-                                # Note that we predict delta headpose, but transform to abs in policy for further transformation
-                                headpose_base_seq = traj_pred.last_headpose_pred.astype(np.float32) # abs in base frame
-                                # print(f"[DEBUG] headpose_base_abs:{np.round(headpose_base_seq[0:STEPS_TO_EXECUTE,0:3]*100,2)}")
-                                headpose_pred_records.append(headpose_base_seq.copy())
-
-                                T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
-                                # print(f"[INFO] T_i2rt_tcp:{T_i2rt_tcp}")
-                                headpose_rel_seq = headpose_base_seq_to_rel(
-                                    headpose_base_seq,
-                                    T_base_cam,
-                                )
-                                headpose_rel_seq = np.array([[0.0204,-0.0096,0.0063,1,0,0,-0.0,1,-0.0]]) # DEBUG Transform
-                                print(f"[DEBUG] headpose_rel_seq:{np.round(headpose_rel_seq[0:STEPS_TO_EXECUTE,:]*100,2)} ") #base frame
-                                headpose_i2rt_rel = headpose_base_to_i2rt_rel(
-                                    headpose_rel_seq,
-                                    T_base_cam,
-                                    T_i2rt_tcp,
-                                )
-                                print(f"[DEBUG] Executed pred_headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0:STEPS_TO_EXECUTE,:]*100,2)} ")
-                                pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel) # headpose traj -> tcp traj, both in i2rt frame
-                                end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
-                                # print(f"[DEBUG] Executed pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0:STEPS_TO_EXECUTE,:]*100,2)} ")
-                                exec_ctx.execute_pred_tcp_rel(
-                                    pred_tcp_i2rt_rel[0:end_idx],
-                                )
-                                # print('waiting for head moving...')
-                                # print(f"[DEBUG] curr_headpose after moving:{np.round(curr_headpose[:3,3]*100,2)}")
-
-                            # Saving execution info
-                            pose_cam_ob = pose_est.pose_cam_ob.astype(np.float32)
-                            pose_robot_ob, pose_seq_robot, step_poses, step_tcp = exec_ctx.execute_robot_traj(
-                                traj_pred,
-                                pose_cam_ob,
-                                T_base_cam,
+                            print(f"[DEBUG] headpose_rel_seq: {np.round(headpose_rel_seq[0]*100,3)}")
+                            headpose_i2rt_rel = headpose_base_to_i2rt_rel(
+                                headpose_rel_seq,
+                                T_base_cam_used,
+                                T_i2rt_tcp,
                             )
-                            pose_records.append(
-                                {
-                                    "timestamp": float(time.time()),
-                                    "frame_idx": int(frame_idx),
-                                    "object_pose_robot": pose_robot_ob,
-                                    "pred_seq_robot": pose_seq_robot,
-                                }
-                            )
-                            if step_poses:
-                                executed_poses.extend(step_poses)
-                            if step_tcp:
-                                tcp_history.extend(step_tcp)
-                        else:
-                            frame = traj_pred.overlay_cached(frame, K_rs)
+                            print(f"[DEBUG] headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0]*100,3)}")
+                            pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
+                            print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
+                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
+                            exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
+
+                        pose_robot_ob, pose_seq_robot, step_poses, step_tcp = exec_ctx.execute_robot_traj(
+                            traj_denorm,
+                            pose_cam_ob.astype(np.float32),
+                            T_base_cam_used.astype(np.float32),
+                        )
+                        pose_records.append(
+                            {
+                                "timestamp": float(time.time()),
+                                "frame_idx": int(frame_idx),
+                                "object_pose_robot": pose_robot_ob,
+                                "pred_seq_robot": pose_seq_robot,
+                            }
+                        )
+                        if step_poses:
+                            executed_poses.extend(step_poses)
+                        if step_tcp:
+                            tcp_history.extend(step_tcp)
+                except queue.Empty:
+                    pass
+
                 frame_idx += 1 # increment frame index only when depth is enabled
 
             # Refresh display from possibly overlaid frame
-            disp = cv2.resize(frame, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+            disp_src = last_overlay if last_overlay is not None else frame
+            # print(f'[INFO] Frame updated')
+            disp = cv2.resize(disp_src, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, disp)
             # Write current display frame to video
             if writer is not None and writer.isOpened():
@@ -282,8 +365,8 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if interrupted["flag"] or key == ord('q') or key == 27:
                 break
-            gripper_width = float(exec_ctx.flexiv_gripper.get_gripper_state())
-            open_width = getattr(exec_ctx.flexiv_gripper, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
+            gripper_width = float(exec_ctx.flexiv_robot.get_gripper_state())
+            open_width = getattr(exec_ctx.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
             if gripper_width >= 0.8 * open_width:
                 print(f"[INFO] Gripper open ({gripper_width:.4f}m); stopping.")
                 break
@@ -331,6 +414,28 @@ def main():
 
         if exec_ctx.i2rt_robot is not None:
             exec_ctx.i2rt_robot.close()
+        if infer_in is not None:
+            try:
+                infer_in.put_nowait(None)
+            except Exception:
+                pass
+        if infer_proc is not None:
+            infer_proc.join(timeout=2.0)
+            if infer_proc.is_alive():
+                infer_proc.terminate()
+                infer_proc.join(timeout=2.0)
+        if infer_in is not None:
+            try:
+                infer_in.close()
+                infer_in.join_thread()
+            except Exception:
+                pass
+        if infer_out is not None:
+            try:
+                infer_out.close()
+                infer_out.join_thread()
+            except Exception:
+                pass
         if exec_ctx.i2rt_server_proc is not None and exec_ctx.i2rt_server_proc.is_alive():
             exec_ctx.i2rt_server_proc.terminate()
             exec_ctx.i2rt_server_proc.join(timeout=2.0)

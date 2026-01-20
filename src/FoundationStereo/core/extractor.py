@@ -8,10 +8,20 @@
 
 
 import torch,logging,os,sys,urllib,warnings
+import importlib.util
 import torch.nn as nn
 import torch.nn.functional as F
 code_dir = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(f'{code_dir}/../')
+fs_root = os.path.abspath(os.path.join(code_dir, ".."))
+if fs_root not in sys.path:
+    sys.path.insert(0, fs_root)
+utils_path = os.path.join(fs_root, "Utils.py")
+spec = importlib.util.spec_from_file_location("Utils", utils_path)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Failed to load Utils from {utils_path}")
+Utils = importlib.util.module_from_spec(spec)
+sys.modules["Utils"] = Utils  # Force local Utils over any previously imported one.
+spec.loader.exec_module(Utils)
 from core.submodule import *
 from Utils import *
 import timm
@@ -367,5 +377,3 @@ class Feature(nn.Module):
         x4 = torch.cat([x4, vit_feat], dim=1)
         x4 = self.conv4(x4)
         return [x4, x8, x16, x32], vit_feat
-
-

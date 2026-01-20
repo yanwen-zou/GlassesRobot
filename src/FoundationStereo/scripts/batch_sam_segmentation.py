@@ -98,7 +98,7 @@ def load_frames_for_episode(episode_dir: Path):
 
 def prompt_points(frame_path: Path):
     image = Image.open(frame_path)
-    plt.figure(figsize=(9, 6))
+    plt.figure(figsize=(14, 9))
     plt.title(f"{frame_path}")
     plt.imshow(image)
     clicks = plt.ginput(n=-1, timeout=0)
