@@ -225,7 +225,7 @@ def main():
         return proc
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
-    tcp_history: list[np.ndarray] = []
+    # tcp_history: list[np.ndarray] = []
     pose_records: list[dict[str, object]] = []
     headpose_pred_records: list[np.ndarray] = []
     T_base_cam_runtime: list[np.ndarray] = []
@@ -319,20 +319,22 @@ def main():
                             headpose_rel_seq = headpose_base_seq_to_rel(
                                 headpose_base_seq,
                                 T_base_cam_used,
-                            )
-                            print(f"[DEBUG] headpose_rel_seq: {np.round(headpose_rel_seq[0]*100,3)}")
+                            ) # relative to the frame that starts inference
+                            # print(f"[DEBUG] headpose_rel_seq: {np.round(headpose_rel_seq[0]*100,3)}")
                             headpose_i2rt_rel = headpose_base_to_i2rt_rel(
                                 headpose_rel_seq,
                                 T_base_cam_used,
                                 T_i2rt_tcp,
                             )
-                            print(f"[DEBUG] headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0]*100,3)}")
+                            # print(f"[DEBUG] headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0]*100,3)}")
                             pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
-                            print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
-                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
+                            # print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
+                            # end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
+                            end_idx = min(pred_tcp_i2rt_rel.shape[0], 7)
                             exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
+                            time.sleep(2.0)  # wait for motion to finish
 
-                        pose_robot_ob, pose_seq_robot, step_poses, step_tcp = exec_ctx.execute_robot_traj(
+                        pose_robot_ob, pose_seq_robot, step_poses = exec_ctx.execute_robot_traj(
                             traj_denorm,
                             pose_cam_ob.astype(np.float32),
                             T_base_cam_used.astype(np.float32),
@@ -347,8 +349,8 @@ def main():
                         )
                         if step_poses:
                             executed_poses.extend(step_poses)
-                        if step_tcp:
-                            tcp_history.extend(step_tcp)
+                        # if step_tcp:
+                        #     tcp_history.extend(step_tcp)
                 except queue.Empty:
                     pass
 
@@ -359,19 +361,21 @@ def main():
             # print(f'[INFO] Frame updated')
             disp = cv2.resize(disp_src, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
             cv2.imshow(win, disp)
-            # Write current display frame to video
-            if writer is not None and writer.isOpened():
-                writer.write(disp)
-            key = cv2.waitKey(1) & 0xFF
-            if interrupted["flag"] or key == ord('q') or key == 27:
-                break
-            gripper_width = float(exec_ctx.flexiv_robot.get_gripper_state())
-            open_width = getattr(exec_ctx.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
-            if gripper_width >= 0.8 * open_width:
-                print(f"[INFO] Gripper open ({gripper_width:.4f}m); stopping.")
-                break
-            del frame, frame_right
-            torch.cuda.empty_cache()
+            
+            if depth_enabled:
+                # Write current display frame to video
+                if writer is not None and writer.isOpened():
+                    writer.write(disp)
+                key = cv2.waitKey(1) & 0xFF
+                if interrupted["flag"] or key == ord('q') or key == 27:
+                    break
+                gripper_width = float(exec_ctx.flexiv_robot.get_gripper_state())
+                open_width = getattr(exec_ctx.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
+                if gripper_width >= 0.8 * open_width:
+                    print(f"[INFO] Gripper open ({gripper_width:.4f}m); stopping.")
+                    break
+                del frame, frame_right
+                torch.cuda.empty_cache()
     finally:
         # Release resources and save video
         if headpose_reader is not None:
@@ -398,10 +402,10 @@ def main():
             np.save(headpose_pred_path, np.stack(headpose_pred_records, axis=0))
             print(f"[INFO] Saved headpose predictions to: {headpose_pred_path}")
 
-        if tcp_history:
-            tcp_path = out_dir / "robot_tcp_history.npy"
-            np.save(tcp_path, np.stack(tcp_history, axis=0))
-            print(f"[INFO] Saved robot TCP history to: {tcp_path}")
+        # if tcp_history:
+        #     tcp_path = out_dir / "robot_tcp_history.npy"
+        #     np.save(tcp_path, np.stack(tcp_history, axis=0))
+        #     print(f"[INFO] Saved robot TCP history to: {tcp_path}")
 
         if T_base_cam_runtime:
             t_base_cam_path = out_dir / "T_base_cam_runtime.npy"

@@ -44,8 +44,8 @@ DEFAULT_ROBOT_PORT = 11333
 class I2RT:
     """User-facing helper that exposes simple joint-space commands."""
 
-    MAX_JOINT_VEL_RAD_S = 0.2
-    MAX_JOINT_ACCEL_RAD_S2 = 6.0
+    MAX_JOINT_VEL_RAD_S = 0.4
+    MAX_JOINT_ACCEL_RAD_S2 = 9.0
 
     def __init__(
         self,
@@ -117,7 +117,7 @@ class I2RT:
     ) -> None:
         """Move to the given joint configuration specified in degrees."""
         target_rad = np.deg2rad(np.asarray(target_joint_pos_deg, dtype=np.float64))
-        self._send_joint_pos_rad(target_rad, duration=duration, steps=steps)
+        self._send_joint_pos_rad_sync(target_rad, duration=duration, steps=steps)
 
     def send_joint_pos_rad(
         self,
@@ -127,7 +127,7 @@ class I2RT:
     ) -> None:
         """Move to the given joint configuration specified in radians."""
         target = np.asarray(target_joint_pos_rad, dtype=np.float64)
-        self._send_joint_pos_rad(target, duration=duration, steps=steps)
+        self._send_joint_pos_rad_sync(target, duration=duration, steps=steps)
 
     def send_ee_pos(
         self,

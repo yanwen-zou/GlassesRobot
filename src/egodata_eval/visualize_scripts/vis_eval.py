@@ -81,10 +81,10 @@ def main():
     pose_records = load_records(data_dir / "robot_pose_records.npy")
     try:
         executed = load_array(data_dir / "robot_executed_poses.npy")
-        tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
+        # tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
     except Exception:
         executed = None
-        tcp_hist = None
+    tcp_hist = None
     try:
         headpose_preds = load_array(data_dir / "headpose_pred.npy")
     except Exception:
@@ -193,13 +193,11 @@ def main():
         if centroid_source_path is not None:
             print(f"[INFO] Visualizing ball centroids from {centroid_source_path}")
 
-    for rec in pose_records:
-        frame_idx = rec.get("frame_idx", -1)
+    for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
 
-        frame_idx /= UPDATE_INTERVAL # frames are only logged at intervals
-        frame_idx = int(frame_idx)
+        frame_idx = rec_idx
 
         if pose_robot is None:
             continue

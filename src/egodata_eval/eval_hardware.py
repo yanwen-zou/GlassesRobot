@@ -185,6 +185,7 @@ class EvalHardware:
         self.last_headpose_rot: Optional[np.ndarray] = None
         self.last_headpose_xyz: Optional[np.ndarray] = None
         self.camera = self._init_camera()
+        self.idx = 0
 
     def _init_camera(self):
         ZEDCamera = _import_zed_class()
@@ -197,12 +198,14 @@ class EvalHardware:
             tcp_rel_seq[:, :3],
             tcp_rel_seq[:, 3:3+6],
         ).astype(np.float32)
+        self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
+        current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32) # the starting pose of an action chunk
         for idx in range(rel_seq.shape[0]):
-            self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
-            current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+            # print(f"[DEBUG] Current TCP Pose :\n{current_pose}")
             # print(f"[DEBUG] Rel seq translation:{np.round(rel_seq[idx,:3, 3],4)}")
-            # new_pose = rel_seq[idx] @ current_pose
             new_pose = add_relative(rel_seq[idx], current_pose)
+            # print(f"[DEBUG] New TCP Pose :\n{new_pose}")
+            # print("--------------------------------------------------")
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
             if not success:
                 print("[WARN] I2RT IK failed for relative tcp pose.")
@@ -265,9 +268,11 @@ class EvalHardware:
                     width_cmd = open_width if grip_val > open_thresh else 0.0
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
-                tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))
+                # tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32)
+                print(f"[INFO] execute flexiv:{self.idx}")
+                self.idx += 1
                 time.sleep(LOOP_SLEEP_SEC)
-        return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses, tcp_history
+        return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses
 
     def close(self, timeout_s: float = 15.0) -> None:
         """Return I2RT to home pose before closing the clients."""
