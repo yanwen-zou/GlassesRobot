@@ -51,10 +51,9 @@ class RealWorldDataset(Dataset):
 
         self.path = path
         self.split = split
-        if split == 'all':
-            self.data_path = path
-        else:
-            self.data_path = os.path.join(path, split)
+        # Always treat the provided path as the root containing episode folders.
+        # split is kept for downstream logic but no longer affects the data root.
+        self.data_path = path
         self.num_obs = num_obs
         self.num_action = num_action
         self.voxel_size = voxel_size
