@@ -269,7 +269,7 @@ class EvalHardware:
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
                 # tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32)
-                print(f"[INFO] execute flexiv:{self.idx}")
+                # print(f"[INFO] execute flexiv:{self.idx}")
                 self.idx += 1
                 time.sleep(LOOP_SLEEP_SEC)
         return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses

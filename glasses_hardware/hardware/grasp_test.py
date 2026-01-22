@@ -49,8 +49,8 @@ def main() -> None:
     move_home(robot)
     center_pose = robot.get_tcp_pose().copy()
 
-    delta_x = 0.05
-    delta_y = 0
+    delta_x = 0.05 # 0.05
+    delta_y = 0 # 0
     delta_z = 0.05
 
     pose_forward = center_pose.copy()

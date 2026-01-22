@@ -127,6 +127,10 @@ def main():
         import rerun as rr
     except Exception as exc:
         raise RuntimeError("rerun package required. `pip install rerun-sdk`.") from exc
+    try:
+        import cv2
+    except Exception:
+        cv2 = None
 
     rr.init(f"Eval Visualization ({data_dir.name})", spawn=args.spawn)
     try:
@@ -193,11 +197,43 @@ def main():
         if centroid_source_path is not None:
             print(f"[INFO] Visualizing ball centroids from {centroid_source_path}")
 
+    video_path = data_dir / "stream.mp4"
+    video_cap = None
+    video_frame_count = None
+    if video_path.exists():
+        if cv2 is None:
+            raise RuntimeError("OpenCV required to load stream.mp4. `pip install opencv-python`.") 
+        video_cap = cv2.VideoCapture(str(video_path))
+        if not video_cap.isOpened():
+            print(f"[WARN] Failed to open video: {video_path}")
+            video_cap = None
+        else:
+            video_frame_count = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if video_frame_count <= 0:
+                print(f"[WARN] Invalid frame count for video: {video_path}")
+                video_frame_count = None
+
+    pred_window = 10
     for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
 
         frame_idx = rec_idx
+        rr.set_time_sequence("frame", frame_idx)
+
+        if video_cap is not None and video_frame_count:
+            if len(pose_records) > 1 and video_frame_count > 1:
+                video_idx = int(round((frame_idx / (len(pose_records) - 1)) * (video_frame_count - 1)))
+            else:
+                video_idx = 0
+            video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
+            ok, frame = video_cap.read()
+            if ok:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                rr.log("video/stream", rr.Image(frame_rgb))
+            else:
+                video_cap.release()
+                video_cap = None
 
         if pose_robot is None:
             continue
@@ -221,6 +257,9 @@ def main():
                     radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
                 ),
             )
+            expired_idx = frame_idx - pred_window
+            if expired_idx >= 0:
+                rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
         if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
             headpose_entry = None
             print(f"Headpose_pred_shape: {headpose_preds.shape}")
@@ -253,6 +292,9 @@ def main():
         if cam_tf is not None:
             cam_robot = T_robot_base @ cam_tf 
             log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)
+
+    if video_cap is not None:
+        video_cap.release()
 
     if executed is not None and executed.size > 0:
         rr.log(

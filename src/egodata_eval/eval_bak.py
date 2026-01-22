@@ -276,24 +276,24 @@ def main():
                             # print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
                             # end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
                             end_idx = min(pred_tcp_i2rt_rel.shape[0], 7)
-                            exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
-                            time.sleep(1.0)  # wait for motion to finish
+                            # exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
+                            # time.sleep(2.0)  # wait for motion to finish
 
-                        pose_robot_ob, pose_seq_robot, step_poses = exec_ctx.execute_robot_traj(
-                            traj_denorm,
-                            pose_cam_ob.astype(np.float32),
-                            T_base_cam_used.astype(np.float32),
-                        )
-                        pose_records.append(
-                            {
-                                "timestamp": float(time.time()),
-                                "frame_idx": int(frame_idx),
-                                "object_pose_robot": pose_robot_ob,
-                                "pred_seq_robot": pose_seq_robot,
-                            }
-                        )
-                        if step_poses:
-                            executed_poses.extend(step_poses)
+                        # pose_robot_ob, pose_seq_robot, step_poses = exec_ctx.execute_robot_traj(
+                        #     traj_denorm,
+                        #     pose_cam_ob.astype(np.float32),
+                        #     T_base_cam_used.astype(np.float32),
+                        # )
+                        # pose_records.append(
+                        #     {
+                        #         "timestamp": float(time.time()),
+                        #         "frame_idx": int(frame_idx),
+                        #         "object_pose_robot": pose_robot_ob,
+                        #         "pred_seq_robot": pose_seq_robot,
+                        #     }
+                        # )
+                        # if step_poses:
+                        #     executed_poses.extend(step_poses)
 
                 frame_idx += 1 # increment frame index only when depth is enabled
 
