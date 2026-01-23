@@ -40,6 +40,7 @@ default_args = edict({
     "enable_mba": True,
     "obj_dim": 10,
     "enable_headpose_head": True,
+    "enable_both_pose_head": False,
     "headpose_dim": 9,
     "obj_pose_mode": "abs",
 })
@@ -50,6 +51,8 @@ def train(args_override):
     args = deepcopy(default_args)
     for key, value in args_override.items():
         args[key] = value
+    if args.enable_both_pose_head:
+        args.enable_headpose_head = False
 
     # prepare distributed training
     torch.multiprocessing.set_sharing_strategy('file_system')
@@ -81,7 +84,7 @@ def train(args_override):
         aug_jitter = args.aug_jitter, 
         with_cloud = False,
         with_obj_action = True,
-        with_headpose = args.enable_headpose_head,
+        with_headpose = (args.enable_headpose_head or args.enable_both_pose_head),
     )
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -114,6 +117,7 @@ def train(args_override):
         enable_headpose_head = args.enable_headpose_head,
         headpose_dim = args.headpose_dim,
         obj_pose_mode = args.obj_pose_mode,
+        enable_both_pose_head = args.enable_both_pose_head,
     ).to(device)
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -159,6 +163,7 @@ def train(args_override):
         avg_loss = 0
         avg_obj_loss = 0
         avg_headpose_loss = 0
+        avg_both_loss = 0
 
         for data in pbar:
             # cloud data processing
@@ -187,14 +192,20 @@ def train(args_override):
                             headpose_data = headpose_data,
                             headpose_cond = current_headpose)
             if isinstance(losses, dict):
-                loss = losses.get("obj_loss")
-                headpose_loss = losses.get("headpose_loss")
-                if loss is None:
-                    raise RuntimeError("obj_loss is required for training in train_obj.")
-                avg_obj_loss += loss.item()
-                if headpose_loss is not None:
-                    avg_headpose_loss += headpose_loss.item()
-                    loss = loss + headpose_loss * args.headpose_loss_weight
+                if args.enable_both_pose_head:
+                    loss = losses.get("both_pose_loss")
+                    if loss is None:
+                        raise RuntimeError("both_pose_loss is required when both pose head is enabled.")
+                    avg_both_loss += loss.item()
+                else:
+                    loss = losses.get("obj_loss")
+                    headpose_loss = losses.get("headpose_loss")
+                    if loss is None:
+                        raise RuntimeError("obj_loss is required for training in train_obj.")
+                    avg_obj_loss += loss.item()
+                    if headpose_loss is not None:
+                        avg_headpose_loss += headpose_loss.item()
+                        loss = loss + headpose_loss * args.headpose_loss_weight
             else:
                 loss = losses
             loss.backward()
@@ -206,15 +217,23 @@ def train(args_override):
         avg_loss = avg_loss / num_steps
         avg_obj_loss = avg_obj_loss / num_steps
         avg_headpose_loss = avg_headpose_loss / num_steps
+        avg_both_loss = avg_both_loss / num_steps
         sync_loss(avg_loss, device)
         train_history.append(avg_loss)
 
         if RANK == 0:
-            print(
-                "Train loss: {:.6f} (obj: {:.6f}, headpose: {:.6f})".format(
-                    avg_loss, avg_obj_loss, avg_headpose_loss
+            if args.enable_both_pose_head:
+                print(
+                    "Train loss: {:.6f} (both: {:.6f})".format(
+                        avg_loss, avg_both_loss
+                    )
                 )
-            )
+            else:
+                print(
+                    "Train loss: {:.6f} (obj: {:.6f}, headpose: {:.6f})".format(
+                        avg_loss, avg_obj_loss, avg_headpose_loss
+                    )
+                )
 
             if (epoch + 1) % args.save_epochs == 0:
                 torch.save(
@@ -257,6 +276,7 @@ if __name__ == '__main__':
     parser.add_argument('--enable_mba', action = 'store_true', help = 'mba enabled / disabled')
     parser.add_argument('--obj_dim', action = 'store', type = int, help = 'hidden dimension', required = False, default = 10)
     parser.add_argument('--disable_headpose_head', action = 'store_false', dest = 'enable_headpose_head', help = 'disable headpose diffusion head')
+    parser.add_argument('--enable_both_pose_head', action = 'store_true', help = 'use a single head for both obj/headpose prediction')
     parser.add_argument('--headpose_dim', action = 'store', type = int, help = 'headpose action dimension', required = False, default = 9)
     parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='delta', help='object pose prediction target type')
     parser.add_argument('--headpose_loss_weight', action = 'store', type = float, help = 'headpose loss weight', required = False, default = 0.3)

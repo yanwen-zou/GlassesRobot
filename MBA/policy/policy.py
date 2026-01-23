@@ -26,22 +26,27 @@ class RISE(nn.Module):
         enable_headpose_head = False,
         headpose_dim = 9,
         obj_pose_mode = "delta",
+        enable_both_pose_head = False,
     ):
         super().__init__()
         num_obs = 1
         self.sparse_encoder = Sparse3DEncoder(input_dim, obs_feature_dim)
         self.transformer = Transformer(hidden_dim, nheads, num_encoder_layers, num_decoder_layers, dim_feedforward, dropout)
         self.enable_mba = enable_mba
-        self.action_decoder = DiffusionUNetPolicy(action_dim, 
-                                                  num_action, 
-                                                  num_obs, 
-                                                  obs_feature_dim, 
-                                                  enable_mba=enable_mba,
-                                                  obj_dim=obj_dim,
-                                                  rot_smooth_lambda=0.05,
-                                                  cond_extra_dim=obj_dim,
-                                                  obj_pose_mode=obj_pose_mode)
         self.enable_headpose_head = enable_headpose_head
+        self.enable_both_pose_head = enable_both_pose_head
+        if not self.enable_both_pose_head: 
+            self.action_decoder = DiffusionUNetPolicy(action_dim, 
+                                                    num_action, 
+                                                    num_obs, 
+                                                    obs_feature_dim, 
+                                                    enable_mba=enable_mba,
+                                                    obj_dim=obj_dim,
+                                                    rot_smooth_lambda=0.05,
+                                                    cond_extra_dim=obj_dim,
+                                                    obj_pose_mode=obj_pose_mode)
+        if self.enable_both_pose_head and self.enable_headpose_head:
+            raise ValueError("enable_both_pose_head and enable_headpose_head are mutually exclusive.")
         if self.enable_headpose_head:
             self.headpose_decoder = DiffusionUNetPolicy(
                 headpose_dim,
@@ -53,6 +58,19 @@ class RISE(nn.Module):
                 rot_smooth_lambda=0.0,
                 cond_extra_dim=headpose_dim,
                 obj_pose_mode="delta",
+            )
+        if self.enable_both_pose_head:
+            both_dim = obj_dim + headpose_dim
+            self.both_pose_decoder = DiffusionUNetPolicy(
+                both_dim,
+                num_action,
+                num_obs,
+                obs_feature_dim,
+                enable_mba=True,
+                obj_dim=both_dim,
+                rot_smooth_lambda=0.0,
+                cond_extra_dim=both_dim,
+                obj_pose_mode=obj_pose_mode,
             )
         self.readout_embed = nn.Embedding(1, hidden_dim)
 
@@ -70,11 +88,25 @@ class RISE(nn.Module):
         readout = self.transformer(src, src_padding_mask, self.readout_embed.weight, pos)[-1]
         readout = readout[:, 0]
         if headpose_data is not None and not self.enable_headpose_head:
-            raise RuntimeError("Headpose head is disabled but headpose_data was provided.")
+            if not self.enable_both_pose_head:
+                raise RuntimeError("Headpose head is disabled but headpose_data was provided.")
         if actions_obj is not None and sample_mba:
             raise Exception("Sample mba should be set to false")
         if headpose_data is not None or actions_obj is not None:
             losses = {}
+            if self.enable_both_pose_head:
+                if actions_obj is None or headpose_data is None:
+                    raise RuntimeError("Both pose head requires both obj and headpose data.")
+                if (current_obj is None) != (headpose_cond is None):
+                    raise RuntimeError("Both pose head requires both current_obj and headpose_cond together.")
+                both_data = torch.cat([actions_obj, headpose_data], dim=-1)
+                both_cond = None
+                if current_obj is not None and headpose_cond is not None:
+                    both_cond = torch.cat([current_obj, headpose_cond], dim=-1)
+                losses["both_pose_loss"] = self.both_pose_decoder.compute_obj_loss(
+                    readout, both_data, extra_cond=both_cond
+                )
+                return losses
             if actions_obj is not None:
                 losses["obj_loss"] = self.action_decoder.compute_obj_loss(
                     readout, actions_obj, extra_cond=current_obj
@@ -87,6 +119,14 @@ class RISE(nn.Module):
             return losses
         else:
             outputs = {}
+            if self.enable_both_pose_head:
+                with torch.no_grad():
+                    both_cond = None
+                    if current_obj is not None and headpose_cond is not None:
+                        both_cond = torch.cat([current_obj, headpose_cond], dim=-1)
+                    both_pred = self.both_pose_decoder.predict_obj(readout, extra_cond=both_cond)
+                outputs["both_pose_pred"] = both_pred
+                return outputs
             if self.enable_mba:
                 with torch.no_grad():
                     obj_pred = self.action_decoder.predict_obj(readout, extra_cond=current_obj)
