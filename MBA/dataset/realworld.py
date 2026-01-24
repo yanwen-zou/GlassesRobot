@@ -433,9 +433,17 @@ class RealWorldDataset(Dataset):
             points_base, colors = self.load_point_cloud(
                 colors_list[i], depths_list[i], cam_intrinsic, depth_scale=1000.0, T_base_cam=T_base_cam
             )
-            keep = (points_base[:, 0] >= -0.1) & (points_base[:, 1] <= 0.32)
+            keep = (points_base[:, 0] >= -0.2) & (points_base[:, 1] <= 0.32) & (points_base[:, 1] >= -0.75)
+
             points_base = points_base[keep]
             colors = colors[keep]
+            if points_base.shape[0] > 0:
+                # Drop isolated points with no neighbors within 1 cm.
+                cloud = o3d.geometry.PointCloud()
+                cloud.points = o3d.utility.Vector3dVector(points_base)
+                _, inlier_idx = cloud.remove_radius_outlier(nb_points=2, radius=0.01)
+                points_base = points_base[inlier_idx]
+                colors = colors[inlier_idx]
             # apply imagenet normalization
             colors = (colors - IMG_MEAN) / IMG_STD
             cloud = np.concatenate([points_base, colors], axis = -1)

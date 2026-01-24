@@ -6,6 +6,7 @@ Usage:
     python cleanup_intermediate.py --data-root /path/to/data
 
 By default removes: cam_pose_in_ball, masks_balls, jpg
+Optional: clear foundationpose_vis.mp4
 """
 
 from __future__ import annotations
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="List what would be deleted without removing anything.",
+    )
+    parser.add_argument(
+        "--clear-foundationpose-vis",
+        action="store_true",
+        help="Delete foundationpose_vis.mp4 under each episode.",
     )
     return parser.parse_args()
 
@@ -72,6 +78,14 @@ def main() -> None:
     for ep in sorted(episodes):
         removed = clean_episode(ep, targets, args.dry_run)
         total_removed += removed
+        if args.clear_foundationpose_vis:
+            vis_path = ep / "foundationpose_vis.mp4"
+            if vis_path.exists():
+                print(
+                    f"{'[DRY-RUN] ' if args.dry_run else ''}Removing {vis_path}"
+                )
+                if not args.dry_run:
+                    vis_path.unlink()
 
     print(
         f"{'Would remove' if args.dry_run else 'Removed'} {total_removed} folder(s) "
