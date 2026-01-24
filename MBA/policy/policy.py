@@ -26,7 +26,7 @@ class RISE(nn.Module):
         enable_headpose_head = False,
         headpose_dim = 9,
         obj_pose_mode = "delta",
-        enable_both_pose_head = False,
+        enable_both_pose_head = False, # a single head for both object and headpose
     ):
         super().__init__()
         num_obs = 1
@@ -35,7 +35,9 @@ class RISE(nn.Module):
         self.enable_mba = enable_mba
         self.enable_headpose_head = enable_headpose_head
         self.enable_both_pose_head = enable_both_pose_head
-        if not self.enable_both_pose_head: 
+        self.obj_dim = obj_dim
+        self.headpose_dim = headpose_dim
+        if not self.enable_both_pose_head: # if we enable both pose head, we only need one decoder
             self.action_decoder = DiffusionUNetPolicy(action_dim, 
                                                     num_action, 
                                                     num_obs, 
@@ -126,6 +128,10 @@ class RISE(nn.Module):
                         both_cond = torch.cat([current_obj, headpose_cond], dim=-1)
                     both_pred = self.both_pose_decoder.predict_obj(readout, extra_cond=both_cond)
                 outputs["both_pose_pred"] = both_pred
+                if self.obj_dim + self.headpose_dim != both_pred.shape[-1]:
+                    raise ValueError("Both pose pred dimension does not match sum of obj_dim and headpose_dim.")
+                outputs["obj_pred"] = both_pred[..., :self.obj_dim]
+                outputs["headpose_pred"] = both_pred[..., self.obj_dim:self.obj_dim + self.headpose_dim]
                 return outputs
             if self.enable_mba:
                 with torch.no_grad():
