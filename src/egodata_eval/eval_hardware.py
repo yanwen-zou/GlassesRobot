@@ -136,6 +136,7 @@ class EvalHardware:
         steps_to_execute: int = STEPS_TO_EXECUTE,
         i2rt_channel: str = I2RT_SERVER_CHANNEL,
         i2rt_port: int = DEFAULT_ROBOT_PORT,
+        task_name: str = "book",
     ) -> None:
         self.T_robot_base = np.eye(4, dtype=np.float32)
         if base_to_robot_txt:
@@ -150,6 +151,7 @@ class EvalHardware:
         self.i2rt_cmd_duration = i2rt_cmd_duration
         self.i2rt_cmd_steps = i2rt_cmd_steps
         self.steps_to_execute = steps_to_execute
+        self.task_name = task_name
         self.i2rt_server_proc: Optional[mp.Process] = None
         print("[INFO] Initializing Flexiv and gripper...") # First initialize Flexiv, or I2RT comm will go error
         if not rclpy.ok():
@@ -254,7 +256,7 @@ class EvalHardware:
             start_rot = rotation_transform(start_quat[None, :], "quaternion", "matrix").squeeze(0)
             base_obj_rot = pose_robot_ob[:3, :3].astype(np.float32)
             open_width = getattr(self.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
-            open_thresh = GRIP_OPEN_THRESH
+            open_thresh = GRIP_OPEN_THRESH.get(self.task_name, GRIP_OPEN_THRESH["book"])
             for i in range(robot_rel_pts.shape[0]):
                 xyz = start_xyz + robot_rel_pts[i]
                 step_rot = pose_seq_robot[1 + i, :3, :3].astype(np.float32)

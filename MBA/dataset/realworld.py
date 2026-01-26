@@ -18,6 +18,10 @@ try:
     from ..utils.transformation import xyz_rot_transform
 except:
     from utils.transformation import xyz_rot_transform
+try:
+    from egodata_eval.eval_constant import BASE_CLOUD_X_MIN, BASE_CLOUD_Y_MAX, BASE_CLOUD_Y_MIN
+except:
+    from src.egodata_eval.eval_constant import BASE_CLOUD_X_MIN, BASE_CLOUD_Y_MAX, BASE_CLOUD_Y_MIN
 # Default rotation noise (radians) applied to cam_to_base when requested.
 CAM_TO_BASE_ROT_NOISE_STD_DEFAULT = np.deg2rad(0)
 
@@ -89,6 +93,7 @@ class RealWorldDataset(Dataset):
         self.seq_ids = [] # one sequence = one episode
         if self.with_obj_action:
             self.obj_frame_ids = []
+        self.seq_obj_poses = {}
         self.seq_intrinsics = {}
         self.seq_camera_extrinsics = {}
         self.seq_ref_frame = {}
@@ -121,12 +126,15 @@ class RealWorldDataset(Dataset):
             cam_K = cam_K.reshape(3, 3)
             self.seq_intrinsics[demo] = cam_K
 
+            head_pos_file = os.path.join(demo_path, "head_pos.txt")
             head_pos_dir = os.path.join(demo_path, "head_pos")
-            if os.path.isdir(head_pos_dir):
+            if os.path.isfile(head_pos_file):
+                extr_map = self._load_camera_extrinsics_from_dir(head_pos_file, head_to_zed_path)
+            elif os.path.isdir(head_pos_dir):
                 extr_map = self._load_camera_extrinsics_from_dir(head_pos_dir, head_to_zed_path)
             else:
                 extr_map = {}
-                warnings.warn(f"[RealWorldDataset] Missing head_pos directory in {demo_path}; using identity extrinsics.")
+                warnings.warn(f"[RealWorldDataset] Missing head_pos.txt or head_pos dir in {demo_path}; using identity extrinsics.")
             self.seq_camera_extrinsics[demo] = extr_map
 
             cam_to_base_map = self._load_cam_to_base(demo_path, frame_ids, extr_map)
@@ -160,6 +168,8 @@ class RealWorldDataset(Dataset):
             self.seq_ids += [demo] * len(obs_frame_ids_list)
             if self.with_obj_action:
                 self.obj_frame_ids += obj_frame_ids_list
+                obj_map = self._load_obj_pose_map(demo_path, frame_ids)
+                self.seq_obj_poses[demo] = obj_map
 
         if len(self.data_paths) == 0:
             raise RuntimeError(f"No valid samples constructed from {self.data_path}.")
@@ -189,7 +199,7 @@ class RealWorldDataset(Dataset):
         headpose_list[:, :3] = (headpose_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         return headpose_list
 
-    def _load_camera_extrinsics_from_dir(self, directory, head_to_zed_path):
+    def _load_camera_extrinsics_from_dir(self, path, head_to_zed_path):
         # Load head to zed transformation(from calibration)
         def _load_head_zed(path_str: str) -> np.ndarray:
             if not os.path.exists(path_str):
@@ -210,55 +220,111 @@ class RealWorldDataset(Dataset):
         T_head_zed = _load_head_zed(head_to_zed_path)
         
         extr_map = {}
-        files = [f for f in os.listdir(directory) if f.lower().endswith(".txt")]
-        if not files:
-            warnings.warn(f"[RealWorldDataset] No extrinsic files found in {directory}; using identity.")
+        if not os.path.exists(path):
+            warnings.warn(f"[RealWorldDataset] No extrinsic file found at {path}; using identity.")
             return extr_map
 
-        def sort_key(name):
-            stem = os.path.splitext(name)[0]
-            try:
-                return int(stem)
-            except ValueError:
-                return stem
+        if os.path.isdir(path):
+            files = [f for f in os.listdir(path) if f.lower().endswith(".txt")]
+            if not files:
+                warnings.warn(f"[RealWorldDataset] No extrinsic files found in {path}; using identity.")
+                return extr_map
 
-        for fname in sorted(files, key=sort_key):
-            path = os.path.join(directory, fname)
-            values = np.loadtxt(path).astype(np.float32)
-            if values.ndim == 1:
-                if values.size == 16:
-                    mat = values.reshape(4, 4)
-                elif values.size == 12:
-                    mat = np.vstack([values.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
-                elif values.size == 7:
-                    x, y, z, qx, qy, qz, qw = values
-                    mat = np.eye(4, dtype=np.float32)
-                    mat[:3, 3] = np.array([x, y, z], dtype=np.float32)
-                    q = np.array([qx, qy, qz, qw], dtype=np.float32)
-                    norm = np.linalg.norm(q)
-                    if norm < 1e-8:
-                        raise ValueError(f"Quaternion norm too small in {path}")
-                    q /= norm
-                    qx, qy, qz, qw = q
-                    mat[:3, :3] = np.array(
-                        [
-                            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
-                            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
-                            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
-                        ],
-                        dtype=np.float32,
-                    )
+            def sort_key(name):
+                stem = os.path.splitext(name)[0]
+                try:
+                    return int(stem)
+                except ValueError:
+                    return stem
+
+            for fname in sorted(files, key=sort_key):
+                file_path = os.path.join(path, fname)
+                values = np.loadtxt(file_path).astype(np.float32)
+                if values.ndim == 1:
+                    if values.size == 16:
+                        mat = values.reshape(4, 4)
+                    elif values.size == 12:
+                        mat = np.vstack([values.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
+                    elif values.size == 7:
+                        x, y, z, qx, qy, qz, qw = values
+                        mat = np.eye(4, dtype=np.float32)
+                        mat[:3, 3] = np.array([x, y, z], dtype=np.float32)
+                        q = np.array([qx, qy, qz, qw], dtype=np.float32)
+                        norm = np.linalg.norm(q)
+                        if norm < 1e-8:
+                            raise ValueError(f"Quaternion norm too small in {file_path}")
+                        q /= norm
+                        qx, qy, qz, qw = q
+                        mat[:3, :3] = np.array(
+                            [
+                                [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                                [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                                [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+                            ],
+                            dtype=np.float32,
+                        )
+                    else:
+                        raise ValueError(f"Invalid extrinsic vector length {values.size} in {file_path}")
                 else:
-                    raise ValueError(f"Invalid extrinsic vector length {values.size} in {path}")
+                    mat = values
+                if mat.shape == (3, 4):
+                    mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
+                if mat.shape != (4, 4):
+                    raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {file_path}")
+
+                key = sort_key(fname)
+                extr_map[key] = mat.astype(np.float32) @ T_head_zed
+            return extr_map
+
+        values = np.loadtxt(path).astype(np.float32)
+        if values.ndim == 1:
+            values = values[None, :]
+
+        def _row_to_matrix(row: np.ndarray, row_path: str) -> np.ndarray:
+            if row.size == 16:
+                mat = row.reshape(4, 4)
+            elif row.size == 12:
+                mat = np.vstack([row.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
+            elif row.size == 7:
+                x, y, z, qx, qy, qz, qw = row
+                mat = np.eye(4, dtype=np.float32)
+                mat[:3, 3] = np.array([x, y, z], dtype=np.float32)
+                q = np.array([qx, qy, qz, qw], dtype=np.float32)
+                norm = np.linalg.norm(q)
+                if norm < 1e-8:
+                    raise ValueError(f"Quaternion norm too small in {row_path}")
+                q /= norm
+                qx, qy, qz, qw = q
+                mat[:3, :3] = np.array(
+                    [
+                        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+                        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+                        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+                    ],
+                    dtype=np.float32,
+                )
             else:
-                mat = values
+                raise ValueError(f"Invalid extrinsic vector length {row.size} in {row_path}")
             if mat.shape == (3, 4):
                 mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
             if mat.shape != (4, 4):
-                raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {path}")
+                raise ValueError(f"Invalid extrinsic matrix shape {mat.shape} in {row_path}")
+            return mat.astype(np.float32)
 
-            key = sort_key(fname)
-            extr_map[key] = mat.astype(np.float32) @ T_head_zed # world_zed = world_head * head_zed
+        for row_idx, row in enumerate(values):
+            if np.isnan(row).any():
+                warnings.warn(f"[RealWorldDataset] Skipping NaN extrinsic row {row_idx} in {path}.")
+                continue
+            if row.size in (8, 13, 17):
+                fid = int(round(row[0]))
+                data = row[1:]
+            elif row.size in (7, 12, 16):
+                fid = row_idx
+                data = row
+            else:
+                raise ValueError(f"Invalid extrinsic row length {row.size} in {path}")
+            mat = _row_to_matrix(data, path)
+            extr_map[int(fid)] = mat @ T_head_zed # world_zed = world_head * head_zed
         return extr_map
 
     def _load_cam_to_base(self, demo_path, frame_ids, extr_map):
@@ -342,6 +408,39 @@ class RealWorldDataset(Dataset):
                 cam_to_base_map[key] = T_noisy
         return cam_to_base_map
 
+    def _load_obj_pose_map(self, demo_path: str, frame_ids: list[str]) -> dict[str, np.ndarray]:
+        """Load object poses for a sequence from ob_in_cam.npy (preferred) or per-frame files."""
+        obj_map: dict[str, np.ndarray] = {}
+        obj_file = os.path.join(demo_path, "ob_in_cam.npy")
+        if os.path.exists(obj_file):
+            data = np.load(obj_file).astype(np.float32)
+            if data.ndim != 3 or data.shape[1:] != (4, 4):
+                raise ValueError(f"Invalid ob_in_cam.npy shape {data.shape} in {demo_path}; expected (N, 4, 4)")
+            mats = data
+            for idx, mat in enumerate(mats):
+                if idx >= len(frame_ids):
+                    break
+                obj_map[frame_ids[idx]] = mat
+            if len(mats) != len(frame_ids):
+                warnings.warn(
+                    f"[RealWorldDataset] ob_in_cam.npy has {len(mats)} entries but {len(frame_ids)} frames in {demo_path}."
+                )
+            return obj_map
+
+        obj_dir = os.path.join(demo_path, "ob_in_cam")
+        if not os.path.isdir(obj_dir):
+            return obj_map
+        for fid in frame_ids:
+            pose_path = os.path.join(obj_dir, f"{fid}.txt")
+            if not os.path.exists(pose_path):
+                continue
+            pose_values = np.loadtxt(pose_path).astype(np.float32)
+            pose_mat = pose_values
+            if pose_mat.shape != (4, 4):
+                raise ValueError(f"Invalid SE3 matrix shape {pose_mat.shape} in {pose_path}")
+            obj_map[fid] = pose_mat
+        return obj_map
+
     def get_camera_extrinsic(self, seq_id, frame_idx, warn_prefix="dataset"):
         extr_map = self.seq_camera_extrinsics.get(seq_id, {})
         if not extr_map:
@@ -391,8 +490,8 @@ class RealWorldDataset(Dataset):
         # directories
         color_dir = os.path.join(data_path, "rgb")
         depth_dir = os.path.join(data_path, "depth")
-        obj_dir = os.path.join(data_path, "ob_in_cam")
-
+        masks_dir = os.path.join(data_path, "masks")
+        mask_hand_dir = os.path.join(data_path, "mask_hand")
         cam_intrinsic = self.seq_intrinsics[seq_id]
 
         # create color jitter
@@ -428,12 +527,47 @@ class RealWorldDataset(Dataset):
 
         # point clouds
         clouds = []
+
+        def _load_mask(dir_path: str, frame_id_str: str) -> np.ndarray | None:
+            p = os.path.join(dir_path, f"{frame_id_str}.png")
+            if not os.path.exists(p):
+                return None
+            try:
+                m = Image.open(p).convert("L")
+            except Exception:
+                return None
+            return (np.array(m) > 0)
+
+        def _resize_mask(mask: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarray:
+            h, w = shape_hw
+            if mask.shape == (h, w):
+                return mask.astype(bool)
+            img = Image.fromarray(mask.astype(np.uint8) * 255)
+            img = img.resize((w, h), resample=Image.NEAREST)
+            return (np.array(img) > 0)
+
         for i, frame_id in enumerate(obs_frame_ids):
             T_base_cam = self._get_cam_to_base(seq_id, frame_id)
+            depths_frame = depths_list[i]
+            # Remove hand pixels, but keep object pixels even if they overlap with the hand mask.
+            hand_mask = _load_mask(mask_hand_dir, frame_id) if os.path.isdir(mask_hand_dir) else None
+            obj_mask = _load_mask(masks_dir, frame_id) if os.path.isdir(masks_dir) else None
+            if hand_mask is not None:
+                hand_mask = _resize_mask(hand_mask, depths_frame.shape)
+                if obj_mask is not None:
+                    obj_mask = _resize_mask(obj_mask, depths_frame.shape)
+                remove = hand_mask if obj_mask is None else (hand_mask & (~obj_mask))
+                if np.any(remove):
+                    depths_frame = depths_frame.copy()
+                    depths_frame[remove] = 0.0
             points_base, colors = self.load_point_cloud(
-                colors_list[i], depths_list[i], cam_intrinsic, depth_scale=1000.0, T_base_cam=T_base_cam
+                colors_list[i], depths_frame, cam_intrinsic, depth_scale=1000.0, T_base_cam=T_base_cam
             )
-            keep = (points_base[:, 0] >= -0.1) & (points_base[:, 1] <= 0.32) & (points_base[:, 1] >= -0.75)
+            keep = (
+                (points_base[:, 0] >= BASE_CLOUD_X_MIN)
+                & (points_base[:, 1] <= BASE_CLOUD_Y_MAX)
+                & (points_base[:, 1] >= BASE_CLOUD_Y_MIN)
+            )
             points_base = points_base[keep]
             colors = colors[keep]
             # apply imagenet normalization
@@ -462,15 +596,19 @@ class RealWorldDataset(Dataset):
 
         if self.with_obj_action:
             def _load_obj_pose(frame_id_str):
-                pose_path = os.path.join(obj_dir, "{}.txt".format(frame_id_str))
-                if not os.path.exists(pose_path):
-                    raise FileNotFoundError(f"Object pose file missing: {pose_path}")
-                pose_values = np.loadtxt(pose_path).astype(np.float32)
-                
-                pose_mat = pose_values
-
-                if pose_mat.shape != (4, 4):
-                    raise ValueError(f"Invalid SE3 matrix shape {pose_mat.shape} in {pose_path}")
+                obj_map = self.seq_obj_poses.get(seq_id, {})
+                if frame_id_str in obj_map:
+                    pose_mat = obj_map[frame_id_str]
+                else:
+                    pose_path = os.path.join(data_path, "ob_in_cam", "{}.txt".format(frame_id_str))
+                    if not os.path.exists(pose_path):
+                        raise FileNotFoundError(
+                            f"Object pose missing for frame {frame_id_str} in seq {seq_id}; expected ob_in_cam.npy or txt"
+                        )
+                    pose_values = np.loadtxt(pose_path).astype(np.float32)
+                    pose_mat = pose_values
+                    if pose_mat.shape != (4, 4):
+                        raise ValueError(f"Invalid SE3 matrix shape {pose_mat.shape} in {pose_path}")
                 T_base_cam = self._get_cam_to_base(seq_id, frame_id_str)
                 pose_base = T_base_cam @ pose_mat
                 return xyz_rot_transform(pose_base, from_rep="matrix", to_rep="rotation_6d")

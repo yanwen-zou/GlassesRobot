@@ -11,6 +11,7 @@ import MinkowskiEngine as ME  # type: ignore
 from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot  # type: ignore
+from egodata_eval.eval_constant import BASE_CLOUD_X_MIN, BASE_CLOUD_Y_MAX, BASE_CLOUD_Y_MIN
 from egodata_eval.eval_utils import _denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient  # type: ignore
 
 
@@ -82,6 +83,13 @@ class TrajectoryPredictor:
         # Remove any rows with non-finite values to avoid NaNs in voxelization
         finite_mask = np.isfinite(cloud).all(axis=1)
         cloud = cloud[finite_mask]
+        if T_base_cam is not None:
+            keep = (
+                (cloud[:, 0] >= BASE_CLOUD_X_MIN)
+                & (cloud[:, 1] <= BASE_CLOUD_Y_MAX)
+                & (cloud[:, 1] >= BASE_CLOUD_Y_MIN)
+            )
+            cloud = cloud[keep]
 
         coords = np.ascontiguousarray((cloud[:, :3] / self.voxel_size).astype(np.int32))
         feats = cloud.astype(np.float32)

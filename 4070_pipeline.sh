@@ -16,9 +16,14 @@ DEFAULT_DATA_ROOT="${PROJECT_ROOT}/data"
 DATA_ROOT="$DEFAULT_DATA_ROOT"
 SCALE=0.75
 ZED_INTR_READER="${PROJECT_ROOT}/scripts_data_processing/zed_intr_reader.py"
+HAND_MASK_SCRIPT="${PROJECT_ROOT}/scripts_data_processing/grounded_sam_hand_masks.py"
 
 if [ ! -f "$ZED_INTR_READER" ]; then
   echo "❌ Missing ZED intrinsics reader: $ZED_INTR_READER" >&2
+  exit 1
+fi
+if [ ! -f "$HAND_MASK_SCRIPT" ]; then
+  echo "❌ Missing hand mask script: $HAND_MASK_SCRIPT" >&2
   exit 1
 fi
 
@@ -32,7 +37,7 @@ limit processing to those recordings.
 EOF
 }
 
-run_glasses() {
+run_glasses() {\
   conda run --no-capture-output -n glasses "$@" 2> >(sed -e '/zstandard could not be imported/d' -e '/Install zstandard Python bindings/d' >&2)
 }
 
@@ -169,6 +174,10 @@ clear_episode_dirs() {
 if [ "$CLEAR_EPISODE" -eq 1 ]; then
   echo "🧹 Clearing episode directories (keep: head_pos, zed_left, zed_right)..."
   for episode in "${EPISODES[@]}"; do
+    if [[ "$episode" != 2026* ]]; then
+      echo "  ⏭️  Skip non-2026 episode: $episode"
+      continue
+    fi
     episode_dir="${DATA_ROOT}/${episode}"
     clear_episode_dirs "$episode_dir"
   done
@@ -204,14 +213,11 @@ write_intrinsics() {
 }
 
 fill_head_pose_nans() {
-  local head_dir="$1"
-  if [ ! -d "$head_dir" ]; then
+  local head_path="$1"
+  if [ ! -f "$head_path" ]; then
     return
   fi
-  if ! find "$head_dir" -maxdepth 1 -type f -name '*.txt' -print -quit >/dev/null; then
-    return
-  fi
-  conda run --no-capture-output -n glasses python - "$head_dir" 2>&1 <<'PY' | sed \
+  conda run --no-capture-output -n glasses python - "$head_path" 2>&1 <<'PY' | sed \
     -e '/zstandard could not be imported/d' \
     -e '/Install zstandard Python bindings/d' \
     -e '/CUDA environment configured/d' \
@@ -220,31 +226,19 @@ fill_head_pose_nans() {
     -e '/^Built on Thu_Mar_28_02:18:24_PDT_2024/d' \
     -e '/^Cuda compilation tools, release 12.4, V12.4.131/d' \
     -e '/^Build cuda_12.4.r12.4\/compiler.34097967_0/d'
-import os
 import sys
 import numpy as np
 
-head_dir = sys.argv[1]
-files = [f for f in os.listdir(head_dir) if f.lower().endswith('.txt')]
-if not files:
+head_path = sys.argv[1]
+rows = np.loadtxt(head_path, dtype=np.float32)
+if rows.size == 0:
     sys.exit(0)
-
-def sort_key(name):
-    stem = os.path.splitext(name)[0]
-    try:
-        return int(stem)
-    except ValueError:
-        return stem
-
-files.sort(key=sort_key)
-arrays = []
-for fname in files:
-    path = os.path.join(head_dir, fname)
-    data = np.loadtxt(path, dtype=np.float32)
-    arrays.append(np.atleast_1d(data))
+if rows.ndim == 1:
+    rows = rows[None, :]
+arrays = [row.copy() for row in rows]
 shapes = {arr.shape for arr in arrays}
 if len(shapes) != 1:
-    print(f"[head_pos] ⚠️ inconsistent shapes {shapes} in {head_dir}", file=sys.stderr)
+    print(f"[head_pos] ⚠️ inconsistent shapes {shapes} in {head_path}", file=sys.stderr)
     sys.exit(1)
 modified = False
 for idx in range(len(arrays) - 2, -1, -1):
@@ -270,9 +264,8 @@ if remaining:
     modified = True
 if not modified:
     sys.exit(0)
-for fname, arr in zip(files, arrays):
-    np.savetxt(os.path.join(head_dir, fname), np.atleast_2d(arr), fmt='%.6f')
-print(f"[head_pos] ✅ filled NaNs in {head_dir} ({len(files)} frames)")
+np.savetxt(head_path, np.stack(arrays, axis=0), fmt='%.6f')
+print(f"[head_pos] ✅ filled NaNs in {head_path} ({len(arrays)} rows)")
 PY
 }
 
@@ -282,12 +275,10 @@ echo "🧼 Cleaning head pose NaNs (using next-frame fill)..."
 for episode in "${EPISODES[@]}"; do
   episode_dir="${DATA_ROOT}/${episode}"
   shopt -s nullglob
-  head_dirs=("${episode_dir}/head_pos" "${episode_dir}"/head_pos_* "${episode_dir}"/glasses_pose)
-  for head_dir in "${head_dirs[@]}"; do
-    if [ -d "$head_dir" ]; then
-      fill_head_pose_nans "$head_dir"
-    fi
-  done
+  head_path="${episode_dir}/head_pos.txt"
+  if [ -f "$head_path" ]; then
+    fill_head_pose_nans "$head_path"
+  fi
   shopt -u nullglob
 done
 
@@ -370,6 +361,23 @@ prepare_frames() {
   READY_EPISODES+=("$episode")
 }
 
+generate_hand_masks() {
+  local episode="$1"
+  local episode_dir="${DATA_ROOT}/${episode}"
+  local rgb_dir="${episode_dir}/rgb"
+  local masks_dir="${episode_dir}/mask_hand"
+  if [ ! -d "$rgb_dir" ]; then
+    echo "⚠️  Missing rgb directory for $episode; skipping hand masks." >&2
+    return
+  fi
+  if [ -d "$masks_dir" ] && find "$masks_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Hand masks already exist for $episode; skipping."
+    return
+  fi
+  echo "🖐️  Generating hand masks for episode: $episode"
+  run_glasses python "$HAND_MASK_SCRIPT" --data-root "$episode_dir"
+}
+
 for episode in "${EPISODES[@]}"; do
   prepare_frames "$episode"
 done
@@ -377,6 +385,95 @@ done
 if [ "${#READY_EPISODES[@]}" -eq 0 ]; then
   echo "⚠️  No episodes have RGB frames prepared. Aborting subsequent steps." >&2
   exit 1
+fi
+
+for episode in "${READY_EPISODES[@]}"; do
+  generate_hand_masks "$episode"
+done
+
+# === Robot arm masks (interactive click prompt) merged into mask_hand ===
+declare -a ARM_EPISODES=()
+for episode in "${READY_EPISODES[@]}"; do
+  episode_dir="${DATA_ROOT}/${episode}"
+  hand_dir="${episode_dir}/mask_hand"
+  if [ ! -d "$hand_dir" ]; then
+    echo "⚠️  mask_hand missing for $episode; skipping robot arm mask." >&2
+    continue
+  fi
+  ARM_EPISODES+=("$episode")
+done
+
+if [ "${#ARM_EPISODES[@]}" -gt 0 ]; then
+  ARM_TEMP_ROOT=$(mktemp -d)
+  cleanup_arm() {
+    rm -rf "$ARM_TEMP_ROOT"
+  }
+  trap cleanup_arm EXIT
+
+  for episode in "${ARM_EPISODES[@]}"; do
+    episode_dir="${DATA_ROOT}/${episode}"
+    temp_episode="${ARM_TEMP_ROOT}/${episode}"
+    mkdir -p "$temp_episode"
+    if [ -d "${episode_dir}/jpg" ]; then
+      ln -s "${episode_dir}/jpg" "${temp_episode}/jpg"
+    elif [ -d "${episode_dir}/color" ]; then
+      ln -s "${episode_dir}/color" "${temp_episode}/color"
+    else
+      echo "⚠️  Missing jpg/color for $episode; skipping robot arm mask." >&2
+    fi
+  done
+
+  echo "=============================="
+  echo "🦾 Launching SAM (click prompt) for robot arm masks..."
+  run_glasses python -u \
+    "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
+    --data_root "$ARM_TEMP_ROOT"
+
+  # Merge robot arm masks into mask_hand
+  for episode in "${ARM_EPISODES[@]}"; do
+    episode_dir="${DATA_ROOT}/${episode}"
+    temp_masks="${ARM_TEMP_ROOT}/${episode}/masks"
+    hand_dir="${episode_dir}/mask_hand"
+    if [ ! -d "$temp_masks" ]; then
+      echo "⚠️  No robot arm masks for $episode; skipping merge."
+      continue
+    fi
+    run_glasses python - "$temp_masks" "$hand_dir" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+from PIL import Image
+
+temp_masks = Path(sys.argv[1])
+hand_dir = Path(sys.argv[2])
+hand_dir.mkdir(parents=True, exist_ok=True)
+
+def read_mask(path: Path):
+    arr = np.array(Image.open(path).convert("L"), dtype=np.uint8)
+    return arr
+
+def write_mask(path: Path, arr: np.ndarray):
+    Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
+
+for mask_path in sorted(temp_masks.glob("*.png")):
+    out_path = hand_dir / mask_path.name
+    arm = read_mask(mask_path)
+    if out_path.exists():
+        hand = read_mask(out_path)
+        if hand.shape != arm.shape:
+            # Prefer arm shape; resize hand if needed
+            hand = np.array(Image.fromarray(hand).resize((arm.shape[1], arm.shape[0])))
+        merged = np.maximum(hand, arm)
+    else:
+        merged = arm
+    write_mask(out_path, merged)
+PY
+  done
+
+  cleanup_arm
+  trap - EXIT
+else
+  echo "⏭️  No episodes eligible for robot arm masks; skipping."
 fi
 
 declare -a SAM_EPISODES=()

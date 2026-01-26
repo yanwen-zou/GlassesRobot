@@ -65,8 +65,8 @@ def main() -> None:
     debug_dir = Path(args.debug_dir)
     os.system(f"rm -rf {debug_dir}/* && mkdir -p {debug_dir}/track_vis")
 
-    ob_in_cam_dir = demo_dir / "ob_in_cam"
-    ob_in_cam_dir.mkdir(parents=True, exist_ok=True)
+    ob_in_cam_path = demo_dir / "ob_in_cam.npy"
+    poses: list[np.ndarray] = []
 
     to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
     bbox = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
@@ -112,7 +112,7 @@ def main() -> None:
         else:
             pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
 
-        np.savetxt(ob_in_cam_dir / f"{reader.id_strs[i]}.txt", pose.reshape(4, 4))
+        poses.append(pose.reshape(4, 4).astype(np.float32))
 
         if args.debug >= 1:
             center_pose = pose @ np.linalg.inv(to_origin)
@@ -127,6 +127,9 @@ def main() -> None:
             imageio.imwrite(debug_dir / f"track_vis/{reader.id_strs[i]}.png", vis)
 
     video_writer.release()
+    if poses:
+        np.save(ob_in_cam_path, np.stack(poses, axis=0))
+        logging.info("Saved object poses to %s", ob_in_cam_path)
     print(f"[OK] 视频保存至: {video_path}")
 
 

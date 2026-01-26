@@ -330,11 +330,58 @@ def load_tcp_to_cam(path: Path) -> np.ndarray:
     return mat
 
 
-def load_head_cam_poses(head_dir: Path, tcp_to_cam: np.ndarray) -> Dict[int, tuple[np.ndarray, np.ndarray]]:
-    """Load head_pos tcp poses and convert to cam poses (world->cam).
+def _pose_from_row(vals: np.ndarray, label: str) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    if vals.size < 7:
+        print(f"[WARN] Invalid head_pos contents in {label}; expected tx ty tz qx qy qz qw.")
+        return None
+    t = vals[:3]
+    qx, qy, qz, qw = vals[3:7]
+    R_tcp = quat_to_rot(qx, qy, qz, qw)
+    T_tcp = np.eye(4, dtype=np.float64)
+    T_tcp[:3, :3] = R_tcp
+    T_tcp[:3, 3] = t
+    return T_tcp.astype(np.float64)
 
+
+def load_head_cam_poses_from_txt(
+    head_txt: Path, tcp_to_cam: np.ndarray
+) -> Dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Load head_pos from a txt file with leading frame index.
+
+    Expected row format: frame_id tx ty tz qx qy qz qw [extra...]
     Returns dict: frame_id -> (T_world_tcp, T_world_cam)
     """
+    if not head_txt.exists():
+        raise FileNotFoundError(f"head_pos txt not found: {head_txt}")
+    poses: Dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    with head_txt.open("r") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+            tokens = raw.split()
+            try:
+                fid = int(round(float(tokens[0])))
+            except ValueError:
+                continue
+            if len(tokens) < 8:
+                print(f"[WARN] Invalid head_pos row (need >=8 cols) in {head_txt}: {raw}")
+                continue
+            vals = np.array([float(x) for x in tokens[1:8]], dtype=np.float64)
+            T_tcp = _pose_from_row(vals, f"{head_txt}:{fid}")
+            if T_tcp is None:
+                continue
+            T_cam = T_tcp @ tcp_to_cam
+            poses[fid] = (T_tcp, T_cam)
+    if not poses:
+        raise RuntimeError(f"No valid head_pos poses loaded from {head_txt}")
+    return poses
+
+
+def load_head_cam_poses_from_dir(
+    head_dir: Path, tcp_to_cam: np.ndarray
+) -> Dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Load head_pos tcp poses from per-frame files and convert to cam poses (world->cam)."""
     if not head_dir.exists():
         raise FileNotFoundError(f"head_pos directory not found: {head_dir}")
     poses: Dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -344,15 +391,9 @@ def load_head_cam_poses(head_dir: Path, tcp_to_cam: np.ndarray) -> Dict[int, tup
         except ValueError:
             continue
         vals = np.loadtxt(path, dtype=np.float64).reshape(-1)
-        if vals.size < 7:
-            print(f"[WARN] Invalid head_pos contents in {path}; expected tx ty tz qx qy qz qw.")
+        T_tcp = _pose_from_row(vals, str(path))
+        if T_tcp is None:
             continue
-        t = vals[:3]
-        qx, qy, qz, qw = vals[3:7]
-        R_tcp = quat_to_rot(qx, qy, qz, qw)
-        T_tcp = np.eye(4, dtype=np.float64)
-        T_tcp[:3, :3] = R_tcp
-        T_tcp[:3, 3] = t
         T_cam = T_tcp @ tcp_to_cam  # world->cam
         poses[fid] = (T_tcp.astype(np.float64), T_cam.astype(np.float64))
     if not poses:
@@ -373,6 +414,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="Path to ball_centers.txt.",
+    )
+    parser.add_argument(
+        "--head-pos-txt",
+        type=Path,
+        default=None,
+        help="Path to head_pos.txt (first column is frame index). Default: <ball-centers-dir>/head_pos.txt",
     )
     parser.add_argument(
         "--head-pos-dir",
@@ -411,9 +458,21 @@ def main() -> None:
     if not centers:
         raise RuntimeError(f"No ball centers loaded from {centers_path}")
 
-    head_dir = args.head_pos_dir or (centers_path.parent / "head_pos")
     tcp_to_cam = load_tcp_to_cam(args.tcp_to_zed)
-    head_cam_poses = load_head_cam_poses(head_dir, tcp_to_cam)
+
+    head_txt = args.head_pos_txt or (centers_path.parent / "head_pos.txt")
+    head_dir = args.head_pos_dir or (centers_path.parent / "head_pos")
+
+    head_cam_poses: Optional[Dict[int, tuple[np.ndarray, np.ndarray]]] = None
+    if head_txt.exists():
+        head_cam_poses = load_head_cam_poses_from_txt(head_txt, tcp_to_cam)
+        print(f"[INFO] Loaded head_pos from txt: {head_txt}")
+    elif head_dir.exists():
+        head_cam_poses = load_head_cam_poses_from_dir(head_dir, tcp_to_cam)
+        print(f"[INFO] Loaded head_pos from dir: {head_dir}")
+    else:
+        print("[WARN] No head_pos txt/dir found; tracking disabled.")
+        head_cam_poses = None
 
     transforms = compute_cam_to_base_transforms(centers, head_cam_poses)
     if not transforms:

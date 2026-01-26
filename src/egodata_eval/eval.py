@@ -23,6 +23,9 @@ from egodata_eval.eval_utils import (
     move_i2rt_to_init_angles,
     save_mask,
     _build_pose_mats,
+    init_robot_mask_tracker,
+    update_robot_mask_tracker,
+    cleanup_robot_mask_tracker,
 )  # type: ignore
 from egodata_eval.eval_hardware import EvalHardware
 
@@ -38,6 +41,7 @@ from egodata_eval.eval_constant import *
 
 last_overlay = None
 
+
 def _run_depth_traj(state: dict, ctx: dict, depth_est: DepthEstimator, traj_pred: TrajectoryPredictor) -> tuple[np.ndarray, dict | None]:
     frame = state["frame"]
     frame_right = state["frame_right"]
@@ -48,6 +52,10 @@ def _run_depth_traj(state: dict, ctx: dict, depth_est: DepthEstimator, traj_pred
     depth_m = ctx["last_depth_m"]
     if depth_m is None:
         return frame, None
+    if ctx.get("robot_mask") is not None:
+        depth_m = depth_m.copy()
+        depth_m[ctx["robot_mask"] > 0] = 0.0
+        ctx["last_depth_m"] = depth_m
 
     if (not ctx["pose_ready"]) and (ctx["last_mask"] is not None):
         print("[INFO] Initialize Pose Estimator")
@@ -93,7 +101,7 @@ def main():
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--num_action", type=int, default=10)
-    ap.add_argument("--mesh-name", type=str, default=DEFAULT_MESH_NAME, help="Name of mesh folder under data/ containing mesh.obj.")
+    ap.add_argument("--task", type=str, choices=TASK_CHOICES, default="book", help="Task name (also used as mesh-name).")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
@@ -115,7 +123,7 @@ def main():
     calib_dir.mkdir(parents=True, exist_ok=True)
     T_base_cam0 = None
 
-    exec_ctx = EvalHardware()
+    exec_ctx = EvalHardware(task_name=args.task)
     cam = exec_ctx.camera
     depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=cam)
     K = depth_est.K.astype(np.float32)
@@ -123,7 +131,7 @@ def main():
     T_base_cam0 = calibrate_from_three_balls(
         cam,
         depth_est,
-        move_robot_fn=lambda: move_i2rt_to_init_angles(exec_ctx.i2rt_robot),
+        move_robot_fn=lambda: move_i2rt_to_init_angles(exec_ctx.i2rt_robot, task_name=args.task),
         centroid_log_dir=out_dir,
     )
     exec_ctx.i2rt_current_q = exec_ctx.i2rt_robot.current_joint_pos()
@@ -149,6 +157,10 @@ def main():
     last_size = (0, 0)
     click_state = {"pending": False, "pt": (0, 0)}
     mask = None
+    robot_clicks: list[tuple[float, float]] = []
+    robot_prompt_active = True
+    robot_mask = None
+    robot_tracker = None
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN and last_frame_full is not None:
@@ -157,14 +169,19 @@ def main():
             sy = orig_h / disp_h
             x_orig = float(x) * sx
             y_orig = float(y) * sy
-            click_state["pending"] = True
-            click_state["pt"] = (x_orig, y_orig)
+            if robot_prompt_active:
+                robot_clicks.append((x_orig, y_orig))
+                print(f"[INFO] Robot click point added: ({x_orig:.1f}, {y_orig:.1f})")
+            else:
+                click_state["pending"] = True
+                click_state["pt"] = (x_orig, y_orig)
 
     cv2.setMouseCallback(win, on_mouse)
 
     depth_enabled = False
     headpose_reader = None
     pose_est = None
+    print("[INFO] Robot mask: click foreground points, press Enter to finish (Esc to skip).")
 
     traj_pred = TrajectoryPredictor(ckpt_path = Path(args.ckpt), 
                                     num_action = args.num_action, 
@@ -175,7 +192,7 @@ def main():
         if not rclpy.ok():
             rclpy.init(args=None)
         headpose_reader = HeadPoseReader(headpose_topic, args.glass_zed, T_base_cam0)
-    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.mesh_name / "mesh.obj"
+    mesh_path = Path(__file__).resolve().parents[2] / "data" / args.task / "mesh.obj"
     if not mesh_path.exists():
         raise FileNotFoundError(f"Mesh not found: {mesh_path}")
     infer_ctx = {
@@ -185,6 +202,7 @@ def main():
         "last_depth_m": None,
         "K": K,
         "mesh_path": mesh_path,
+        "robot_mask": None,
     }
     pose_records: list[dict[str, object]] = []
     executed_poses: list[np.ndarray] = []
@@ -196,6 +214,7 @@ def main():
     frame_idx = 0
     try:
         while True:
+
             stereo = cam.read_stereo()
             if stereo is None:
                 continue
@@ -208,6 +227,12 @@ def main():
             last_frame_full = image_rgb
             last_size = (frame.shape[1], frame.shape[0])
             disp = frame
+
+            if (not robot_prompt_active) and (robot_tracker is not None):
+                tracked_mask = update_robot_mask_tracker(robot_tracker, image_rgb)
+                if tracked_mask is not None:
+                    robot_mask = tracked_mask
+                    infer_ctx["robot_mask"] = robot_mask
 
             if click_state["pending"]:
                 print("[INFO] Enter click_state")
@@ -274,8 +299,7 @@ def main():
                             # print(f"[DEBUG] headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0]*100,3)}")
                             pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
                             # print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
-                            # end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
-                            end_idx = min(pred_tcp_i2rt_rel.shape[0], 7)
+                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
                             exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
                             time.sleep(1.0)  # wait for motion to finish
 
@@ -304,6 +328,23 @@ def main():
             cv2.imshow(win, disp)
 
             key = cv2.waitKey(1) & 0xFF
+            if robot_prompt_active and key in (13, 10):  # Enter
+                if robot_clicks:
+                    try:
+                        robot_mask = click_mask(image_rgb, robot_clicks, labels=[1] * len(robot_clicks), multimask=True)
+                        robot_tracker = init_robot_mask_tracker(image_rgb, robot_mask)
+                        infer_ctx["robot_mask"] = robot_mask
+                        print("[INFO] Robot mask initialized.")
+                    except Exception as e:
+                        cv2.displayStatusBar(win, f"Robot mask error: {e}", 3000)
+                        robot_mask = None
+                else:
+                    print("[INFO] No robot clicks provided; skipping robot mask.")
+                robot_prompt_active = False
+            if robot_prompt_active and key == 27:
+                print("[INFO] Robot mask skipped.")
+                robot_prompt_active = False
+                key = 0
             if interrupted["flag"] or key == ord('q') or key == 27:
                 break
 
@@ -324,6 +365,8 @@ def main():
             headpose_reader.destroy_node()
         if args.enable_headpose_head:
             rclpy.shutdown()
+        if robot_tracker is not None:
+            cleanup_robot_mask_tracker(robot_tracker)
 
         if writer is not None:
             writer.release()

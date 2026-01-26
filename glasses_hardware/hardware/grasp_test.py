@@ -7,7 +7,9 @@ from typing import Literal
 
 import numpy as np
 
-from glasses_hardware.hardware.my_device.robot import FlexivGripper, FlexivRobot, compose_relative_delta
+from glasses_hardware.hardware.my_device.robot import FlexivGripper, FlexivRobot, compose_relative_delta, compose_global_delta
+from MBA.utils.transformation import rotation_transform  # type: ignore
+from egodata_eval.eval_constant import TASK_CHOICES
 
 
 def move_home(robot: FlexivRobot) -> None:
@@ -29,7 +31,7 @@ def move_relative_x(robot: FlexivRobot, distance_m: float) -> None:
         1.0,
         0.0,
     ], dtype=np.float32)  # xyz + rotation6d (two column vectors of rotation matrix)
-    target_pose = compose_relative_delta(current_pose, delta)
+    target_pose = compose_global_delta(current_pose, delta)
     robot.send_tcp_pose(target_pose)
 
 
@@ -42,21 +44,49 @@ def wait_for_command() -> Literal["p", "q"]:
         print("仅接受 'p' 或 'q'，请重新输入。")
 
 
+def _select_delta_xyz(task_name: str) -> tuple[float, float, float]:
+    # Placeholder values per task (update later as needed).
+    task_to_delta = {
+        "teapot": (-0.15, -0.15, 0.1),
+        "book": (-0.05, 0.0, 0.05),
+        "sword": (0.1, -0.05, 0.05),
+        "cup": (-0.3, -0.2, 0.05),
+    }
+    return task_to_delta.get(task_name, (0.05, 0.0, 0.05))
+
+
 def main() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Simple grasp interaction script for Flexiv robot.")
+    ap.add_argument("--task", type=str, choices=TASK_CHOICES, default="book")
+    args = ap.parse_args()
+
     robot = FlexivRobot(home=True)
     gripper = FlexivGripper(robot)
 
     move_home(robot)
     center_pose = robot.get_tcp_pose().copy()
-
-    delta_x = 0.05 # 0.05
-    delta_y = 0 # 0
-    delta_z = 0.05
+    # Rotate center pose +20 degrees CCW about base Z
+    z_rad = np.deg2rad(20.0)
+    Rz = np.array(
+        [
+            [np.cos(z_rad), -np.sin(z_rad), 0.0],
+            [np.sin(z_rad),  np.cos(z_rad), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    rot6d = rotation_transform(Rz[None, ...], "matrix", "rotation_6d").squeeze(0)
+    delta_rot = np.concatenate([np.zeros(3, dtype=np.float32), rot6d], axis=0)
+    delta_x, delta_y, delta_z = _select_delta_xyz(args.task)
 
     pose_forward = center_pose.copy()
     pose_forward[0] += delta_x
     pose_forward[1] += delta_y
     pose_forward[2] += -delta_z
+
+    pose_forward = compose_global_delta(pose_forward, delta_rot)
 
     robot.send_tcp_pose(pose_forward)
     gripper.move(gripper.max_width)

@@ -70,32 +70,53 @@ def _load_extrinsic_from_file(path: str) -> np.ndarray:
     return mat
 
 
+def _load_extrinsic_from_vec(vals: np.ndarray) -> np.ndarray:
+    if vals.ndim != 1:
+        raise ValueError(f"Extrinsic vector must be 1D, got {vals.shape}")
+    if vals.size == 16:
+        mat = vals.reshape(4, 4)
+    elif vals.size == 12:
+        mat = np.vstack([vals.reshape(3, 4), np.array([0, 0, 0, 1], dtype=np.float32)])
+    elif vals.size == 7:
+        mat = xyz_rot_transform(vals, from_rep="quaternion", to_rep="matrix").astype(np.float32)
+    else:
+        raise ValueError(f"Invalid extrinsic vector length {vals.size}")
+    if mat.shape == (3, 4):
+        mat = np.vstack([mat, np.array([0, 0, 0, 1], dtype=np.float32)])
+    if mat.shape != (4, 4):
+        raise ValueError(f"Invalid extrinsic matrix shape {mat.shape}")
+    return mat
+
+
 def load_abs_traj(data_root: str, split: str, seq: str) -> Tuple[List[str], List[np.ndarray]]:
     base = data_root if split == 'all' else os.path.join(data_root, split)
     seq_dir = os.path.join(base, seq)
     ob_dir = os.path.join(seq_dir, 'ob_in_cam')
-    head_dir = os.path.join(seq_dir, 'head_pos')
+    head_path = os.path.join(seq_dir, 'head_pos.txt')
     if not os.path.isdir(ob_dir):
         raise FileNotFoundError(f"Missing ob_in_cam: {ob_dir}")
-    if not os.path.isdir(head_dir):
-        raise FileNotFoundError(f"Missing head_pos: {head_dir}")
+    if not os.path.isfile(head_path):
+        raise FileNotFoundError(f"Missing head_pos.txt: {head_path}")
 
     stems = _sorted_frame_stems(ob_dir)
     # build extrinsic map
     extr_map: Dict[int, np.ndarray] = {}
-    if os.path.isdir(head_dir):
-        for f in os.listdir(head_dir):
-            if not f.lower().endswith('.txt'):
-                continue
-            stem = os.path.splitext(f)[0]
-            try:
-                key = int(stem)
-            except Exception:
-                key = stem
-            try:
-                extr_map[key] = _load_extrinsic_from_file(os.path.join(head_dir, f))
-            except Exception as e:
-                raise FileNotFoundError(f"Failed to load head_pos {f}: {e}")
+    rows = np.loadtxt(head_path, dtype=np.float32)
+    if rows.ndim == 1:
+        rows = rows[None, :]
+    for row_idx, row in enumerate(rows):
+        if row.size in (8, 13, 17):
+            fid = int(round(row[0]))
+            data = row[1:]
+        elif row.size in (7, 12, 16):
+            fid = row_idx
+            data = row
+        else:
+            raise ValueError(f"Invalid head_pos row length {row.size} in {head_path}")
+        try:
+            extr_map[fid] = _load_extrinsic_from_vec(data)
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to load head_pos row {row_idx}: {e}")
 
     ref_key = int(stems[0]) if stems[0].isdigit() else stems[0]
     ref_extr = extr_map.get(ref_key, np.eye(4, dtype=np.float32))

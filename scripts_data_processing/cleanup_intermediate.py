@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 
 
-DEFAULT_TARGETS = ("cam_pose_in_ball", "masks_balls", "jpg", "masked_image","masks")
+DEFAULT_TARGETS = ( "masks_balls", "jpg", "masked_image","masks", "depth_vis")
 
 
 def parse_args() -> argparse.Namespace:

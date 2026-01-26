@@ -95,9 +95,9 @@ def _load_cam_to_base_map(
     head_to_zed: Path,
 ) -> Dict[str, np.ndarray]:
     helper = SimpleNamespace(cam_to_base_rot_noise_std=0.0)
-    head_pos_dir = seq_path / "head_pos"
+    head_pos_path = seq_path / "head_pos.txt"
     extr_map: Dict[int, np.ndarray] = {}
-    extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_dir), str(head_to_zed))
+    extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_path), str(head_to_zed))
     cam_map = RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
     return cam_map
 

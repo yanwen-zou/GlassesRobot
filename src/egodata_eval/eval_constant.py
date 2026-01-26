@@ -2,19 +2,39 @@ from __future__ import annotations
 
 import numpy as np
 
-# I2RT initial joint configuration.
-I2RT_TARGET_DEG = [
-    -0.22918311805232927,
-    51.55474240587147,
-    70.4222425995295,
-    -22.030227222780155,
-    0.8823550045014679,
-    -1.9537860813961072,
-    0.09167324722093173,
-]
-I2RT_TARGET_RAD = np.deg2rad(I2RT_TARGET_DEG).astype(np.float32)
 I2RT_INIT_DURATION = 2.0
 I2RT_INIT_STEPS = 80
+TASK_CHOICES = ("teapot", "book", "sword", "cup")
+TASK_I2RT_TARGET_RAD = {
+    "teapot": np.array([0.1506, 0.6502, 0.9227, -0.2426, -0.0025, -0.0093, 0.0013], dtype=np.float32),
+    "book": np.deg2rad(np.array([
+        -0.2292,
+        51.5547,
+        70.4222,
+        -22.0302,
+        0.8824,
+        -1.9538,
+        0.0917,
+    ], dtype=np.float32)),
+    "sword": np.deg2rad(np.array([
+        -0.2292,
+        51.5547,
+        70.4222,
+        -22.0302,
+        0.8824,
+        -1.9538,
+        0.0917,
+    ], dtype=np.float32)),
+    "cup": np.deg2rad(np.array([
+        -0.2292,
+        51.5547,
+        70.4222,
+        -22.0302,
+        0.8824,
+        -1.9538,
+        0.0917,
+    ], dtype=np.float32)),
+}
 
 # I2RT headpose-following parameters.
 I2RT_MAX_ROT = 0.1
@@ -23,8 +43,13 @@ I2RT_CMD_STEPS = 100
 
 # Trajectory execution parameters.
 UPDATE_INTERVAL = 2
-STEPS_TO_EXECUTE = 3
-GRIP_OPEN_THRESH = 0.8
+STEPS_TO_EXECUTE = 10
+GRIP_OPEN_THRESH = {
+    "teapot": 0.85,
+    "book": 0.7,
+    "sword": 0.7,
+    "cup": 0.7,
+}
 GRIPPER_OPEN_WIDTH_DEFAULT = 0.085
 LOOP_SLEEP_SEC = 0.05
 
@@ -35,6 +60,11 @@ DEPTH_EST_SCALE = 0.75
 VIDEO_FPS = 30
 WIN_CALIB = "Ball Calibration"
 WIN_STREAM = "ZED Stream (click to segment)"
+
+# Base-frame point cloud crop (x, y range).
+BASE_CLOUD_X_MIN = -0.1
+BASE_CLOUD_Y_MAX = 0.32
+BASE_CLOUD_Y_MIN = -0.75
 
 # Default resource paths/topics.
 DEFAULT_POSE_TOPIC = "/glasses_pose"

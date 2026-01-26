@@ -7,7 +7,26 @@ set -u
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
 
-python -u glasses_hardware/hardware/grasp_test.py
+TASK="book"
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task)
+      TASK="$2"
+      shift 2
+      ;;
+    --task=*)
+      TASK="${1#*=}"
+      shift 1
+      ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift 1
+      ;;
+  esac
+done
+
+python -u glasses_hardware/hardware/grasp_test.py --task "$TASK"
 
 python -u src/egodata_record/egodata_record/headpos_listener.py &
 HEADPOS_PID=$!
@@ -19,4 +38,4 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python -u src/egodata_eval/eval.py "$@"
+python -u src/egodata_eval/eval.py --task "$TASK" "${EXTRA_ARGS[@]}"

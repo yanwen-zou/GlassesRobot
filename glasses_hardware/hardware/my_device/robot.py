@@ -54,6 +54,22 @@ def compose_relative_delta(curr_pose7: np.ndarray, delta_xyz_rot6d: np.ndarray) 
     return _mat_to_pose7(T_target)
 
 
+def compose_global_delta(curr_pose7: np.ndarray, delta_xyz_rot6d: np.ndarray) -> np.ndarray:
+    """Compose current tcp pose with a global delta (xyz+rot6d) and return target pose7.
+
+    - curr_pose7: [x,y,z,rw,rx,ry,rz]
+    - delta_xyz_rot6d: [dx,dy,dz,r6d...]
+    """
+    T_curr = _pose7_to_mat(curr_pose7)
+    # xyz_rot_to_mat expects concatenated xyz + rotation representation
+    T_delta = xyz_rot_to_mat(delta_xyz_rot6d.astype(np.float32), rotation_rep='rotation_6d')
+    # Keep translation unchanged; only apply rotation
+    T_delta[:3, 3] = 0.0
+    T_target = T_delta @ T_curr
+    T_target[:3, 3] = T_curr[:3, 3]
+    return _mat_to_pose7(T_target)
+
+
 
 
 class ModeMap:

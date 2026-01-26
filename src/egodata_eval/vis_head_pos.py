@@ -44,24 +44,38 @@ def xyz_quat7_to_mat(vals: np.ndarray) -> np.ndarray:
     return T
 
 
-def load_head_traj(head_dir: str, relative: bool = True, downsample: int = 1) -> Tuple[np.ndarray, List[np.ndarray]]:
-    """Load head poses from directory.
+def load_head_traj(head_path: str, relative: bool = True, downsample: int = 1) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """Load head poses from file or directory.
 
     Returns:
       - Nx3 array of positions (meters)
       - Optional list of rotation matrices for each sample
     """
-    stems = list_sorted_stems(head_dir)
-    if not stems:
-        raise FileNotFoundError(f"No head poses found in {head_dir}")
-
     Ts = []
-    for s in stems:
-        p = os.path.join(head_dir, f"{s}.txt")
-        vals = np.loadtxt(p).astype(np.float64)
-        if vals.ndim != 1 or vals.size != 7:
-            raise ValueError(f"Expect 7 values in {p}, got shape {vals.shape}")
-        Ts.append(xyz_quat7_to_mat(vals))
+    if os.path.isdir(head_path):
+        stems = list_sorted_stems(head_path)
+        if not stems:
+            raise FileNotFoundError(f"No head poses found in {head_path}")
+        for s in stems:
+            p = os.path.join(head_path, f"{s}.txt")
+            vals = np.loadtxt(p).astype(np.float64)
+            if vals.ndim != 1 or vals.size != 7:
+                raise ValueError(f"Expect 7 values in {p}, got shape {vals.shape}")
+            Ts.append(xyz_quat7_to_mat(vals))
+    else:
+        if not os.path.isfile(head_path):
+            raise FileNotFoundError(f"Missing head_pos file: {head_path}")
+        rows = np.loadtxt(head_path).astype(np.float64)
+        if rows.ndim == 1:
+            rows = rows[None, :]
+        for row_idx, row in enumerate(rows):
+            if row.size == 8:
+                data = row[1:]
+            elif row.size == 7:
+                data = row
+            else:
+                raise ValueError(f"Expect 7 or 8 values per row in {head_path}, row {row_idx}")
+            Ts.append(xyz_quat7_to_mat(data))
 
     if relative:
         T0_inv = np.linalg.inv(Ts[0])
@@ -131,15 +145,14 @@ def main():
     parser.add_argument('--save', type=str, default=None, help='Path to save the figure instead of showing')
     args = parser.parse_args()
 
-    head_dir = Path(args.data_root) / args.timestamp / 'head_pos'
-    if not head_dir.is_dir():
-        raise FileNotFoundError(f"Missing head_pos directory: {head_dir}")
+    head_path = Path(args.data_root) / args.timestamp / 'head_pos.txt'
+    if not head_path.is_file():
+        raise FileNotFoundError(f"Missing head_pos.txt: {head_path}")
 
-    pts, Rs = load_head_traj(str(head_dir), relative=not args.absolute, downsample=max(1, args.downsample))
+    pts, Rs = load_head_traj(str(head_path), relative=not args.absolute, downsample=max(1, args.downsample))
     save_path = Path(args.save) if args.save else None
     plot_traj(pts, Rs, show_axes_every=max(1, args.axes_every), save=save_path)
 
 
 if __name__ == '__main__':
     main()
-

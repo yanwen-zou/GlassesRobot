@@ -1,10 +1,13 @@
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 import sys
 
 import numpy as np
 import cv2
+import os
+import shutil
+import tempfile
 
 from MBA.utils.transformation import rotation_transform  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
@@ -14,8 +17,7 @@ from egodata_eval.eval_constant import (
     DEFAULT_I2RT_ZED_TXT,
     I2RT_INIT_DURATION,
     I2RT_INIT_STEPS,
-    I2RT_TARGET_DEG,
-    I2RT_TARGET_RAD,
+    TASK_I2RT_TARGET_RAD,
     WIN_CALIB,
 )
 from egodata_eval.get_depth import DepthEstimator  # type: ignore
@@ -42,6 +44,90 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 from FoundationStereo.sam2_root.notebooks.get_mask import click_mask  # type: ignore
+
+
+_SAM2_VIDEO_PREDICTOR = None
+
+
+def _get_sam2_root() -> Path:
+    root = Path(__file__).resolve().parents[2]
+    for candidate in (root / "src" / "FoundationStereo" / "sam2_root", root / "src" / "FoundationStereo" / "sam2"):
+        if candidate.exists():
+            if str(candidate) not in sys.path:
+                sys.path.append(str(candidate))
+            return candidate
+    raise FileNotFoundError("未找到 sam2_root 或 sam2 目录，请检查项目结构")
+
+
+def _get_sam2_video_predictor():
+    global _SAM2_VIDEO_PREDICTOR
+    if _SAM2_VIDEO_PREDICTOR is not None:
+        return _SAM2_VIDEO_PREDICTOR
+    sam_root = _get_sam2_root()
+    config_path = sam_root / "sam2" / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml"
+    checkpoint_path = sam_root / "checkpoints" / "sam2.1_hiera_large.pt"
+    if not config_path.exists():
+        raise FileNotFoundError(f"未找到配置文件: {config_path}")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"未找到模型权重: {checkpoint_path}")
+
+    class _WD:
+        def __init__(self, path: Path):
+            self.path = path
+            self.prev = None
+        def __enter__(self):
+            self.prev = Path.cwd()
+            os.chdir(self.path)
+        def __exit__(self, exc_type, exc, tb):
+            if self.prev is not None:
+                os.chdir(self.prev)
+
+    with _WD(sam_root):
+        from sam2.build_sam import build_sam2_video_predictor  # type: ignore
+        _SAM2_VIDEO_PREDICTOR = build_sam2_video_predictor(str(config_path), str(checkpoint_path))
+    return _SAM2_VIDEO_PREDICTOR
+
+
+def init_robot_mask_tracker(init_frame_rgb: np.ndarray, init_mask: np.ndarray) -> Dict[str, Any]:
+    tracker_dir = Path(tempfile.mkdtemp(prefix="robot_mask_track_"))
+    frame_paths = []
+    frame_path = tracker_dir / "000000.jpg"
+    cv2.imwrite(str(frame_path), init_frame_rgb[..., ::-1])
+    frame_paths.append(frame_path)
+    return {
+        "dir": tracker_dir,
+        "frame_idx": 0,
+        "init_mask": (init_mask > 0).astype(np.uint8),
+        "frames": frame_paths,
+    }
+
+
+def update_robot_mask_tracker(tracker: Dict[str, Any], frame_rgb: np.ndarray) -> np.ndarray | None:
+    if tracker is None:
+        return None
+    tracker["frame_idx"] += 1
+    frame_path = Path(tracker["dir"]) / f"{tracker['frame_idx']:06d}.jpg"
+    cv2.imwrite(str(frame_path), frame_rgb[..., ::-1])
+    tracker["frames"].append(frame_path)
+
+    predictor = _get_sam2_video_predictor()
+    inference_state = predictor.init_state(video_path=str(tracker["dir"]))
+    predictor.add_new_mask(inference_state, frame_idx=0, obj_id=1, mask=tracker["init_mask"] > 0)
+
+    last_mask = None
+    for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(inference_state):
+        if out_frame_idx == tracker["frame_idx"]:
+            mask = out_mask_logits[0] > 0.0
+            last_mask = (mask.cpu().numpy().astype(np.uint8)) * 255
+    return last_mask
+
+
+def cleanup_robot_mask_tracker(tracker: Dict[str, Any]) -> None:
+    if not tracker:
+        return
+    tracker_dir = tracker.get("dir")
+    if tracker_dir and Path(tracker_dir).exists():
+        shutil.rmtree(tracker_dir, ignore_errors=True)
 
 
 
@@ -311,7 +397,8 @@ def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
 
 def move_i2rt_to_init_angles(
     robot: Optional["I2RT"],
-    target_rad: np.ndarray = I2RT_TARGET_RAD,
+    task_name: Optional[str] = None,
+    target_rad: np.ndarray = TASK_I2RT_TARGET_RAD["book"],
     duration: float = I2RT_INIT_DURATION,
     steps: int = I2RT_INIT_STEPS,
 ) -> None:
@@ -320,8 +407,11 @@ def move_i2rt_to_init_angles(
         print("[WARN] I2RT arm not initialized; cannot move to init pose.")
         return
     try:
+        if task_name is not None:
+            if task_name in TASK_I2RT_TARGET_RAD:
+                target_rad = TASK_I2RT_TARGET_RAD[task_name]
         robot.send_joint_pos_rad(target_rad, duration=duration, steps=steps)
-        print(f"[INFO] Moved I2RT joints to deg {I2RT_TARGET_DEG}")
+        print(f"[INFO] Moved I2RT joints to rad {TASK_I2RT_TARGET_RAD.get(task_name, TASK_I2RT_TARGET_RAD['book'])}")
     except Exception as exc:
         print(f"[WARN] I2RT init move failed: {exc}")
 

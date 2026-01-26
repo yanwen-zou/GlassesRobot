@@ -89,7 +89,7 @@ class StereoVideoRecorder(Node):
         self.frame_index = 0
         self.left_dir: Path | None = None
         self.right_dir: Path | None = None
-        self.head_pos_dir: Path | None = None
+        self.head_pos_path: Path | None = None
 
         timer_period = 1.0 / self.frame_rate if self.frame_rate > 0 else 0.033
         self.timer = self.create_timer(timer_period, self.capture_frames)
@@ -137,7 +137,7 @@ class StereoVideoRecorder(Node):
         if not self.recording:
             return
 
-        if self.left_dir is None or self.right_dir is None or self.head_pos_dir is None:
+        if self.left_dir is None or self.right_dir is None or self.head_pos_path is None:
             self.get_logger().error('Output directories not ready; dropping frame.')
             return
 
@@ -167,9 +167,9 @@ class StereoVideoRecorder(Node):
         else:
             pose_for_dump = np.array(pose, dtype=np.float32)
 
-        pose_path = self.head_pos_dir / f'{frame_name}.txt'
         pose_line = ' '.join(f'{value:.6f}' if value == value else 'nan' for value in pose_for_dump)
-        pose_path.write_text(pose_line + '\n')
+        with self.head_pos_path.open('a', encoding='utf-8') as handle:
+            handle.write(f'{frame_name} {pose_line}\n')
 
         self.frame_index += 1
 
@@ -179,10 +179,10 @@ class StereoVideoRecorder(Node):
         self.recording_dir.mkdir(parents=True, exist_ok=True)
         self.left_dir = self.recording_dir / 'zed_left'
         self.right_dir = self.recording_dir / 'zed_right'
-        self.head_pos_dir = self.recording_dir / 'head_pos'
+        self.head_pos_path = self.recording_dir / 'head_pos.txt'
         self.left_dir.mkdir(parents=True, exist_ok=True)
         self.right_dir.mkdir(parents=True, exist_ok=True)
-        self.head_pos_dir.mkdir(parents=True, exist_ok=True)
+        self.head_pos_path.write_text('', encoding='utf-8')
         self.pose_queue.clear()
         self.last_pose = None
         self.frame_index = 0
@@ -200,7 +200,7 @@ class StereoVideoRecorder(Node):
         self.recording_id = None
         self.left_dir = None
         self.right_dir = None
-        self.head_pos_dir = None
+        self.head_pos_path = None
         self.pose_queue.clear()
         self.last_pose = None
         self._send_udp('stop')
