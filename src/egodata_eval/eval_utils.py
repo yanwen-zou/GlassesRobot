@@ -6,8 +6,6 @@ import sys
 import numpy as np
 import cv2
 import os
-import shutil
-import tempfile
 
 from MBA.utils.transformation import rotation_transform  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
@@ -43,33 +41,32 @@ project_root = here.parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
-from FoundationStereo.sam2_root.notebooks.get_mask import click_mask  # type: ignore
-
-
 _SAM2_VIDEO_PREDICTOR = None
+_SAM2_IMAGE_PREDICTOR = None
 
 
 def _get_sam2_root() -> Path:
     root = Path(__file__).resolve().parents[2]
-    for candidate in (root / "src" / "FoundationStereo" / "sam2_root", root / "src" / "FoundationStereo" / "sam2"):
-        if candidate.exists():
-            if str(candidate) not in sys.path:
-                sys.path.append(str(candidate))
-            return candidate
-    raise FileNotFoundError("未找到 sam2_root 或 sam2 目录，请检查项目结构")
+    # Use Grounded-SAM-2's video predictor which supports real-time streaming APIs.
+    candidate = root / "src" / "FoundationStereo" / "Grounded-SAM-2"
+    if not candidate.exists():
+        raise FileNotFoundError(f"未找到 Grounded-SAM-2 目录: {candidate}")
+    if str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+    return candidate
 
 
 def _get_sam2_video_predictor():
     global _SAM2_VIDEO_PREDICTOR
     if _SAM2_VIDEO_PREDICTOR is not None:
         return _SAM2_VIDEO_PREDICTOR
-    sam_root = _get_sam2_root()
-    config_path = sam_root / "sam2" / "configs" / "sam2.1" / "sam2.1_hiera_l.yaml"
-    checkpoint_path = sam_root / "checkpoints" / "sam2.1_hiera_large.pt"
-    if not config_path.exists():
-        raise FileNotFoundError(f"未找到配置文件: {config_path}")
+    gs_root = _get_sam2_root()
+    config_name = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    # Grounded-SAM-2 keeps checkpoints under src/FoundationStereo/sam2_root/checkpoints.
+    repo_root = Path(__file__).resolve().parents[2]
+    checkpoint_path = repo_root / "src" / "FoundationStereo" / "sam2_root" / "checkpoints" / "sam2.1_hiera_large.pt"
     if not checkpoint_path.exists():
-        raise FileNotFoundError(f"未找到模型权重: {checkpoint_path}")
+        raise FileNotFoundError(f"未找到 SAM2 checkpoint: {checkpoint_path}")
 
     class _WD:
         def __init__(self, path: Path):
@@ -82,52 +79,120 @@ def _get_sam2_video_predictor():
             if self.prev is not None:
                 os.chdir(self.prev)
 
-    with _WD(sam_root):
+    # Ensure Hydra finds configs via pkg://sam2 (Grounded-SAM-2 provides the sam2 package).
+    with _WD(gs_root):
         from sam2.build_sam import build_sam2_video_predictor  # type: ignore
-        _SAM2_VIDEO_PREDICTOR = build_sam2_video_predictor(str(config_path), str(checkpoint_path))
+        _SAM2_VIDEO_PREDICTOR = build_sam2_video_predictor(config_name, str(checkpoint_path))
     return _SAM2_VIDEO_PREDICTOR
 
 
+def _get_sam2_image_predictor():
+    """Lazy-load SAM2 image predictor from Grounded-SAM-2 to avoid importing sam2_root (offline-only)."""
+    global _SAM2_IMAGE_PREDICTOR
+    if _SAM2_IMAGE_PREDICTOR is not None:
+        return _SAM2_IMAGE_PREDICTOR
+
+    gs_root = _get_sam2_root()
+    config_name = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    repo_root = Path(__file__).resolve().parents[2]
+    checkpoint_path = repo_root / "src" / "FoundationStereo" / "sam2_root" / "checkpoints" / "sam2.1_hiera_large.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"未找到 SAM2 checkpoint: {checkpoint_path}")
+
+    class _WD:
+        def __init__(self, path: Path):
+            self.path = path
+            self.prev = None
+        def __enter__(self):
+            self.prev = Path.cwd()
+            os.chdir(self.path)
+        def __exit__(self, exc_type, exc, tb):
+            if self.prev is not None:
+                os.chdir(self.prev)
+
+    with _WD(gs_root):
+        from sam2.build_sam import build_sam2  # type: ignore
+        from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore
+        model = build_sam2(config_name, str(checkpoint_path))
+        _SAM2_IMAGE_PREDICTOR = SAM2ImagePredictor(model)
+    return _SAM2_IMAGE_PREDICTOR
+
+
+def click_mask(
+    image_rgb: np.ndarray,
+    points_xy: list[tuple[float, float]],
+    labels: Optional[list[int]] = None,
+    multimask: bool = True,
+) -> np.ndarray:
+    """SAM2 image click mask using Grounded-SAM-2 package (supports online video tracking coexistence)."""
+    assert isinstance(image_rgb, np.ndarray) and image_rgb.ndim == 3, "image must be HxWx3"
+    predictor = _get_sam2_image_predictor()
+    predictor.set_image(image_rgb)
+
+    if labels is None:
+        labels = [1] * len(points_xy)
+    pts = np.array(points_xy, dtype=np.float32)
+    lbs = np.array(labels, dtype=np.int32)
+
+    masks, ious, _ = predictor.predict(
+        point_coords=pts,
+        point_labels=lbs,
+        multimask_output=multimask,
+        normalize_coords=True,
+    )
+    idx = int(np.argmax(ious)) if ious is not None and np.size(ious) > 0 else 0
+    mask_bool = masks[idx].astype(bool)
+    if (ious is None or np.size(ious) == 0) and masks.shape[0] > 1:
+        areas = masks.reshape(masks.shape[0], -1).sum(axis=1)
+        idx = int(np.argmax(areas))
+        mask_bool = masks[idx].astype(bool)
+    return (mask_bool.astype(np.uint8)) * 255
+
+
 def init_robot_mask_tracker(init_frame_rgb: np.ndarray, init_mask: np.ndarray) -> Dict[str, Any]:
-    tracker_dir = Path(tempfile.mkdtemp(prefix="robot_mask_track_"))
-    frame_paths = []
-    frame_path = tracker_dir / "000000.jpg"
-    cv2.imwrite(str(frame_path), init_frame_rgb[..., ::-1])
-    frame_paths.append(frame_path)
+    predictor = _get_sam2_video_predictor()
+    inference_state = predictor.init_state(video_path=None)
+    # Grounded-SAM-2 streaming mode leaves these unset; required by mask consolidation code.
+    h, w = int(init_frame_rgb.shape[0]), int(init_frame_rgb.shape[1])
+    inference_state["video_height"] = h
+    inference_state["video_width"] = w
+    # Add first frame and set initial mask as prompt.
+    frame_idx = predictor.add_new_frame(inference_state, init_frame_rgb)
+    predictor.reset_state(inference_state)
+    predictor.add_new_mask(inference_state, frame_idx=frame_idx, obj_id=1, mask=(init_mask > 0))
+    # Run inference on the first frame to warm up tracking state.
+    _, _, video_res_masks = predictor.infer_single_frame(inference_state, frame_idx=frame_idx)
+    mask0 = (video_res_masks[0] > 0.0).detach().cpu().numpy()
+    # video_res_masks[0] is usually shaped (1, H, W); squeeze to 2D for saving/usage.
+    if mask0.ndim == 3 and mask0.shape[0] == 1:
+        mask0 = mask0[0]
+    mask0 = mask0.astype(np.uint8) * 255
     return {
-        "dir": tracker_dir,
-        "frame_idx": 0,
-        "init_mask": (init_mask > 0).astype(np.uint8),
-        "frames": frame_paths,
+        "predictor": predictor,
+        "state": inference_state,
+        "obj_id": 1,
+        "last_mask": mask0,
     }
 
 
 def update_robot_mask_tracker(tracker: Dict[str, Any], frame_rgb: np.ndarray) -> np.ndarray | None:
-    if tracker is None:
+    if not tracker:
         return None
-    tracker["frame_idx"] += 1
-    frame_path = Path(tracker["dir"]) / f"{tracker['frame_idx']:06d}.jpg"
-    cv2.imwrite(str(frame_path), frame_rgb[..., ::-1])
-    tracker["frames"].append(frame_path)
-
-    predictor = _get_sam2_video_predictor()
-    inference_state = predictor.init_state(video_path=str(tracker["dir"]))
-    predictor.add_new_mask(inference_state, frame_idx=0, obj_id=1, mask=tracker["init_mask"] > 0)
-
-    last_mask = None
-    for out_frame_idx, _, out_mask_logits in predictor.propagate_in_video(inference_state):
-        if out_frame_idx == tracker["frame_idx"]:
-            mask = out_mask_logits[0] > 0.0
-            last_mask = (mask.cpu().numpy().astype(np.uint8)) * 255
-    return last_mask
+    predictor = tracker["predictor"]
+    inference_state = tracker["state"]
+    frame_idx = predictor.add_new_frame(inference_state, frame_rgb)
+    _, _, video_res_masks = predictor.infer_single_frame(inference_state, frame_idx=frame_idx)
+    mask = (video_res_masks[0] > 0.0).detach().cpu().numpy()
+    if mask.ndim == 3 and mask.shape[0] == 1:
+        mask = mask[0]
+    mask = mask.astype(np.uint8) * 255
+    tracker["last_mask"] = mask
+    return mask
 
 
 def cleanup_robot_mask_tracker(tracker: Dict[str, Any]) -> None:
-    if not tracker:
-        return
-    tracker_dir = tracker.get("dir")
-    if tracker_dir and Path(tracker_dir).exists():
-        shutil.rmtree(tracker_dir, ignore_errors=True)
+    # No persistent resources besides GPU memory.
+    return
 
 
 

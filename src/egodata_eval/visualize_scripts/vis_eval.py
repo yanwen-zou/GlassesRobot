@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import sys
+import re
 import numpy as np
 
 here = Path(__file__).resolve()
@@ -19,6 +20,7 @@ for path in (src_root, mba_root, project_root):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 from egodata_eval.eval_constant import UPDATE_INTERVAL
+from MBA.utils.constants import IMG_MEAN, IMG_STD  # type: ignore
 
 def _rotation_6d_to_matrix(rot_6d: np.ndarray) -> np.ndarray:
     a1 = rot_6d[..., 0:3]
@@ -69,6 +71,19 @@ def main():
     )
     parser.add_argument("--axis_len", type=float, default=0.2, help="Axis length for frames.")
     parser.add_argument(
+        "--pointcloud-dir",
+        type=Path,
+        default=None,
+        help="Directory containing per-frame pointcloud npz (default: <data-dir>/pointcloud).",
+    )
+    parser.add_argument("--point-radius", type=float, default=0.003, help="Rerun point radius for pointcloud.")
+    parser.add_argument(
+        "--max-points",
+        type=int,
+        default=200_000,
+        help="Max points to log per frame (0 disables downsample).",
+    )
+    parser.add_argument(
         "--ball-centroids",
         type=Path,
         default=None,
@@ -94,6 +109,7 @@ def main():
     T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
     T_base_cam_seq = load_array(runtime_cam_path)
+    pointcloud_dir = (data_dir / "pointcloud") if args.pointcloud_dir is None else args.pointcloud_dir.resolve()
 
     def _load_ball_centroids(path: Optional[Path], search_root: Path) -> tuple[np.ndarray | None, Optional[Path]]:
         search_path = path
@@ -173,17 +189,57 @@ def main():
             return None
         return _coerce_matrix(T_base_cam_seq[idx])
 
-    def _transform_points_cam_to_robot(points_cam: np.ndarray) -> np.ndarray | None:
+    def _load_pointcloud_npz(frame_idx: int, fallback_idx: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if not pointcloud_dir.exists():
+            return None, None
+        candidates = [
+            pointcloud_dir / f"{frame_idx:06d}.npz",
+            pointcloud_dir / f"{fallback_idx:06d}.npz",
+        ]
+        pcd_path = next((p for p in candidates if p.exists()), None)
+        if pcd_path is None:
+            return None, None
+        data = np.load(pcd_path, allow_pickle=True)
+        # New format from eval.py: `cloud` is (N,6) with xyz in base frame + normalized rgb (like dataset).
+        if data.get("cloud") is not None:
+            cloud = np.asarray(data["cloud"], dtype=np.float32)
+            if cloud.ndim != 2 or cloud.shape[1] < 6:
+                raise RuntimeError(f"Invalid cloud shape in {pcd_path}: {cloud.shape}")
+            xyz_base = cloud[:, :3]
+            colors_norm = cloud[:, 3:6]
+            colors = np.clip(colors_norm * IMG_STD + IMG_MEAN, 0.0, 1.0)
+            rgb_u8 = (colors * 255).astype(np.uint8)
+            return xyz_base, rgb_u8
+
+        # Backward compatibility: older format stored camera-frame xyz + uint8 rgb.
+        xyz_cam = np.asarray(data.get("xyz_cam"), dtype=np.float32) if data.get("xyz_cam") is not None else None
+        rgb = np.asarray(data.get("rgb"), dtype=np.uint8) if data.get("rgb") is not None else None
+        return xyz_cam, rgb
+
+    def _transform_points_cam_to_robot(points_cam: np.ndarray, cam_tf: np.ndarray) -> np.ndarray:
+        homog = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1), dtype=np.float32)], axis=1)
+        pts_base = (cam_tf @ homog.T).T
+        pts_robot = (T_robot_base @ pts_base.T).T
+        return pts_robot[:, :3]
+
+    def _transform_points_base_to_robot(points_base: np.ndarray) -> np.ndarray:
+        homog = np.concatenate([points_base, np.ones((points_base.shape[0], 1), dtype=np.float32)], axis=1)
+        pts_robot = (T_robot_base @ homog.T).T
+        return pts_robot[:, :3]
+
+    def _transform_points_cam_to_robot_first(points_cam: np.ndarray) -> np.ndarray | None:
         if T_base_cam_seq.ndim == 3:
             T_base_cam = _coerce_matrix(T_base_cam_seq[0])
         else:
             T_base_cam = _coerce_matrix(T_base_cam_seq)
+        if T_base_cam is None:
+            return None
         homog = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1), dtype=np.float32)], axis=1)
         pts_base = (T_base_cam @ homog.T).T
         pts_robot = (T_robot_base @ pts_base.T).T
         return pts_robot[:, :3]
 
-    ball_centroids_robot = _transform_points_cam_to_robot(ball_centroids)
+    ball_centroids_robot = _transform_points_cam_to_robot_first(ball_centroids) if ball_centroids is not None else None
 
     if ball_centroids_robot is not None:
         rr.log(
@@ -218,8 +274,38 @@ def main():
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
 
-        frame_idx = rec_idx
+        frame_idx = int(rec.get("frame_idx", rec_idx))
         rr.set_time_sequence("frame", frame_idx)
+
+        # Pointcloud (saved per update step from eval.py).
+        cloud_xyz, rgb = _load_pointcloud_npz(frame_idx, rec_idx)
+        if cloud_xyz is not None:
+            if cloud_xyz.size == 0:
+                print(f"[pcd] frame_idx={frame_idx} rec_idx={rec_idx} empty pointcloud")
+                pts_robot = cloud_xyz.reshape(0, 3).astype(np.float32)
+            else:
+                # New format stores xyz in base frame; transform directly to robot frame.
+                if cloud_xyz.shape[1] != 3:
+                    raise RuntimeError(f"Unexpected point xyz shape: {cloud_xyz.shape}")
+                pts_robot = _transform_points_base_to_robot(cloud_xyz)
+
+            if args.max_points and pts_robot.shape[0] > args.max_points:
+                step = int(np.ceil(pts_robot.shape[0] / args.max_points))
+                pts_robot = pts_robot[::step]
+                if rgb is not None:
+                    rgb = rgb[::step]
+            # Log to a fixed path so playback only shows the current frame's pointcloud.
+            rr.log("frame/pointcloud", rr.Clear(recursive=True))
+            rr.log(
+                "frame/pointcloud",
+                rr.Points3D(
+                    positions=pts_robot,
+                    colors=rgb if rgb is not None else None,
+                    radii=np.full(pts_robot.shape[0], args.point_radius, dtype=np.float32),
+                ),
+            )
+        else:
+            print(f"[pcd] frame_idx={frame_idx} rec_idx={rec_idx} missing pointcloud npz under {pointcloud_dir}")
 
         if video_cap is not None and video_frame_count:
             if len(pose_records) > 1 and video_frame_count > 1:
@@ -288,7 +374,8 @@ def main():
                     ),
                 )
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
-        cam_tf = _cam_transform_for_frame(frame_idx) # load T_base_cam for this frame
+        # Prefer aligning camera transforms to the record index (they are saved per update step).
+        cam_tf = _cam_transform_for_frame(rec_idx)
         if cam_tf is not None:
             cam_robot = T_robot_base @ cam_tf 
             log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)

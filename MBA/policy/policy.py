@@ -25,7 +25,8 @@ class RISE(nn.Module):
         obj_dim = 10,
         enable_headpose_head = False,
         headpose_dim = 9,
-        obj_pose_mode = "delta",
+        # obj_pose_mode = "delta",
+        add_curr_cond = True,
     ):
         super().__init__()
         num_obs = 1
@@ -40,7 +41,7 @@ class RISE(nn.Module):
                                                   obj_dim=obj_dim,
                                                   rot_smooth_lambda=0.05,
                                                   cond_extra_dim=obj_dim,
-                                                  obj_pose_mode=obj_pose_mode)
+                                                  add_curr_cond=add_curr_cond)
         self.enable_headpose_head = enable_headpose_head
         if self.enable_headpose_head:
             self.headpose_decoder = DiffusionUNetPolicy(
@@ -52,7 +53,7 @@ class RISE(nn.Module):
                 obj_dim=headpose_dim,
                 rot_smooth_lambda=0.0,
                 cond_extra_dim=headpose_dim,
-                obj_pose_mode="delta",
+                add_curr_cond=add_curr_cond
             )
         self.readout_embed = nn.Embedding(1, hidden_dim)
 

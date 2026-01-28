@@ -6,6 +6,7 @@ import open3d as o3d
 import MinkowskiEngine as ME
 import torchvision.transforms as T
 import collections.abc as container_abcs
+from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 
 from PIL import Image
 from torch.utils.data import Dataset
@@ -48,10 +49,13 @@ class RealWorldDataset(Dataset):
         with_cloud = False,
         with_obj_action = False,
         with_headpose = False,
+        obj_pose_mode: str = "abs",
         cam_to_base_rot_noise_std: float = CAM_TO_BASE_ROT_NOISE_STD_DEFAULT,
         head_to_zed_path: str = "glasses_hardware/calib/T_glasses_zed.txt",
     ):
         assert split in ['train', 'eval', 'all']
+        if obj_pose_mode not in ["abs", "delta"]:
+            raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
 
         self.path = path
         self.split = split
@@ -72,6 +76,7 @@ class RealWorldDataset(Dataset):
         self.with_cloud = with_cloud
         self.with_obj_action = with_obj_action
         self.with_headpose = with_headpose
+        self.obj_pose_mode = obj_pose_mode
         self.cam_to_base_rot_noise_std = float(cam_to_base_rot_noise_std)
 
         if not os.path.isdir(self.data_path):
@@ -183,21 +188,60 @@ class RealWorldDataset(Dataset):
     def __len__(self):
         return len(self.obs_frame_ids)
 
-    def _normalize_tcp(self, tcp_list):
+    def _normalize_tcp(self, tcp_list, obj_pose_mode="abs"):
         ''' tcp_list: [T, 3(trans) + 6(rot) + 1(width)]'''
-        tcp_list[:, :3] = (tcp_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+        if obj_pose_mode not in ["abs", "delta"]:
+            raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
+        if obj_pose_mode == "delta":
+            tcp_list[:, :3] = (tcp_list[:, :3] - TRANS_MIN_DELTA) / (TRANS_MAX_DELTA - TRANS_MIN_DELTA) * 2 - 1
+        elif obj_pose_mode == "abs":
+            tcp_list[:, :3] = (tcp_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         tcp_list[:, -1] = tcp_list[:, -1] / MAX_GRIPPER_WIDTH * 2 - 1
         return tcp_list
     
-    def _normalize_obj(self, obj_list):
+    def _normalize_obj(self, obj_list, obj_pose_mode="abs"):
         ''' obj_list: [T, 3(trans) + 6(rot)]'''
-        obj_list[:, :3] = (obj_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+        if obj_pose_mode not in ["abs", "delta"]:
+            raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
+        if obj_pose_mode == "delta":
+            # print("Obj before normalize (delta): ", obj_list[:-2, :3])
+            obj_list[:, :3] = (obj_list[:, :3] - TRANS_MIN_DELTA) / (TRANS_MAX_DELTA - TRANS_MIN_DELTA) * 2 - 1
+            # print("Obj after normalize (delta): ", obj_list[:-2, :3])
+        elif obj_pose_mode == "abs": 
+            obj_list[:, :3] = (obj_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         return obj_list
 
-    def _normalize_headpose(self, headpose_list):
+    def _normalize_headpose(self, headpose_list, obj_pose_mode="abs"):
         ''' headpose_list: [T, 3(trans) + 6(rot)]'''
-        headpose_list[:, :3] = (headpose_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+        if obj_pose_mode not in ["abs", "delta"]:
+            raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
+        if obj_pose_mode == "delta":
+            headpose_list[:, :3] = (headpose_list[:, :3] - TRANS_MIN_DELTA) / (TRANS_MAX_DELTA - TRANS_MIN_DELTA) * 2 - 1
+        elif obj_pose_mode == "abs":
+            headpose_list[:, :3] = (headpose_list[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
         return headpose_list
+
+    def _absolute_to_delta(self, pose_seq: np.ndarray, base_pose: np.ndarray) -> np.ndarray:
+        """Convert absolute pose sequence to delta representation relative to base_pose."""
+        pose_seq = pose_seq.copy()
+        pose = torch.from_numpy(pose_seq[..., :9]).float()
+        base = torch.from_numpy(base_pose[..., :9]).float()
+        if base.dim() == 1:
+            base = base.unsqueeze(0).expand(pose.shape[0], -1)
+
+        result = pose.clone()
+        result[..., :3] = pose[..., :3] - base[..., :3]
+
+        target_rot6 = pose[..., 3:9].contiguous()
+        base_rot6 = base[..., 3:9].contiguous()
+        target_rot_mat = rotation_6d_to_matrix(target_rot6.reshape(-1, 6))
+        base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, 6))
+        delta_rot_mat = target_rot_mat @ base_rot_mat.transpose(-1, -2)
+        delta_rot6 = matrix_to_rotation_6d(delta_rot_mat).reshape_as(target_rot6)
+        result[..., 3:9] = delta_rot6
+
+        pose_seq[..., :9] = result.numpy()
+        return pose_seq
 
     def _load_camera_extrinsics_from_dir(self, path, head_to_zed_path):
         # Load head to zed transformation(from calibration)
@@ -624,9 +668,6 @@ class RealWorldDataset(Dataset):
             action_objs = np.stack(action_objs)
             termination_flags = np.array(termination_flags, dtype=np.float32).reshape(-1, 1)
             action_objs = np.concatenate([action_objs, termination_flags], axis=-1)
-            actions_obj_normalized = self._normalize_obj(action_objs.copy())
-            ret_dict["action_obj"] = torch.from_numpy(action_objs).float() # abs traj in base frame
-            ret_dict["action_obj_normalized"] = torch.from_numpy(actions_obj_normalized).float()
 
             current_frame_id = obs_frame_ids[-1]
             current_obj = _load_obj_pose(current_frame_id)
@@ -637,9 +678,17 @@ class RealWorldDataset(Dataset):
                 dtype=np.float32
             )
             current_obj = np.concatenate([current_obj, current_term_flag], axis=0)
+
+            actions_obj_norm_input = action_objs.copy()
+            if self.obj_pose_mode == "delta":
+                actions_obj_norm_input = self._absolute_to_delta(actions_obj_norm_input, current_obj)
+            actions_obj_normalized = self._normalize_obj(actions_obj_norm_input, obj_pose_mode=self.obj_pose_mode)
+
+            ret_dict["action_obj"] = torch.from_numpy(action_objs).float() # abs traj in base frame
+            ret_dict["action_obj_normalized"] = torch.from_numpy(actions_obj_normalized).float() # normalized traj(delta / abs)
             # Normalize on a copy so current_obj_pose stays in raw coordinates.
-            current_obj_normalized = self._normalize_obj(current_obj[None, :].copy()).squeeze(0)
-            ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float() # obj pose in base frame
+            current_obj_normalized = self._normalize_obj(current_obj[None, :].copy(), obj_pose_mode="abs").squeeze(0)
+            ret_dict["current_obj_pose"] = torch.from_numpy(current_obj).float() # abs obj pose in base frame
             ret_dict["current_obj_pose_normalized"] = torch.from_numpy(current_obj_normalized).float()
 
         if self.with_headpose:
@@ -651,14 +700,16 @@ class RealWorldDataset(Dataset):
             for frame_id in action_frame_ids:
                 action_headposes.append(_load_headpose(frame_id))
             action_headposes = np.stack(action_headposes).astype(np.float32)
-            action_headposes_normalized = self._normalize_headpose(action_headposes.copy())
-            ret_dict["action_headpose"] = torch.from_numpy(action_headposes).float()
-            ret_dict["action_headpose_normalized"] = torch.from_numpy(action_headposes_normalized).float()
-
             current_frame_id = obs_frame_ids[-1]
             current_headpose = _load_headpose(current_frame_id).astype(np.float32)
+            headposes_norm_input = action_headposes.copy()
+            if self.obj_pose_mode == "delta":
+                headposes_norm_input = self._absolute_to_delta(headposes_norm_input, current_headpose)
+            action_headposes_normalized = self._normalize_headpose(headposes_norm_input, obj_pose_mode=self.obj_pose_mode)
+            ret_dict["action_headpose"] = torch.from_numpy(action_headposes).float() # abs head pose in base frame
+            ret_dict["action_headpose_normalized"] = torch.from_numpy(action_headposes_normalized).float() # normalized head pose(delta / abs)
             # Normalize on a copy so current_headpose stays in raw coordinates.
-            current_headpose_normalized = self._normalize_headpose(current_headpose[None, :].copy()).squeeze(0)
+            current_headpose_normalized = self._normalize_headpose(current_headpose[None, :].copy(), obj_pose_mode="abs").squeeze(0)
             ret_dict["current_headpose"] = torch.from_numpy(current_headpose).float()
             ret_dict["current_headpose_normalized"] = torch.from_numpy(current_headpose_normalized).float()
 

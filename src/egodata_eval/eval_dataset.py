@@ -6,8 +6,9 @@ feeds them into the trajectory predictor, and stores results in train_output/epi
 Expected dataset layout under --data-path:
     rgb/000000.png, ...
     depth/000000.npy (meters) or png (depth-in-mm)
-    ob_in_cam/000000.npy (4x4 pose matrices)
+    ob_in_cam.npy (Nx4x4 pose matrices) OR ob_in_cam/000000.npy (4x4 per frame)
     cam_to_base/000000.npy (4x4, camera->base for first frame; reused for all frames)
+    head_pos/ (directory; first col is idx, next 7 columns are xyz+quat) or head_pos.txt
     optional: intrinsics.npy (3x3)
 
 Outputs (for vis_eval.py):
@@ -95,7 +96,9 @@ def _load_cam_to_base_map(
     head_to_zed: Path,
 ) -> Dict[str, np.ndarray]:
     helper = SimpleNamespace(cam_to_base_rot_noise_std=0.0)
-    head_pos_path = seq_path / "head_pos.txt"
+    head_pos_path = seq_path / "head_pos"
+    if not head_pos_path.exists():
+        head_pos_path = seq_path / "head_pos.txt"
     extr_map: Dict[int, np.ndarray] = {}
     extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_path), str(head_to_zed))
     cam_map = RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
@@ -123,7 +126,7 @@ def _denormalize_headpose_np(traj: np.ndarray) -> np.ndarray:
 def _build_future_obj_traj(
     frame_idx: int,
     frame_ids: Sequence[str],
-    pose_paths: Dict[str, Path],
+    pose_list: Sequence[np.ndarray],
     cam_to_base_map: Dict[str, np.ndarray],
     terminal_ids: set[int],
     horizon: int,
@@ -146,10 +149,9 @@ def _build_future_obj_traj(
             else:
                 break
         frame_key = frame_ids[idx]
-        pose_path = pose_paths.get(frame_key)
-        if pose_path is None:
-            raise KeyError(f"Pose file missing for frame {frame_key}")
-        pose_cam = _load_matrix(pose_path)
+        if idx >= len(pose_list):
+            raise KeyError(f"Pose list missing for frame index {idx} ({frame_key})")
+        pose_cam = pose_list[idx]
         T_base_cam = cam_to_base_map[frame_key]
         pose_base = T_base_cam @ pose_cam
         xyz_rot = xyz_rot_transform(pose_base, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
@@ -175,19 +177,17 @@ def _list_frames(directory: Path) -> List[Path]:
 def _match_frame_paths(
     rgb_dir: Path,
     depth_dir: Path,
-    pose_dir: Path,
-) -> List[Tuple[Path, Path, Path]]:
+) -> List[Tuple[Path, Path]]:
     rgb_files = _list_frames(rgb_dir)
     depth_map: Dict[str, Path] = {p.stem: p for p in _list_frames(depth_dir)}
-    pose_map: Dict[str, Path] = {p.stem: p for p in _list_frames(pose_dir)}
 
-    matched: List[Tuple[Path, Path, Path]] = []
+    matched: List[Tuple[Path, Path]] = []
     for rgb in rgb_files:
         stem = rgb.stem
-        if stem not in depth_map or stem not in pose_map:
-            print(f"[WARN] Missing depth/pose for frame {stem}; skipping.")
+        if stem not in depth_map:
+            print(f"[WARN] Missing depth for frame {stem}; skipping.")
             continue
-        matched.append((rgb, depth_map[stem], pose_map[stem]))
+        matched.append((rgb, depth_map[stem]))
     return matched
 
 
@@ -201,7 +201,7 @@ def _predict_sequence(
     headpose_cond: np.ndarray | None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray] | None]:
     pose_base_ob = T_base_cam @ pose_cam_ob
-    feats, coords = predictor._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
+    feats, coords, _ = predictor._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
     st = ME.SparseTensor(feats, coords)
     cur_obj = predictor._current_obj_vec(pose_base_ob)
     headpose_tensor = None
@@ -281,12 +281,32 @@ def main() -> None:
     rgb_dir = data_path / "rgb"
     depth_dir = data_path / "depth"
     pose_dir = data_path / "ob_in_cam"
+    pose_npy = data_path / "ob_in_cam.npy"
 
-    frame_triples = _match_frame_paths(rgb_dir, depth_dir, pose_dir)
-    if not frame_triples:
+    frame_pairs = _match_frame_paths(rgb_dir, depth_dir)
+    if not frame_pairs:
         raise RuntimeError(f"No matching frames found under {data_path}")
-    frame_ids = [rgb.stem for rgb, _, _ in frame_triples]
-    pose_path_map = {pose.stem: pose for _, _, pose in frame_triples}
+    frame_ids = [rgb.stem for rgb, _ in frame_pairs]
+
+    pose_list: List[np.ndarray] = []
+    if pose_npy.exists():
+        pose_arr = np.load(str(pose_npy)).astype(np.float32)
+        if pose_arr.ndim != 3 or pose_arr.shape[1:] != (4, 4):
+            raise ValueError(f"Invalid ob_in_cam.npy shape {pose_arr.shape}; expected (N,4,4).")
+        if pose_arr.shape[0] < len(frame_ids):
+            raise ValueError(
+                f"ob_in_cam.npy has {pose_arr.shape[0]} poses but {len(frame_ids)} frames found."
+            )
+        pose_list = [pose_arr[i] for i in range(len(frame_ids))]
+    else:
+        if not pose_dir.exists():
+            raise FileNotFoundError(f"Missing pose data: {pose_npy} or {pose_dir}")
+        pose_map: Dict[str, Path] = {p.stem: p for p in _list_frames(pose_dir)}
+        for fid in frame_ids:
+            pose_path = pose_map.get(fid)
+            if pose_path is None:
+                raise KeyError(f"Pose file missing for frame {fid}")
+            pose_list.append(_load_matrix(pose_path))
     if len(frame_ids) >= 5:
         terminal_ids = set(int(fid) for fid in frame_ids[-5:])
     else:
@@ -326,10 +346,10 @@ def main() -> None:
     loss_sum = 0.0
     loss_count = 0
 
-    for frame_idx, (rgb_path, depth_path, pose_path) in enumerate(frame_triples):
+    for frame_idx, (rgb_path, depth_path) in enumerate(frame_pairs):
         image_bgr = _load_rgb(rgb_path)
         depth_m = _load_depth(depth_path)
-        pose_cam_ob = _load_matrix(pose_path)
+        pose_cam_ob = pose_list[frame_idx]
         frame_key = rgb_path.stem
         T_base_cam = cam2base_map[frame_key]
 
@@ -367,7 +387,7 @@ def main() -> None:
             gt_traj = _build_future_obj_traj(
                 frame_idx,
                 frame_ids,
-                pose_path_map,
+                pose_list,
                 cam2base_map,
                 terminal_ids,
                 min(horizon, len(obj_traj_norm)),
@@ -375,7 +395,9 @@ def main() -> None:
             )
             steps = min(obj_traj_norm.shape[0], gt_traj.shape[0])
             if steps > 0:
-                diff = obj_traj_norm[:steps] - gt_traj[:steps]
+                obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm[:steps])
+                gt_traj_denorm = _denormalize_obj_traj(gt_traj[:steps])
+                diff = obj_traj_denorm - gt_traj_denorm
                 mse_per_step = np.mean(diff * diff, axis=1)
                 for step, loss in enumerate(mse_per_step):
                     #print(f"[LOSS] frame {frame_idx:04d} step {step:02d} mse {loss:.6f}")

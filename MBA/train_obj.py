@@ -42,6 +42,7 @@ default_args = edict({
     "enable_headpose_head": True,
     "headpose_dim": 9,
     "obj_pose_mode": "abs",
+    "add_curr_cond": True,
 })
 
 
@@ -82,6 +83,7 @@ def train(args_override):
         with_cloud = False,
         with_obj_action = True,
         with_headpose = args.enable_headpose_head,
+        obj_pose_mode=args.obj_pose_mode,
     )
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -113,7 +115,8 @@ def train(args_override):
         obj_dim = args.obj_dim,
         enable_headpose_head = args.enable_headpose_head,
         headpose_dim = args.headpose_dim,
-        obj_pose_mode = args.obj_pose_mode,
+        # obj_pose_mode = args.obj_pose_mode,
+        add_curr_cond = args.add_curr_cond,
     ).to(device)
     if RANK == 0:
         n_parameters = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -260,4 +263,5 @@ if __name__ == '__main__':
     parser.add_argument('--headpose_dim', action = 'store', type = int, help = 'headpose action dimension', required = False, default = 9)
     parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='delta', help='object pose prediction target type')
     parser.add_argument('--headpose_loss_weight', action = 'store', type = float, help = 'headpose loss weight', required = False, default = 0.3)
+    parser.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
     train(vars(parser.parse_args()))

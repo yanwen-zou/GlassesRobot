@@ -28,7 +28,7 @@ class DiffusionUNetPolicy(nn.Module):
             obj_dim=10,
             rot_smooth_lambda=0.0,
             cond_extra_dim=0,
-            obj_pose_mode="abs",
+            add_curr_cond: bool = True,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -101,10 +101,9 @@ class DiffusionUNetPolicy(nn.Module):
         self.n_obs_steps = n_obs_steps
         self.base_global_cond_dim = global_cond_dim
         self.cond_extra_dim = cond_extra_dim
+        self.add_curr_cond = add_curr_cond
         self.rot_smooth_lambda = rot_smooth_lambda
-        self.obj_pose_mode = obj_pose_mode
         self.pose_dims = 3 + ROT_DIM
-        self.returns_absolute_pose = obj_pose_mode == "abs"
         if cond_extra_dim > 0:
             self.global_cond_proj = nn.Sequential(
                 nn.Linear(global_cond_dim + cond_extra_dim, global_cond_dim),
@@ -144,23 +143,22 @@ class DiffusionUNetPolicy(nn.Module):
         result[..., 3:3 + ROT_DIM] = delta_rot6
         return result
 
-    def _delta_to_absolute(self, delta_pose: torch.Tensor, base_pose: torch.Tensor) -> torch.Tensor:
-        """
-        Convert delta pose sequence back to absolute representation using base_pose.
-        """
-        expanded_base = self._expand_base_pose(base_pose, delta_pose)
-        result = delta_pose.clone()
-        result[..., :3] = delta_pose[..., :3] + expanded_base[..., :3]
+    # def _delta_to_absolute(self, delta_pose: torch.Tensor, base_pose: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Convert delta pose sequence back to absolute representation using base_pose.
+    #     """
+    #     expanded_base = self._expand_base_pose(base_pose, delta_pose)
+    #     result = delta_pose.clone()
+    #     result[..., :3] = delta_pose[..., :3] + expanded_base[..., :3]
 
-        delta_rot6 = delta_pose[..., 3:3 + ROT_DIM].contiguous()
-        base_rot6 = expanded_base[..., 3:3 + ROT_DIM].contiguous()
-        delta_rot_mat = rotation_6d_to_matrix(delta_rot6.reshape(-1, ROT_DIM))
-        base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, ROT_DIM))
-        abs_rot_mat = delta_rot_mat @ base_rot_mat
-        abs_rot6 = matrix_to_rotation_6d(abs_rot_mat).reshape_as(delta_rot6)
-        result[..., 3:3 + ROT_DIM] = abs_rot6
-        self.returns_absolute_pose = True
-        return result
+    #     delta_rot6 = delta_pose[..., 3:3 + ROT_DIM].contiguous()
+    #     base_rot6 = expanded_base[..., 3:3 + ROT_DIM].contiguous()
+    #     delta_rot_mat = rotation_6d_to_matrix(delta_rot6.reshape(-1, ROT_DIM))
+    #     base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, ROT_DIM))
+    #     abs_rot_mat = delta_rot_mat @ base_rot_mat
+    #     abs_rot6 = matrix_to_rotation_6d(abs_rot_mat).reshape_as(delta_rot6)
+    #     result[..., 3:3 + ROT_DIM] = abs_rot6
+    #     return result
 
     def _prepare_global_cond(self, readout: torch.Tensor, extra_cond: torch.Tensor = None) -> torch.Tensor:
         batch_size = readout.shape[0]
@@ -264,11 +262,11 @@ class DiffusionUNetPolicy(nn.Module):
                 **self.kwargs)
             
             obj_pred = sample[...,:Da]
-            if self.obj_pose_mode == "delta":
-                if extra_cond is None:
-                    raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
-                base_pose = extra_cond[:, :self.pose_dims]
-                obj_pred = self._delta_to_absolute(obj_pred, base_pose)
+            # if self.obj_pose_mode == "delta":
+            #     if extra_cond is None:
+            #         raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
+            #     base_pose = extra_cond[:, :self.pose_dims]
+            #     obj_pred = self._delta_to_absolute(obj_pred, base_pose)
 
             Da = self.action_dim
 
@@ -308,7 +306,10 @@ class DiffusionUNetPolicy(nn.Module):
         obs_features = readout
         assert obs_features.shape[0] == B * To
 
-        global_cond = self._prepare_global_cond(obs_features, extra_cond)
+        if self.add_curr_cond:
+            global_cond = self._prepare_global_cond(obs_features, extra_cond)
+        else:
+            global_cond = self._prepare_global_cond(obs_features) # no extra cond for obj prediction
         cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
         cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
         sample = self.conditional_sample(
@@ -319,11 +320,11 @@ class DiffusionUNetPolicy(nn.Module):
             sample_obj=True,
             **self.kwargs
         )
-        if self.obj_pose_mode == "delta":
-            if extra_cond is None:
-                raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
-            base_pose = extra_cond[:, :self.pose_dims]
-            sample = self._delta_to_absolute(sample, base_pose)
+        # if self.obj_pose_mode == "delta":
+        #     if extra_cond is None:
+        #         raise ValueError("extra_cond (current object pose) is required for delta mode inference.")
+        #     base_pose = extra_cond[:, :self.pose_dims]
+        #     sample = self._delta_to_absolute(sample, base_pose)
         return sample
 
     # ========= training  ============
@@ -332,15 +333,18 @@ class DiffusionUNetPolicy(nn.Module):
         # handle different ways of passing observation
         local_cond = None
         trajectory = actions_obj
-        if self.obj_pose_mode == "delta":
-            if extra_cond is None:
-                raise ValueError("extra_cond (current object pose) is required for delta obj pose training.")
-            base_pose = extra_cond[:, :self.pose_dims]
-            trajectory = self._absolute_to_delta(actions_obj, base_pose)
+        # if self.obj_pose_mode == "delta":
+        #     if extra_cond is None:
+        #         raise ValueError("extra_cond (current object pose) is required for delta obj pose training.")
+        #     base_pose = extra_cond[:, :self.pose_dims]
+        #     trajectory = self._absolute_to_delta(actions_obj, base_pose)
         cond_data = trajectory
         assert readout.shape[0] == batch_size * self.n_obs_steps
         # reshape back to B, Do
-        global_cond = self._prepare_global_cond(readout, extra_cond)
+        if self.add_curr_cond:
+            global_cond = self._prepare_global_cond(readout, extra_cond)
+        else:
+            global_cond = self._prepare_global_cond(readout) # no extra cond for obj prediction
 
         # generate impainting mask
         condition_mask = self.obj_mask_generator(trajectory.shape)
@@ -395,99 +399,4 @@ class DiffusionUNetPolicy(nn.Module):
             rot_delta = rot_pred[:, 1:, :] - rot_pred[:, :-1, :]
             smooth_loss = rot_delta.pow(2).mean()
             loss = loss + self.rot_smooth_lambda * smooth_loss
-        return loss
-        
-
-    def compute_loss(self, readout, actions, extra_cond=None):
-        if self.enable_mba:
-            B = readout.shape[0]
-            T = self.horizon
-            Da = self.obj_dim
-            Do = self.obs_feature_dim
-            To = self.n_obs_steps
-
-            # build input
-            device = readout.device
-            dtype = readout.dtype
-            obs_features = readout
-            assert obs_features.shape[0] == B * To
-            
-            # condition through global feature
-            local_cond = None
-            global_cond = self._prepare_global_cond(obs_features, extra_cond)
-            # empty data for action
-            cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
-            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
-
-            # run sampling
-            with torch.no_grad():
-                sample = self.conditional_sample(
-                    cond_data, 
-                    cond_mask,
-                    local_cond=local_cond,
-                    global_cond=global_cond,
-                    sample_obj=1,
-                    **self.kwargs)
-            obj_pred = sample[..., :Da]  # B, T, Da
-            if self.obj_pose_mode == "delta":
-                if extra_cond is None:
-                    raise ValueError("extra_cond (current object pose) is required for delta obj pose training.")
-                base_pose = extra_cond[:, :self.pose_dims]
-                obj_pred = self._delta_to_absolute(obj_pred, base_pose)
-        else:
-            B = readout.shape[0]
-            obj_pred = None
-
-        batch_size = readout.shape[0]
-
-        # handle different ways of passing observation
-        local_cond = None
-        trajectory = actions
-        cond_data = trajectory
-        assert readout.shape[0] == batch_size * self.n_obs_steps
-        # reshape back to B, Do
-        global_cond = self._prepare_global_cond(readout, extra_cond)
-        if self.enable_mba:
-            obj_pred = obj_pred.reshape(B, -1)
-            global_cond = torch.cat([global_cond, obj_pred],dim=-1)
-            global_cond = self.fob(global_cond)
-
-        # generate impainting mask
-        condition_mask = self.mask_generator(trajectory.shape)
-
-        # Sample noise that we'll add to the images
-        noise = torch.randn(trajectory.shape, device=trajectory.device)
-        bsz = trajectory.shape[0]
-        # Sample a random timestep for each image
-        timesteps = torch.randint(
-            0, self.noise_scheduler.config.num_train_timesteps, 
-            (bsz,), device=trajectory.device
-        ).long()
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            trajectory, noise, timesteps)
-        
-        # compute loss mask
-        loss_mask = ~condition_mask
-
-        # apply conditioning
-        noisy_trajectory[condition_mask] = cond_data[condition_mask]
-        
-        # Predict the noise residual
-        pred = self.model(noisy_trajectory, timesteps, 
-            local_cond=local_cond, global_cond=global_cond)
-
-        pred_type = self.noise_scheduler.config.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = trajectory
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
-
-        loss = F.mse_loss(pred, target, reduction='none')
-        loss = loss * loss_mask.type(loss.dtype)
-        loss = reduce(loss, 'b ... -> b (...)', 'mean')
-        loss = loss.mean()
         return loss

@@ -50,7 +50,13 @@ class TrajectoryPredictor:
         state = torch.load(str(ckpt_path), map_location=self.device)
         self.model.load_state_dict(state, strict=False)
 
-    def _make_sparse_input(self, rgb_bgr: np.ndarray, depth_m: np.ndarray, K: np.ndarray, T_base_cam: Optional[np.ndarray] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _make_sparse_input(
+        self,
+        rgb_bgr: np.ndarray,
+        depth_m: np.ndarray,
+        K: np.ndarray,
+        T_base_cam: Optional[np.ndarray] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
         """Backproject depth to xyz and optionally convert to base (ball) frame."""
         h, w = depth_m.shape
         # print(f"[Traj Predictor INFO] depth_m.shape(h,w):{depth_m.shape}")
@@ -61,7 +67,7 @@ class TrajectoryPredictor:
         # print(f"[INFO] step: {step}")
         ys, xs = np.mgrid[0:h:step, 0:w:step]
         zs = depth_m[ys, xs]
-        valid = zs > 1e-6
+        valid = (np.isfinite(zs)) & (zs > 1e-6)
         xs = xs[valid].astype(np.float32)
         ys = ys[valid].astype(np.float32)
         zs = zs[valid].astype(np.float32)
@@ -106,7 +112,7 @@ class TrajectoryPredictor:
         else:
             coords_t = coords_me
 
-        return feats_t.to(self.device), coords_t.to(self.device)
+        return feats_t.to(self.device), coords_t.to(self.device), cloud
 
     def _current_obj_vec(self, pose_cam_ob: np.ndarray) -> np.ndarray:
         xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
@@ -150,12 +156,12 @@ class TrajectoryPredictor:
         pose_cam_ob: np.ndarray,
         T_base_cam: Optional[np.ndarray] = None,
         headpose_cond: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         # Convert object pose to base frame if provided
 
         pose_base_ob = T_base_cam @ pose_cam_ob
 
-        feats, coords = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
+        feats, coords, cloud = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
         st = ME.SparseTensor(feats, coords)
         cur_obj = self._current_obj_vec(pose_base_ob)
         headpose_tensor = None
@@ -197,7 +203,7 @@ class TrajectoryPredictor:
         self._cached_points_cam = points_cam.copy()
         overlay = _project_points_with_gradient(image_bgr, K, points_cam,
                                                 color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
-        return overlay
+        return overlay, cloud
 
     def overlay_cached(self, image_bgr: np.ndarray, K: np.ndarray) -> np.ndarray:
         if self._cached_points_cam is None:
