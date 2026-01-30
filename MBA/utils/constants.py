@@ -5,7 +5,7 @@ IMG_MEAN = np.array([0.485, 0.456, 0.406])
 IMG_STD = np.array([0.229, 0.224, 0.225])
 
 # tcp normalization and gripper width normalization
-TRANS_MIN, TRANS_MAX = np.array([-0.2, -0.75, -0.1]), np.array([0.9, 0.32, 0.5]) 
+TRANS_MIN, TRANS_MAX = np.array([-0.2, -0.75, -0.1]), np.array([1.5, 0.32, 0.5]) 
 TRANS_MIN_DELTA, TRANS_MAX_DELTA = np.array([-0.05, -0.05, -0.05]), np.array([0.05, 0.05, 0.05])
 MAX_GRIPPER_WIDTH = 0.11 # meter
 
