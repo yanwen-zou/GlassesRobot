@@ -157,11 +157,11 @@ class RealWorldDataset(Dataset):
 
             for cur_idx in range(len(frame_ids) - 1):
                 obs_pad_before = max(0, num_obs - cur_idx - 1)
-                action_pad_after = max(0, num_action - (len(frame_ids) - 1 - cur_idx))
+                action_pad_after = max(0, num_action - (len(frame_ids) - cur_idx))
                 frame_begin = max(0, cur_idx - num_obs + 1)
-                frame_end = min(len(frame_ids), cur_idx + num_action + 1)
+                frame_end = min(len(frame_ids), cur_idx + num_action)
                 obs_frames = frame_ids[:1] * obs_pad_before + frame_ids[frame_begin: cur_idx + 1]
-                action_frames = frame_ids[cur_idx + 1: frame_end] + frame_ids[-1:] * action_pad_after
+                action_frames = frame_ids[cur_idx : frame_end] + frame_ids[-1:] * action_pad_after
                 obs_frame_ids_list.append(obs_frames)
                 action_frame_ids_list.append(action_frames)
                 if self.with_obj_action:
@@ -767,22 +767,22 @@ def main():
         with_headpose=True,
     )
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    # os.makedirs(args.output_dir, exist_ok=True)
 
-    for idx in range(len(dataset)):
-        data = dataset[idx]
-        current_obj = data.get("current_obj_pose")
-        action_obj = data.get("action_obj")
-        headpos = data.get("current_headpose")
-        if current_obj is None or action_obj is None:
-            continue
-        out_path = os.path.join(args.output_dir, f"sample_{idx:06d}.npz")
-        np.savez(
-            out_path,
-            current_obj_pose=current_obj.numpy(),
-            action_obj=action_obj.numpy(),
-            headpos = headpos.numpy(),
-        )
+    # for idx in range(len(dataset)):
+    #     data = dataset[idx]
+    #     current_obj = data.get("current_obj_pose")
+    #     action_obj = data.get("action_obj")
+    #     headpos = data.get("current_headpose")
+    #     if current_obj is None or action_obj is None:
+    #         continue
+    #     out_path = os.path.join(args.output_dir, f"sample_{idx:06d}.npz")
+    #     np.savez(
+    #         out_path,
+    #         current_obj_pose=current_obj.numpy(),
+    #         action_obj=action_obj.numpy(),
+    #         headpos = headpos.numpy(),
+    #     )
 
 
 if __name__ == "__main__":
