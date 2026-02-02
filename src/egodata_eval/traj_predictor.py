@@ -10,9 +10,15 @@ import MinkowskiEngine as ME  # type: ignore
 
 from MBA.policy import RISE  # type: ignore
 from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
-from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot  # type: ignore
+from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
 from egodata_eval.eval_constant import BASE_CLOUD_X_MIN, BASE_CLOUD_Y_MAX, BASE_CLOUD_Y_MIN
-from egodata_eval.eval_utils import _denormalize_obj_traj, _build_pose_mats, _project_points_with_gradient  # type: ignore
+from egodata_eval.eval_utils import (
+    _denormalize_obj_traj,
+    _normalize_obj_pose,
+    _build_pose_mats,
+    _project_points_with_gradient,
+    add_relative,
+)  # type: ignore
 
 
 class TrajectoryPredictor:
@@ -20,18 +26,21 @@ class TrajectoryPredictor:
         self,
         ckpt_path: Path,
         num_action: int = 20,
-        obj_pose_mode: str = "delta",
+        obj_pose_mode: str = "delta", # delta or abs
         voxel_size: float = 0.005,
         enable_headpose_head: bool = False,
         headpose_dim: int = 9,
+        add_curr_cond: bool = True,
     ):
+        print(f"[DEBUG] Initialzie Trajectory Predictor with obj_pose_mode: {obj_pose_mode}, add_curr_cond: {add_curr_cond}")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_action = num_action
         self.obj_pose_mode = obj_pose_mode
+        self.add_curr_cond = add_curr_cond
         self.voxel_size = voxel_size
         self._cached_points_cam: Optional[np.ndarray] = None
-        self.last_traj_denorm: Optional[np.ndarray] = None
-        self.last_headpose_pred: Optional[np.ndarray] = None
+        self.last_traj_pred: Optional[np.ndarray] = None # currently under base frame, abs
+        self.last_headpose_pred: Optional[np.ndarray] = None # abs / delta
         self.model = RISE(num_action=num_action,
                           input_dim=6,
                           obs_feature_dim=512,
@@ -39,9 +48,9 @@ class TrajectoryPredictor:
                           hidden_dim=512,
                           enable_mba=True,
                           obj_dim=10,
-                          obj_pose_mode=obj_pose_mode,
                           enable_headpose_head=enable_headpose_head,
-                          headpose_dim=headpose_dim).to(self.device).eval()
+                          headpose_dim=headpose_dim,
+                          add_curr_cond=add_curr_cond).to(self.device).eval()
         if ckpt_path is None:
             raise ValueError("ckpt_path is required; please pass --ckpt to eval.py")
         ckpt_path = Path(ckpt_path)
@@ -118,9 +127,7 @@ class TrajectoryPredictor:
         xyz6d = mat_to_xyz_rot(pose_cam_ob, rotation_rep="rotation_6d").astype(np.float32)
         term = np.array([0.0], dtype=np.float32)
         cur = np.concatenate([xyz6d, term], axis=0)
-        # normalize like dataset
-        norm = cur.copy()
-        norm[:3] = (norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+        norm = _normalize_obj_pose(cur, obj_pose_mode="abs")
         return norm
 
     def _absolute_to_delta_np(self, abs_traj_10: np.ndarray, base_pose_cam_ob: np.ndarray) -> np.ndarray:
@@ -157,13 +164,15 @@ class TrajectoryPredictor:
         T_base_cam: Optional[np.ndarray] = None,
         headpose_cond: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        # Convert object pose to base frame if provided
-
+        # Convert obj pose to base frame
+        # Set last_traj_pred, abs traj in base frame
         pose_base_ob = T_base_cam @ pose_cam_ob
 
         feats, coords, cloud = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
         st = ME.SparseTensor(feats, coords)
-        cur_obj = self._current_obj_vec(pose_base_ob)
+        print(f"[DEBUG] pose_base_ob:{pose_base_ob}")
+        cur_obj = self._current_obj_vec(pose_base_ob) #after norm
+        # print(f"[DEBUG] cur_obj:{cur_obj}")
         headpose_tensor = None
         if self.model.enable_headpose_head:
             if headpose_cond is None:
@@ -176,29 +185,37 @@ class TrajectoryPredictor:
                 batch_size=1,
                 current_obj=torch.from_numpy(cur_obj[None, :]).to(self.device),
                 headpose_cond=headpose_tensor,
-            )
+            ) # delta / abs based on args (whether use headpose_cond/current_obj depends on model initial args)
         obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
+        # print(f"[DEBUG] obj_traj_norm:{obj_traj_norm}")
         if self.model.enable_headpose_head:
             headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
 
-        obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
+        obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm, obj_pose_mode=self.obj_pose_mode)
         if self.model.enable_headpose_head:
-            headpose_pred = _denormalize_obj_traj(headpose_pred_norm) # abs in base frame
-            self.last_headpose_pred = headpose_pred
-            #print(f"[INFO] Predicted headpose: {headpose_pred[0]}")
+            headpose_denorm = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode=self.obj_pose_mode) 
+            self.last_headpose_pred = headpose_denorm.astype(np.float32)
         else:
             self.last_headpose_pred = None
 
-        self.last_traj_denorm = obj_traj_ref
-        # Deltas are not used in current execution path; keep only absolute trajectory
+        if self.obj_pose_mode == "delta":
+            print(f"Obj delta: {obj_traj_denorm}")
+            pose_mats_rel = _build_pose_mats(obj_traj_denorm[:, :3], obj_traj_denorm[:, 3:3+6])
+            pose_mats_ref = add_relative(pose_mats_rel, pose_base_ob)
+            abs_xyz6d = xyz_rot_transform(pose_mats_ref, from_rep="matrix", to_rep="rotation_6d")
+            self.last_traj_pred = np.concatenate([abs_xyz6d.astype(np.float32), obj_traj_denorm[:, 9:10]], axis=1)
+        elif self.obj_pose_mode == "abs":
+            print(f"Obj abs: {obj_traj_denorm}")
+            pose_mats_ref = _build_pose_mats(obj_traj_denorm[:, :3], obj_traj_denorm[:, 3:3+6])
+            self.last_traj_pred = obj_traj_denorm
 
-        pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:3+6])
-        predicted_points = pose_mats_ref[:, :3, 3]  # (N,3)
-
+        predicted_points = pose_mats_ref[:, :3, 3] # (N, 3)
+        # print(f"Predicted points: {predicted_points}")
         T_cam_base = np.linalg.inv(T_base_cam).astype(np.float32)
         R = T_cam_base[:3, :3].astype(np.float32)
         t = T_cam_base[:3, 3].astype(np.float32)
         points_cam = (R @ predicted_points.T).T + t
+        # print(f"Predicted points in cam frame: {points_cam}")
 
         self._cached_points_cam = points_cam.copy()
         overlay = _project_points_with_gradient(image_bgr, K, points_cam,

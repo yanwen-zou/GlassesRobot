@@ -37,7 +37,6 @@ class RealWorldDataset(Dataset):
         num_obs = 1,
         num_action = 20, 
         voxel_size = 0.005,
-        cam_ids = ['104122060902'],
         aug = False,
         aug_trans_min = [-0.2, -0.2, -0.2],
         aug_trans_max = [0.2, 0.2, 0.2],
@@ -702,10 +701,11 @@ class RealWorldDataset(Dataset):
             action_headposes = np.stack(action_headposes).astype(np.float32)
             current_frame_id = obs_frame_ids[-1]
             current_headpose = _load_headpose(current_frame_id).astype(np.float32)
-            headposes_norm_input = action_headposes.copy()
-            if self.obj_pose_mode == "delta":
-                headposes_norm_input = self._absolute_to_delta(headposes_norm_input, current_headpose)
-            action_headposes_normalized = self._normalize_headpose(headposes_norm_input, obj_pose_mode=self.obj_pose_mode)
+            # headposes_norm_input = action_headposes.copy()
+            # if self.obj_pose_mode == "delta":
+            #     headposes_norm_input = self._absolute_to_delta(headposes_norm_input, current_headpose)
+            headposes_norm_input = self._absolute_to_delta(action_headposes.copy(), current_headpose) # sensing arm always use delta control
+            action_headposes_normalized = self._normalize_headpose(headposes_norm_input, obj_pose_mode="delta")
             ret_dict["action_headpose"] = torch.from_numpy(action_headposes).float() # abs head pose in base frame
             ret_dict["action_headpose_normalized"] = torch.from_numpy(action_headposes_normalized).float() # normalized head pose(delta / abs)
             # Normalize on a copy so current_headpose stays in raw coordinates.

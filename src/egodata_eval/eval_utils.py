@@ -8,7 +8,7 @@ import cv2
 import os
 
 from MBA.utils.transformation import rotation_transform  # type: ignore
-from MBA.utils.constants import TRANS_MIN, TRANS_MAX  # type: ignore
+from MBA.utils.constants import TRANS_MIN, TRANS_MAX, TRANS_MIN_DELTA, TRANS_MAX_DELTA  # type: ignore
 from egodata_eval.eval_constant import (
     CALIB_DIR_REL,
     DEFAULT_GLASSES_ZED_TXT,
@@ -241,9 +241,25 @@ def _find_default_ckpt() -> Path:
 
 
 
-def _denormalize_obj_traj(obj_traj: np.ndarray) -> np.ndarray:
+def _denormalize_obj_traj(obj_traj: np.ndarray, obj_pose_mode: str = "abs") -> np.ndarray:
+    if obj_pose_mode not in ["abs", "delta"]:
+        raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
     out = obj_traj.copy()
-    out[:, :3] = (out[:, :3] + 1) * 0.5 * (TRANS_MAX - TRANS_MIN) + TRANS_MIN
+    if obj_pose_mode == "delta":
+        out[:, :3] = (out[:, :3] + 1) * 0.5 * (TRANS_MAX_DELTA - TRANS_MIN_DELTA) + TRANS_MIN_DELTA
+    else:
+        out[:, :3] = (out[:, :3] + 1) * 0.5 * (TRANS_MAX - TRANS_MIN) + TRANS_MIN
+    return out
+
+
+def _normalize_obj_pose(obj_pose: np.ndarray, obj_pose_mode: str = "abs") -> np.ndarray:
+    if obj_pose_mode not in ["abs", "delta"]:
+        raise ValueError(f"Unsupported obj_pose_mode {obj_pose_mode}. Use 'abs' or 'delta'.")
+    out = np.asarray(obj_pose).copy()
+    if obj_pose_mode == "delta":
+        out[:3] = (out[:3] - TRANS_MIN_DELTA) / (TRANS_MAX_DELTA - TRANS_MIN_DELTA) * 2 - 1
+    else:
+        out[:3] = (out[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
     return out
 
 
@@ -386,6 +402,55 @@ def headpose_base_to_i2rt_rel(
     
     # 组合结果
     return np.concatenate([trans_i2rt, rot6d_i2rt], axis=1).astype(np.float32)
+
+
+def headpose_i2rt_to_base_abs(
+    headpose_i2rt: np.ndarray,
+    T_base_cam: np.ndarray,
+    T_i2rt_tcp: np.ndarray,
+    T_tcp_zed: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    将i2rt坐标系下的绝对pose转换到base坐标系下
+
+    Args:
+        headpose_i2rt: [N, 9] 绝对pose，每行包含 [x, y, z, rotation_6d...]
+        T_base_cam: 从相机到base坐标系的变换矩阵
+        T_i2rt_tcp: 从TCP到i2rt坐标系的变换矩阵
+        T_tcp_zed: 从ZED相机到TCP的变换矩阵（可选）
+
+    Returns:
+        [N, 9] 在base坐标系下的绝对pose
+    """
+    if T_tcp_zed is None:
+        T_tcp_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+        if T_tcp_zed is None:
+            raise ValueError(f"Failed to load T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}")
+
+    T_cam_base = np.linalg.inv(T_base_cam.astype(np.float32))
+    T_i2rt_base = (
+        T_i2rt_tcp.astype(np.float32)
+        @ T_tcp_zed.astype(np.float32)
+        @ T_cam_base.astype(np.float32)
+    )
+    T_base_i2rt = np.linalg.inv(T_i2rt_base)
+
+    pose_i2rt = _build_pose_mats(
+        headpose_i2rt[:, :3],
+        headpose_i2rt[:, 3:9],
+    ).astype(np.float32)
+    pose_base = np.einsum(
+        "ij,njk->nik",
+        T_base_i2rt.astype(np.float32),
+        pose_i2rt.astype(np.float32),
+    )
+    xyz_base = pose_base[:, :3, 3]
+    r6_base = rotation_transform(
+        pose_base[:, :3, :3],
+        "matrix",
+        "rotation_6d",
+    )
+    return np.concatenate([xyz_base, r6_base], axis=1).astype(np.float32)
 
 
 def headpose_base_seq_to_rel(
@@ -611,7 +676,19 @@ def _run_i2rt_server(channel: str, home: bool, port: int) -> None:
 
 # VERY IMPORTANT 
 def add_relative(rel_mat: np.ndarray, base_mat: np.ndarray) -> np.ndarray: 
-    res_mat = np.eye(4, dtype=np.float32)
-    res_mat[:3, :3] = rel_mat[:3, :3] @ base_mat[:3, :3]
-    res_mat[:3, 3] = rel_mat[:3, 3] + base_mat[:3, 3]
-    return res_mat
+    rel = np.asarray(rel_mat, dtype=np.float32)
+    base = np.asarray(base_mat, dtype=np.float32)
+    if rel.ndim == 2 and base.ndim == 2: # only input single rel_mat
+        res_mat = np.eye(4, dtype=np.float32)
+        res_mat[:3, :3] = rel[:3, :3] @ base[:3, :3]
+        res_mat[:3, 3] = rel[:3, 3] + base[:3, 3]
+        return res_mat
+    if rel.ndim == 3 and base.ndim == 2:
+        res = np.repeat(np.eye(4, dtype=np.float32)[None, ...], rel.shape[0], axis=0)
+        for i in range(rel.shape[0]):
+            cur = np.eye(4, dtype=np.float32)
+            cur[:3, :3] = rel[i, :3, :3] @ base[:3, :3]
+            cur[:3, 3] = rel[i, :3, 3] + base[:3, 3]
+            res[i] = cur
+        return res
+    raise ValueError(f"Unsupported shapes for add_relative: rel {rel.shape}, base {base.shape}")

@@ -226,11 +226,9 @@ class EvalHardware:
     def execute_robot_traj(
         self,
         traj_denorm: np.ndarray,
-        pose_cam_ob: np.ndarray,
-        T_base_cam: np.ndarray,
+        pose_base_ob: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], list[np.ndarray]]:
         grip_seq = traj_denorm[:, 9].astype(np.float32)
-        pose_base_ob = T_base_cam @ pose_cam_ob
         pose_robot_ob = self.T_robot_base @ pose_base_ob # [4,4]
         pose_seq_base = _build_pose_mats(
             traj_denorm[:, :3],
@@ -270,7 +268,7 @@ class EvalHardware:
                     width_cmd = open_width if grip_val > open_thresh else 0.0
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
-                # tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32)
+                tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))
                 # print(f"[INFO] execute flexiv:{self.idx}")
                 self.idx += 1
                 time.sleep(LOOP_SLEEP_SEC)

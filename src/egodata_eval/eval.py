@@ -24,9 +24,11 @@ from egodata_eval.eval_utils import (
     move_i2rt_to_init_angles,
     save_mask,
     _build_pose_mats,
+    _normalize_obj_pose,
     init_robot_mask_tracker,
     update_robot_mask_tracker,
     cleanup_robot_mask_tracker,
+    headpose_i2rt_to_base_abs
 )  # type: ignore
 from egodata_eval.eval_hardware import EvalHardware
 
@@ -35,8 +37,6 @@ from egodata_eval.get_pose import PoseEstimatorFP
 from egodata_eval.get_head import HeadPoseReader
 from egodata_eval.traj_predictor import TrajectoryPredictor
 
-
-from MBA.utils.constants import TRANS_MIN, TRANS_MAX, IMG_MEAN, IMG_STD  # type: ignore
 from MBA.utils.transformation import rotation_transform, mat_to_xyz_rot, xyz_rot_transform  # type: ignore
 from egodata_eval.eval_constant import *
 
@@ -198,11 +198,12 @@ def _run_depth_traj(
             frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
             pred_state = {
                 "pose_cam_ob": ctx["pose_est"].pose_cam_ob.astype(np.float32),
-                "traj_denorm": traj_pred.last_traj_denorm.astype(np.float32),
+                "traj_denorm": traj_pred.last_traj_pred.astype(np.float32), # abs both in delta/abs option
                 "headpose_pred": None
                 if traj_pred.last_headpose_pred is None
                 else traj_pred.last_headpose_pred.astype(np.float32),
                 "T_base_cam": T_base_cam.astype(np.float32),
+                "pose_mode": traj_pred.obj_pose_mode,
             }
     else:
         print("[DEBUG] Pose not ready...")
@@ -218,6 +219,8 @@ def main():
     ap.add_argument("--num_action", type=int, default=10)
     ap.add_argument("--task", type=str, choices=TASK_CHOICES, default="book", help="Task name (also used as mesh-name).")
     ap.add_argument("--enable-headpose-head", action="store_true", help="Enable headpose diffusion head in RISE model.")
+    ap.add_argument("--obj-pose-mode", type=str, choices=["abs", "delta"], default="delta", help="Model output pose mode: abs or delta.")
+    ap.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
@@ -310,9 +313,13 @@ def main():
     pose_est = None
     print("[INFO] Robot mask: click foreground points, press Enter to finish (Esc to skip).")
 
-    traj_pred = TrajectoryPredictor(ckpt_path = Path(args.ckpt), 
-                                    num_action = args.num_action, 
-                                    enable_headpose_head = args.enable_headpose_head) # current traj pred is under base frame
+    traj_pred = TrajectoryPredictor(
+        ckpt_path=Path(args.ckpt),
+        num_action=args.num_action,
+        obj_pose_mode=args.obj_pose_mode,
+        enable_headpose_head=args.enable_headpose_head,
+        add_curr_cond=args.add_curr_cond,
+    ) # current traj pred is under base frame
     print(f"[INFO] Loaded RISE trajectory predictor from {args.ckpt}")
 
     if args.enable_headpose_head:
@@ -341,7 +348,6 @@ def main():
     frame_idx = 0
     try:
         while True:
-
             stereo = cam.read_stereo()
             if stereo is None:
                 continue
@@ -396,8 +402,10 @@ def main():
                         if T_base_cam is None:
                             raise RuntimeError("[eval] No headpose received yet from topic.")
                         headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
-                        headpose_norm = headpose_raw.copy()
-                        headpose_norm[:3] = (headpose_norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
+                        headpose_norm = _normalize_obj_pose(
+                            headpose_raw,
+                            obj_pose_mode="abs",
+                        )
                     if T_base_cam is not None:
                         T_base_cam_runtime.append(T_base_cam.astype(np.float32))
 
@@ -426,32 +434,47 @@ def main():
                         traj_denorm = pred_state["traj_denorm"]
                         headpose_pred = pred_state["headpose_pred"]
                         T_base_cam_used = pred_state["T_base_cam"]
+                        pose_mode = pred_state["pose_mode"]
                         # print(f"[INFO] pred_state:{pred_state}")
                         if args.enable_headpose_head and headpose_pred is not None:
-                            headpose_base_seq = headpose_pred.astype(np.float32)
-                            headpose_pred_records.append(headpose_base_seq.copy())
                             T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
-                            headpose_rel_seq = headpose_base_seq_to_rel(
-                                headpose_base_seq,
-                                T_base_cam_used,
-                            ) # relative to the frame that starts inference
-                            # print(f"[DEBUG] headpose_rel_seq: {np.round(headpose_rel_seq[0]*100,3)}")
+                            if pose_mode == "abs": 
+                                headpose_base_seq = headpose_pred.astype(np.float32) # headpose base abs
+                                headpose_pred_records.append(headpose_base_seq.copy())
+                                headpose_rel_seq = headpose_base_seq_to_rel(
+                                    headpose_base_seq,
+                                    T_base_cam_used,
+                                ) # relative to the frame that starts inference
+                            elif pose_mode == "delta":
+                                headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
+                                # record headpose (under base frame)
+                                headpose_base_seq = headpose_i2rt_to_base_abs(
+                                    headpose_rel_seq,
+                                    T_base_cam_used,
+                                    T_i2rt_tcp,
+                                ) 
+                                headpose_pred_records.append(headpose_base_seq.copy())
+
                             headpose_i2rt_rel = headpose_base_to_i2rt_rel(
                                 headpose_rel_seq,
                                 T_base_cam_used,
                                 T_i2rt_tcp,
                             )
-                            # print(f"[DEBUG] headpose_i2rt_rel: {np.round(headpose_i2rt_rel[0]*100,3)}")
                             pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
-                            # print(f"[DEBUG] pred_tcp_i2rt_rel: {np.round(pred_tcp_i2rt_rel[0]*100,3)}")
                             end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
                             exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
                             time.sleep(1.0)  # wait for motion to finish
 
+                        if args.add_curr_cond:
+                            pose_base_ob = T_base_cam_used.astype(np.float32) @ pose_cam_ob.astype(np.float32)
+                        else:
+                            pose_base_ob = _build_pose_mats(
+                                traj_denorm[:1, :3],
+                                traj_denorm[:1, 3:3+6],
+                            )[0].astype(np.float32)
                         pose_robot_ob, pose_seq_robot, step_poses = exec_ctx.execute_robot_traj(
                             traj_denorm,
-                            pose_cam_ob.astype(np.float32),
-                            T_base_cam_used.astype(np.float32),
+                            pose_base_ob,
                         )
                         pose_records.append(
                             {

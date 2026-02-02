@@ -25,7 +25,6 @@ class RISE(nn.Module):
         obj_dim = 10,
         enable_headpose_head = False,
         headpose_dim = 9,
-        # obj_pose_mode = "delta",
         add_curr_cond = True,
     ):
         super().__init__()

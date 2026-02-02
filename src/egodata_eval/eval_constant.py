@@ -7,7 +7,7 @@ I2RT_INIT_STEPS = 80
 TASK_CHOICES = ("teapot", "book", "sword", "cup")
 TASK_I2RT_TARGET_RAD = {
     "teapot": np.array([0.1506, 0.6502, 0.9227, -0.2426, -0.0025, -0.0093, 0.0013], dtype=np.float32),
-    "book": np.array([-0.0055, 0.8498, 1.0613, -0.299, 0.2498, -0.0067, 0.0013], dtype=np.float32),
+    "book": np.array([-0.3502, 0.7998, 1.062, -0.2471, 0.0059, -0.0109, 0.0012], dtype=np.float32),
     "sword": np.deg2rad(np.array([
         -0.2292,
         51.5547,
@@ -35,10 +35,10 @@ I2RT_CMD_STEPS = 100
 
 # Trajectory execution parameters.
 UPDATE_INTERVAL = 2
-STEPS_TO_EXECUTE = 10
+STEPS_TO_EXECUTE = 7
 GRIP_OPEN_THRESH = {
     "teapot": 0.85,
-    "book": 0.7,
+    "book": 0.8,
     "sword": 0.7,
     "cup": 0.7,
 }

@@ -7,9 +7,9 @@ Expected dataset layout under --data-path:
     rgb/000000.png, ...
     depth/000000.npy (meters) or png (depth-in-mm)
     ob_in_cam.npy (Nx4x4 pose matrices) OR ob_in_cam/000000.npy (4x4 per frame)
-    cam_to_base/000000.npy (4x4, camera->base for first frame; reused for all frames)
-    head_pos/ (directory; first col is idx, next 7 columns are xyz+quat) or head_pos.txt
-    optional: intrinsics.npy (3x3)
+    cam_to_base.txt (anchor cam->base per RealWorldDataset) + head_pos.txt or head_pos/
+    optional: intrinsics.npy (3x3), cam_K.txt
+Legacy (fallback) cam_to_base/000000.npy is still supported.
 
 Outputs (for vis_eval.py):
     train_output/episode/<dataset_name>_<timestamp>/
@@ -25,12 +25,14 @@ import time
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 from types import SimpleNamespace
+import warnings
 
 import cv2
 import MinkowskiEngine as ME  # type: ignore
 import numpy as np
 import torch
 import sys
+from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 
 here = Path(__file__).resolve()
 project_root = here.parents[2]
@@ -46,10 +48,11 @@ for path in reversed([project_root, mba_root, src_root]):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from egodata_eval.eval import TrajectoryPredictor
-from egodata_eval.eval_utils import _build_pose_mats, _denormalize_obj_traj
+from egodata_eval.traj_predictor import TrajectoryPredictor
+from egodata_eval.eval_utils import _build_pose_mats, _denormalize_obj_traj, _normalize_obj_pose
+from egodata_eval.eval_constant import TASK_CHOICES, DEFAULT_MESH_NAME, VIDEO_FPS
+from egodata_eval.get_pose import PoseEstimatorFP
 from MBA.dataset.realworld import RealWorldDataset
-from MBA.utils.constants import TRANS_MIN, TRANS_MAX
 from MBA.utils.transformation import xyz_rot_transform
 
 
@@ -94,33 +97,82 @@ def _load_cam_to_base_map(
     seq_path: Path,
     frame_ids: Sequence[str],
     head_to_zed: Path,
+    cam_to_base_rot_noise_std: float = 0.0,
 ) -> Dict[str, np.ndarray]:
-    helper = SimpleNamespace(cam_to_base_rot_noise_std=0.0)
-    head_pos_path = seq_path / "head_pos"
-    if not head_pos_path.exists():
-        head_pos_path = seq_path / "head_pos.txt"
-    extr_map: Dict[int, np.ndarray] = {}
-    extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(helper, str(head_pos_path), str(head_to_zed))
-    cam_map = RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
+    helper = SimpleNamespace(cam_to_base_rot_noise_std=float(cam_to_base_rot_noise_std))
+    head_pos_file = seq_path / "head_pos.txt"
+    head_pos_dir = seq_path / "head_pos"
+    if head_pos_file.is_file():
+        extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(
+            helper, str(head_pos_file), str(head_to_zed)
+        )
+    elif head_pos_dir.is_dir():
+        extr_map = RealWorldDataset._load_camera_extrinsics_from_dir(
+            helper, str(head_pos_dir), str(head_to_zed)
+        )
+    else:
+        extr_map = {}
+        warnings.warn(
+            f"[eval_dataset] Missing head_pos.txt or head_pos dir in {seq_path}; using identity extrinsics."
+        )
+
+    try:
+        return RealWorldDataset._load_cam_to_base(helper, str(seq_path), list(frame_ids), extr_map)
+    except FileNotFoundError as exc:
+        warnings.warn(f"[eval_dataset] {exc} Falling back to legacy cam_to_base loader.")
+        return _load_cam_to_base_legacy(seq_path, frame_ids)
+
+
+def _load_cam_to_base_legacy(seq_path: Path, frame_ids: Sequence[str]) -> Dict[str, np.ndarray]:
+    cam_dir = seq_path / "cam_to_base"
+    if not cam_dir.exists():
+        raise FileNotFoundError(f"Missing cam_to_base.txt or legacy cam_to_base dir in {seq_path}.")
+    cam_files = {p.stem: p for p in _list_frames(cam_dir)}
+    if not cam_files:
+        raise FileNotFoundError(f"Empty cam_to_base dir in {seq_path}.")
+    if len(cam_files) == 1:
+        single_mat = _load_matrix(next(iter(cam_files.values())))
+        return {fid: single_mat.copy() for fid in frame_ids}
+    cam_map: Dict[str, np.ndarray] = {}
+    for fid in frame_ids:
+        path = cam_files.get(fid)
+        if path is None:
+            raise FileNotFoundError(f"Missing cam_to_base for frame {fid} in {seq_path}.")
+        cam_map[fid] = _load_matrix(path)
     return cam_map
 
 
-def _normalize_obj_np(traj: np.ndarray) -> np.ndarray:
-    norm = traj.copy()
-    norm[:, :3] = (norm[:, :3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
-    return norm
+def _absolute_to_delta(pose_seq: np.ndarray, base_pose: np.ndarray) -> np.ndarray:
+    """Convert absolute pose sequence to delta representation relative to base_pose."""
+    pose_seq = pose_seq.copy()
+    pose = torch.from_numpy(pose_seq[..., :9]).float()
+    base = torch.from_numpy(base_pose[..., :9]).float()
+    if base.dim() == 1:
+        base = base.unsqueeze(0).expand(pose.shape[0], -1)
+
+    result = pose.clone()
+    result[..., :3] = pose[..., :3] - base[..., :3]
+
+    target_rot6 = pose[..., 3:9].contiguous()
+    base_rot6 = base[..., 3:9].contiguous()
+    target_rot_mat = rotation_6d_to_matrix(target_rot6.reshape(-1, 6))
+    base_rot_mat = rotation_6d_to_matrix(base_rot6.reshape(-1, 6))
+    delta_rot_mat = target_rot_mat @ base_rot_mat.transpose(-1, -2)
+    delta_rot6 = matrix_to_rotation_6d(delta_rot_mat).reshape_as(target_rot6)
+    result[..., 3:9] = delta_rot6
+
+    pose_seq[..., :9] = result.numpy()
+    return pose_seq
 
 
-def _normalize_headpose_np(headpose: np.ndarray) -> np.ndarray:
-    norm = headpose.copy()
-    norm[:3] = (norm[:3] - TRANS_MIN) / (TRANS_MAX - TRANS_MIN) * 2 - 1
-    return norm
-
-
-def _denormalize_headpose_np(traj: np.ndarray) -> np.ndarray:
-    denorm = traj.copy()
-    denorm[:, :3] = (denorm[:, :3] + 1) * 0.5 * (TRANS_MAX - TRANS_MIN) + TRANS_MIN
-    return denorm
+def _normalize_pose_seq(traj: np.ndarray, obj_pose_mode: str) -> np.ndarray:
+    traj = np.asarray(traj, dtype=np.float32)
+    if traj.ndim != 2:
+        raise ValueError(f"Expected (T, D) pose sequence, got shape {traj.shape}")
+    return np.stack(
+        [_normalize_obj_pose(pose, obj_pose_mode=obj_pose_mode) for pose in traj],
+        axis=0,
+    )
 
 
 def _build_future_obj_traj(
@@ -130,6 +182,8 @@ def _build_future_obj_traj(
     cam_to_base_map: Dict[str, np.ndarray],
     terminal_ids: set[int],
     horizon: int,
+    obj_pose_mode: str,
+    current_obj: np.ndarray | None = None,
     clamp_to_last: bool = False,
 ) -> np.ndarray:
     last_idx = len(frame_ids) - 1
@@ -158,7 +212,11 @@ def _build_future_obj_traj(
         term = np.array([1.0 if int(frame_key) in terminal_ids else 0.0], dtype=np.float32)
         traj.append(np.concatenate([xyz_rot, term], axis=0))
     traj_np = np.stack(traj, axis=0)
-    return _normalize_obj_np(traj_np)
+    if obj_pose_mode == "delta":
+        if current_obj is None:
+            raise ValueError("current_obj is required when obj_pose_mode is 'delta'.")
+        traj_np = _absolute_to_delta(traj_np, current_obj)
+    return _normalize_pose_seq(traj_np, obj_pose_mode=obj_pose_mode)
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -199,36 +257,59 @@ def _predict_sequence(
     pose_cam_ob: np.ndarray,
     T_base_cam: np.ndarray | None,
     headpose_cond: np.ndarray | None,
-) -> Tuple[np.ndarray, Dict[str, np.ndarray] | None]:
+) -> Tuple[np.ndarray, Dict[str, np.ndarray] | None, np.ndarray]:
     pose_base_ob = T_base_cam @ pose_cam_ob
-    feats, coords, _ = predictor._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
-    st = ME.SparseTensor(feats, coords)
-    cur_obj = predictor._current_obj_vec(pose_base_ob)
-    headpose_tensor = None
-    if headpose_cond is not None:
-        headpose_tensor = torch.from_numpy(headpose_cond[None, :]).to(predictor.device)
-
-    with torch.no_grad():
-        outputs = predictor.model(
-            st,
-            batch_size=1,
-            current_obj=torch.from_numpy(cur_obj[None, :]).to(predictor.device),
-            headpose_cond=headpose_tensor,
+    overlay, _ = predictor.predict_and_overlay(
+        image_bgr,
+        depth_m,
+        K,
+        pose_cam_ob,
+        T_base_cam=T_base_cam,
+        headpose_cond=headpose_cond,
+    )
+    outputs = {}
+    if predictor.last_traj_pred is not None:
+        obj_traj_abs = predictor.last_traj_pred.astype(np.float32)
+        # print(f"obj_traj_abs: {obj_traj_abs}")
+        if predictor.obj_pose_mode == "delta":
+            base_xyz6d = xyz_rot_transform(
+                pose_base_ob, from_rep="matrix", to_rep="rotation_6d"
+            ).astype(np.float32)
+            obj_traj_delta = _absolute_to_delta(obj_traj_abs, base_xyz6d)
+            outputs["obj_pred"] = _normalize_pose_seq(
+                obj_traj_delta, obj_pose_mode=predictor.obj_pose_mode
+            )
+        else:
+            outputs["obj_pred"] = _normalize_pose_seq(
+                obj_traj_abs, obj_pose_mode=predictor.obj_pose_mode
+            )
+    if predictor.last_headpose_pred is not None:
+        outputs["headpose_pred"] = _normalize_pose_seq(
+            predictor.last_headpose_pred.astype(np.float32),
+            obj_pose_mode=predictor.obj_pose_mode,
         )
     pred: Dict[str, np.ndarray] = {}
-    if "obj_pred" in outputs:
-        obj_traj_norm = outputs["obj_pred"].squeeze(0).detach().cpu().numpy()
-        obj_traj_ref = _denormalize_obj_traj(obj_traj_norm)
+    if outputs is not None and "obj_pred" in outputs:
+        obj_pred = outputs["obj_pred"]
+        if torch.is_tensor(obj_pred):
+            obj_traj_norm = obj_pred.squeeze(0).detach().cpu().numpy()
+        else:
+            obj_traj_norm = np.asarray(obj_pred, dtype=np.float32)
+        obj_traj_ref = _denormalize_obj_traj(obj_traj_norm, obj_pose_mode=predictor.obj_pose_mode)
         pose_mats_ref = _build_pose_mats(obj_traj_ref[:, :3], obj_traj_ref[:, 3:9])
         pred["pose_mats"] = pose_mats_ref
         pred["traj_norm"] = obj_traj_norm
-    if "headpose_pred" in outputs:
-        headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
-        pred["headpose_pred"] = _denormalize_headpose_np(headpose_pred_norm)
+    if outputs is not None and "headpose_pred" in outputs:
+        headpose_pred = outputs["headpose_pred"]
+        if torch.is_tensor(headpose_pred):
+            headpose_pred_norm = headpose_pred.squeeze(0).detach().cpu().numpy()
+        else:
+            headpose_pred_norm = np.asarray(headpose_pred, dtype=np.float32)
+        pred["headpose_pred"] = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode=predictor.obj_pose_mode)
         pred["headpose_pred_norm"] = headpose_pred_norm
     if not pred:
         raise RuntimeError("No predictions were made by the model.")
-    return pose_base_ob, pred
+    return pose_base_ob, pred, overlay
 
 
 def main() -> None:
@@ -266,6 +347,19 @@ def main() -> None:
         help="Path to tcp->zed calibration used when deriving cam_to_base.",
     )
     parser.add_argument(
+        "--cam-to-base-rot-noise-std",
+        type=float,
+        default=0.0,
+        help="Std-dev (radians) of optional rotation noise for cam_to_base (matches RealWorldDataset).",
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        choices=TASK_CHOICES,
+        default=DEFAULT_MESH_NAME,
+        help="Task name (also used as mesh-name under data/<task>/mesh.obj).",
+    )
+    parser.add_argument(
         "--clamp_future_loss",
         action="store_true",
         help="When set, clamp GT future indices to the last frame when computing loss.",
@@ -275,6 +369,19 @@ def main() -> None:
         action="store_true",
         help="Enable headpose diffusion head and conditioning.",
     )
+    parser.add_argument(
+        "--obj-pose-mode",
+        type=str, choices=["abs", "delta"],
+        default="delta",
+        help="Model output pose mode: abs or delta.",
+    )
+    parser.add_argument(
+        "--add_curr_cond",
+        required=True,
+        choices=["true", "false"],
+        help="Whether to add current obj pose as extra cond for diffusion head (true/false).",
+    )
+
     args = parser.parse_args()
 
     data_path = args.data_path.resolve()
@@ -312,7 +419,12 @@ def main() -> None:
     else:
         terminal_ids = set(int(fid) for fid in frame_ids)
 
-    cam2base_map = _load_cam_to_base_map(data_path, frame_ids, args.head_to_zed)
+    cam2base_map = _load_cam_to_base_map(
+        data_path,
+        frame_ids,
+        args.head_to_zed,
+        cam_to_base_rot_noise_std=args.cam_to_base_rot_noise_std,
+    )
 
     if args.intrinsics:
         K = _load_intrinsics(args.intrinsics)
@@ -328,16 +440,26 @@ def main() -> None:
 
     T_robot_base = _load_matrix(args.T_robot_base)
 
+    add_curr_cond = str(args.add_curr_cond).lower() == "true"
     predictor = TrajectoryPredictor(
         args.ckpt,
         num_action=args.num_action,
+        obj_pose_mode=args.obj_pose_mode,
         enable_headpose_head=args.enable_headpose_head,
+        add_curr_cond=add_curr_cond,
     )
     horizon = getattr(predictor.model.action_decoder, "horizon", args.num_action)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     episode_dir = args.output_root.resolve() / f"{data_path.name}_{timestamp}"
     episode_dir.mkdir(parents=True, exist_ok=True)
+    video_path = episode_dir / "stream.mp4"
+
+    mesh_path = project_root / "data" / args.task / "mesh.obj"
+    if not mesh_path.exists():
+        raise FileNotFoundError(f"Mesh not found: {mesh_path}")
+    pose_drawer = PoseEstimatorFP(mesh_path)
+    writer: cv2.VideoWriter | None = None
 
     pose_records: List[Dict[str, object]] = []
     cam_runtime: List[np.ndarray] = []
@@ -352,12 +474,19 @@ def main() -> None:
         pose_cam_ob = pose_list[frame_idx]
         frame_key = rgb_path.stem
         T_base_cam = cam2base_map[frame_key]
+        pose_base_ob_gt = T_base_cam @ pose_cam_ob
+        base_xyz = pose_base_ob_gt[:3, 3].astype(np.float32)
+        print(f"[GT] frame {frame_idx:04d} base_xyz: {base_xyz.tolist()}")
 
         cam_runtime.append(T_base_cam.astype(np.float32))
         headpose_raw = xyz_rot_transform(T_base_cam, from_rep="matrix", to_rep="rotation_6d").astype(np.float32)
-        headpose_cond = _normalize_headpose_np(headpose_raw) if args.enable_headpose_head else None
+        headpose_cond = (
+            _normalize_obj_pose(headpose_raw, obj_pose_mode="abs")
+            if args.enable_headpose_head
+            else None
+        )
 
-        pose_base_ob, seq_pred = _predict_sequence(
+        pose_base_ob, seq_pred, overlay = _predict_sequence(
             predictor,
             image_bgr,
             depth_m,
@@ -366,6 +495,15 @@ def main() -> None:
             T_base_cam,
             headpose_cond,
         )
+        # print(f"[DEBUG] pose_base_ob:{pose_base_ob}")
+        # print(f"[PRED] frame {frame_idx:04d} cam_xyz: {pose_cam_ob[:3, 3].tolist()}")
+        overlay = pose_drawer.draw_overlay(overlay, K, pose_cam_ob=pose_cam_ob)
+        if writer is None:
+            h, w = overlay.shape[:2]
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(video_path), fourcc, VIDEO_FPS, (w, h))
+        if writer is not None and writer.isOpened():
+            writer.write(overlay)
         pose_robot_ob = T_robot_base @ pose_base_ob
         pose_seq_robot = None
         obj_traj_norm = None
@@ -384,6 +522,13 @@ def main() -> None:
                 )
 
         if obj_traj_norm is not None and horizon > 0:
+            current_obj_raw = xyz_rot_transform(
+                pose_base_ob, from_rep="matrix", to_rep="rotation_6d"
+            ).astype(np.float32)
+            current_term = np.array(
+                [1.0 if int(frame_key) in terminal_ids else 0.0], dtype=np.float32
+            )
+            current_obj = np.concatenate([current_obj_raw, current_term], axis=0)
             gt_traj = _build_future_obj_traj(
                 frame_idx,
                 frame_ids,
@@ -391,12 +536,14 @@ def main() -> None:
                 cam2base_map,
                 terminal_ids,
                 min(horizon, len(obj_traj_norm)),
+                predictor.obj_pose_mode,
+                current_obj=current_obj,
                 clamp_to_last=args.clamp_future_loss,
             )
             steps = min(obj_traj_norm.shape[0], gt_traj.shape[0])
             if steps > 0:
-                obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm[:steps])
-                gt_traj_denorm = _denormalize_obj_traj(gt_traj[:steps])
+                obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm[:steps], obj_pose_mode=predictor.obj_pose_mode)
+                gt_traj_denorm = _denormalize_obj_traj(gt_traj[:steps], obj_pose_mode=predictor.obj_pose_mode)
                 diff = obj_traj_denorm - gt_traj_denorm
                 mse_per_step = np.mean(diff * diff, axis=1)
                 for step, loss in enumerate(mse_per_step):
@@ -422,6 +569,9 @@ def main() -> None:
     np.save(episode_dir / "robot_tcp_history.npy", np.zeros((0, 3), dtype=np.float32))
     np.save(episode_dir / "headpose_pred.npy", np.array(headpose_preds, dtype=object))
     np.save(episode_dir / "headpose_pred_norm.npy", np.array(headpose_preds_norm, dtype=object))
+    if writer is not None:
+        writer.release()
+        print(f"[OK] Saved video to {video_path}")
     print(f"[OK] Saved {len(pose_records)} pose records to {episode_dir}")
     if loss_count > 0:
         avg_loss = loss_sum / loss_count
