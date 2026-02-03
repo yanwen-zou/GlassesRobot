@@ -29,7 +29,7 @@ fi
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME] [--mesh-root PATH] [--clear]
+Usage: $(basename "$0") [--data-root PATH] [episode_name ...][--scale VALUE] [--mesh-name NAME] [--mesh-root PATH] [--clear] [--run-fp] [--run-ball-calib]
 
 Without episode arguments, all directories under the selected data root are processed.
 Specify one or more episode names (matching subdirectories of the data root) to
@@ -45,6 +45,8 @@ POSITIONAL_ARGS=()
 MESH_NAME="book" # Set Mesh Name
 MESH_ROOT="${PROJECT_ROOT}/data"
 CLEAR_EPISODE=0
+RUN_FP=0
+RUN_BALL_CALIB=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --data-root|--data_root)
@@ -73,6 +75,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --clear)
       CLEAR_EPISODE=1
+      shift
+      ;;
+    --run-fp|--run_fp)
+      RUN_FP=1
+      shift
+      ;;
+    --run-ball-calib|--run_ball_calib)
+      RUN_BALL_CALIB=1
       shift
       ;;
     -h|--help)
@@ -400,6 +410,10 @@ for episode in "${READY_EPISODES[@]}"; do
     echo "⚠️  mask_hand missing for $episode; skipping robot arm mask." >&2
     continue
   fi
+  if find "$hand_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  mask_hand already exists for $episode; skipping robot arm mask."
+    continue
+  fi
   ARM_EPISODES+=("$episode")
 done
 
@@ -554,11 +568,12 @@ else
   echo "⏭️  All episodes already have ball masks; skipping ball sam."
 fi
 
-# Decide which episodes still need ball pipeline based on cam_to_base.txt presence.
+# Decide which episodes still need ball pipeline based on cam_to_base.txt presence,
+# unless explicitly requested to re-run ball calibration.
 declare -a BALL_PIPELINE_EPISODES=()
 for episode in "${READY_EPISODES[@]}"; do
   episode_dir="${DATA_ROOT}/${episode}"
-  if [ -f "${episode_dir}/cam_to_base.txt" ]; then
+  if [ "$RUN_BALL_CALIB" -eq 0 ] && [ -f "${episode_dir}/cam_to_base.txt" ]; then
     echo "⏭️  cam_to_base.txt already exists for $episode; skipping ball pipeline."
     continue
   fi
@@ -617,7 +632,7 @@ for episode in "${READY_EPISODES[@]}"; do
   fi
 
   vis_video_path="${episode_dir}/foundationpose_vis.mp4"
-  if [ -f "$vis_video_path" ]; then
+  if [ -f "$vis_video_path" ] && [ "$RUN_FP" -eq 0 ]; then
     echo "⏭️  FoundationPose output already exists for $episode (foundationpose_vis.mp4). Skipping."
     continue
   fi

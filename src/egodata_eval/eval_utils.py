@@ -399,6 +399,10 @@ def headpose_base_to_i2rt_rel(
         "matrix",
         "rotation_6d",
     )
+
+    translate_scale = 1
+
+    trans_i2rt *= translate_scale # scale translation for debug
     
     # 组合结果
     return np.concatenate([trans_i2rt, rot6d_i2rt], axis=1).astype(np.float32)

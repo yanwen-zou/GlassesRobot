@@ -438,22 +438,32 @@ def main():
                         # print(f"[INFO] pred_state:{pred_state}")
                         if args.enable_headpose_head and headpose_pred is not None:
                             T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
-                            if pose_mode == "abs": 
-                                headpose_base_seq = headpose_pred.astype(np.float32) # headpose base abs
-                                headpose_pred_records.append(headpose_base_seq.copy())
-                                headpose_rel_seq = headpose_base_seq_to_rel(
-                                    headpose_base_seq,
-                                    T_base_cam_used,
-                                ) # relative to the frame that starts inference
-                            elif pose_mode == "delta":
-                                headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
-                                # record headpose (under base frame)
-                                headpose_base_seq = headpose_i2rt_to_base_abs(
-                                    headpose_rel_seq,
-                                    T_base_cam_used,
-                                    T_i2rt_tcp,
-                                ) 
-                                headpose_pred_records.append(headpose_base_seq.copy())
+                            # if pose_mode == "abs": 
+                            #     headpose_base_seq = headpose_pred.astype(np.float32) # headpose base abs
+                            #     headpose_pred_records.append(headpose_base_seq.copy())
+                            #     headpose_rel_seq = headpose_base_seq_to_rel(
+                            #         headpose_base_seq,
+                            #         T_base_cam_used,
+                            #     ) # relative to the frame that starts inference
+                            # elif pose_mode == "delta":
+                            #     headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
+                            #     # record headpose (under base frame)
+                            #     headpose_base_seq = headpose_i2rt_to_base_abs(
+                            #         headpose_rel_seq,
+                            #         T_base_cam_used,
+                            #         T_i2rt_tcp,
+                            #     ) 
+                            #     headpose_pred_records.append(headpose_base_seq.copy())
+
+                            # only use delta to control headpose robot
+                            headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
+                            # record headpose (under base frame)
+                            headpose_base_seq = headpose_i2rt_to_base_abs(
+                                headpose_rel_seq,
+                                T_base_cam_used,
+                                T_i2rt_tcp,
+                            ) 
+                            headpose_pred_records.append(headpose_base_seq.copy())
 
                             headpose_i2rt_rel = headpose_base_to_i2rt_rel(
                                 headpose_rel_seq,
@@ -461,7 +471,8 @@ def main():
                                 T_i2rt_tcp,
                             )
                             pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
-                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_TO_EXECUTE)
+                            # print(f"pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[:3]}")
+                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_HEAD_TO_EXECUTE)
                             exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
                             time.sleep(1.0)  # wait for motion to finish
 
@@ -476,6 +487,17 @@ def main():
                             traj_denorm,
                             pose_base_ob,
                         )
+                        # Stop policy if predicted gripper signal exceeds threshold within steps_to_execute.
+                        try:
+                            grip_seq = traj_denorm[:, 9].astype(np.float32)
+                            steps_to_execute = int(getattr(exec_ctx, "steps_to_execute", STEPS_TO_EXECUTE))
+                            grip_window = grip_seq[1:1 + steps_to_execute]
+                            open_thresh = GRIP_OPEN_THRESH.get(args.task, GRIP_OPEN_THRESH["book"])
+                            if grip_window.size > 0 and np.any(grip_window > open_thresh):
+                                print("[INFO] Predicted gripper open in steps_to_execute; stopping policy.")
+                                break
+                        except Exception as e:
+                            print(f"[WARN] Failed to check predicted gripper signal: {e}")
                         pose_records.append(
                             {
                                 "timestamp": float(time.time()),
@@ -528,11 +550,6 @@ def main():
                 # Write current display frame to video
                 if writer is not None and writer.isOpened():
                     writer.write(disp)
-                gripper_width = float(exec_ctx.flexiv_robot.get_gripper_state())
-                open_width = getattr(exec_ctx.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
-                if gripper_width >= 0.8 * open_width:
-                    print(f"[INFO] Gripper open ({gripper_width:.4f}m); stopping.")
-                    break
                 del frame, frame_right
                 torch.cuda.empty_cache()
     finally:

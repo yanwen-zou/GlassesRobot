@@ -174,6 +174,15 @@ def _normalize_pose_seq(traj: np.ndarray, obj_pose_mode: str) -> np.ndarray:
         axis=0,
     )
 
+def _normalize_headpose_seq(traj: np.ndarray) -> np.ndarray:
+    traj = np.asarray(traj, dtype=np.float32)
+    if traj.ndim != 2:
+        raise ValueError(f"Expected (T, D) pose sequence, got shape {traj.shape}")
+    return np.stack(
+        [_normalize_obj_pose(pose, obj_pose_mode="delta") for pose in traj],
+        axis=0,
+    )
+
 
 def _build_future_obj_traj(
     frame_idx: int,
@@ -284,9 +293,9 @@ def _predict_sequence(
                 obj_traj_abs, obj_pose_mode=predictor.obj_pose_mode
             )
     if predictor.last_headpose_pred is not None:
-        outputs["headpose_pred"] = _normalize_pose_seq(
-            predictor.last_headpose_pred.astype(np.float32),
-            obj_pose_mode=predictor.obj_pose_mode,
+        print(f"predictor.last_headpose_pred: {predictor.last_headpose_pred}")
+        outputs["headpose_pred"] = _normalize_headpose_seq(
+            predictor.last_headpose_pred.astype(np.float32)
         )
     pred: Dict[str, np.ndarray] = {}
     if outputs is not None and "obj_pred" in outputs:
@@ -305,7 +314,7 @@ def _predict_sequence(
             headpose_pred_norm = headpose_pred.squeeze(0).detach().cpu().numpy()
         else:
             headpose_pred_norm = np.asarray(headpose_pred, dtype=np.float32)
-        pred["headpose_pred"] = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode=predictor.obj_pose_mode)
+        pred["headpose_pred"] = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode="delta") # only use delta for headpose
         pred["headpose_pred_norm"] = headpose_pred_norm
     if not pred:
         raise RuntimeError("No predictions were made by the model.")
@@ -561,6 +570,7 @@ def main() -> None:
         )
         headpose_preds.append(None if headpose_pred is None else headpose_pred.astype(np.float32))
         headpose_preds_norm.append(None if headpose_pred_norm is None else headpose_pred_norm.astype(np.float32))
+        print(f"headpose pred: {headpose_pred}")
         print(f"[INFO] processed frame {frame_idx:04d} -> pose record saved.")
 
     np.save(episode_dir / "robot_pose_records.npy", np.array(pose_records, dtype=object))

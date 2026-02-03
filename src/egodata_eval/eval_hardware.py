@@ -265,7 +265,14 @@ class EvalHardware:
                 width_cmd = 0.0
                 if steps_grip is not None and i < len(steps_grip):
                     grip_val = float(steps_grip[i])
-                    width_cmd = open_width if grip_val > open_thresh else 0.0
+                    print(f"[INFO] grip_val:{grip_val}")
+                    if grip_val > open_thresh:
+                        if self.task_name == "teapot":
+                            print("[INFO] Teapot grip > threshold; stopping arm without opening gripper.")
+                            break
+                        width_cmd = open_width
+                    else:
+                        width_cmd = 0.0
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
                 tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))

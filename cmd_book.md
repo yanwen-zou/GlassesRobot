@@ -13,6 +13,10 @@ ros2 launch egodata_record zed_handeye.launch.py \
 # SAM2 For Mask -> FoundationStereo For Depth -> FoundationPose for Obj Pose Tracking
 ./cmd_book_pipeline.sh
 
+./4070_pipeline.sh --data-root data/train_teapot/ --run-fp --mesh-name teapot
+
+# then cleanup intermediate before upload to server.
+
 # SAM2 For ball calib
 ./scripts_calib_balls/run_ball_pipeline.sh --data-dir data/20251127_175609
 

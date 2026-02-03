@@ -170,7 +170,6 @@ class TrajectoryPredictor:
 
         feats, coords, cloud = self._make_sparse_input(image_bgr, depth_m, K, T_base_cam=T_base_cam)
         st = ME.SparseTensor(feats, coords)
-        print(f"[DEBUG] pose_base_ob:{pose_base_ob}")
         cur_obj = self._current_obj_vec(pose_base_ob) #after norm
         # print(f"[DEBUG] cur_obj:{cur_obj}")
         headpose_tensor = None
@@ -191,21 +190,23 @@ class TrajectoryPredictor:
         if self.model.enable_headpose_head:
             headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
 
-        obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm, obj_pose_mode=self.obj_pose_mode)
+        print(f"[DEBUG] headpose norm: {headpose_pred_norm}")
         if self.model.enable_headpose_head:
-            headpose_denorm = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode=self.obj_pose_mode) 
+            headpose_denorm = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode="delta")
+            # print(f"[DEBUG] headpose denorm: {headpose_denorm}") 
             self.last_headpose_pred = headpose_denorm.astype(np.float32)
         else:
             self.last_headpose_pred = None
 
+        obj_traj_denorm = _denormalize_obj_traj(obj_traj_norm, obj_pose_mode=self.obj_pose_mode)
         if self.obj_pose_mode == "delta":
-            print(f"Obj delta: {obj_traj_denorm}")
+            # print(f"Obj delta: {obj_traj_denorm}")
             pose_mats_rel = _build_pose_mats(obj_traj_denorm[:, :3], obj_traj_denorm[:, 3:3+6])
             pose_mats_ref = add_relative(pose_mats_rel, pose_base_ob)
             abs_xyz6d = xyz_rot_transform(pose_mats_ref, from_rep="matrix", to_rep="rotation_6d")
             self.last_traj_pred = np.concatenate([abs_xyz6d.astype(np.float32), obj_traj_denorm[:, 9:10]], axis=1)
         elif self.obj_pose_mode == "abs":
-            print(f"Obj abs: {obj_traj_denorm}")
+            # print(f"Obj abs: {obj_traj_denorm}")
             pose_mats_ref = _build_pose_mats(obj_traj_denorm[:, :3], obj_traj_denorm[:, 3:3+6])
             self.last_traj_pred = obj_traj_denorm
 
