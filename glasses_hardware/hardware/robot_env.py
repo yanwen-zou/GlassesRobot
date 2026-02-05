@@ -9,12 +9,14 @@ from torchvision.transforms import Compose, Resize, CenterCrop
 from torchvision.transforms import InterpolationMode
 
 from my_device.robot import FlexivRobot, FlexivGripper
-from my_device.camera import CameraD400
+from my_device.zed import ZEDCamera
 from my_device.keyboard import Keyboard
 from my_device.sigma import Sigma7
 from my_device.logitechG29_wheel import Controller
 from my_device.macros import CAM_SERIAL, INTV, HUMAN, ROBOT
 
+ZED_RESOLUTION = "WVGA"
+ZED_FPS = 30
 
 class RobotEnv:
     def __init__(self, camera_serial=CAM_SERIAL, img_shape=None, fps=10, is_multi_robot_env=False,robot_id=None,robot_info_dict=None):
@@ -35,7 +37,7 @@ class RobotEnv:
             self.controller = Controller(0)
         
         self.gripper = FlexivGripper(self.robot)
-        self.cameras = [CameraD400(s) for s in self.camera_serial]
+        self.zed = self._init_camera() # use ZED camera
         if not is_multi_robot_env:
             self.keyboard = Keyboard(is_multi_robot_env=is_multi_robot_env)
         self.home_pose = self.robot.init_pose
@@ -57,6 +59,16 @@ class RobotEnv:
         
         # Keep track of throttle usage for human intervention
         self.last_throttle = False
+
+    def _init_camera(self):
+        return ZEDCamera(resolution=ZED_RESOLUTION, fps=ZED_FPS)
+
+    def _get_camera_frames(self):
+        stereo = self.zed.read_stereo()
+        if stereo is None:
+            return None, None
+        left_img, right_img = stereo
+        return left_img, right_img
         
     def reset_robot(self, random_init=False, random_init_pose=None):
         if random_init and random_init_pose is not None:
@@ -86,26 +98,34 @@ class RobotEnv:
         tcp_pose, joint_pos, _, _ = self.robot.get_robot_state()
         
         # Get camera images
-        cam_data = []
-        for camera in self.cameras:
-            color_image, _ = camera.get_data()
-            cam_data.append(color_image)
+        left_img, right_img = self._get_camera_frames()
+        if left_img is None or right_img is None:
+            return {
+                'tcp_pose': tcp_pose,
+                'joint_pos': joint_pos,
+                'policy_left_img': None,
+                'policy_right_img': None,
+                'demo_left_img': None,
+                'demo_right_img': None,
+                'left_img_raw': None,
+                'right_img_raw': None
+            }
             
         # Process images
-        policy_side_img = self.policy_side_image_processor(torch.from_numpy(cv2.cvtColor(cam_data[0].copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        policy_wrist_img = self.policy_wrist_image_processor(torch.from_numpy(cv2.cvtColor(cam_data[1].copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        demo_side_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(cam_data[0].copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        demo_wrist_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(cam_data[1].copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
+        policy_left_img = self.policy_side_image_processor(torch.from_numpy(cv2.cvtColor(left_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
+        policy_right_img = self.policy_wrist_image_processor(torch.from_numpy(cv2.cvtColor(right_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
+        demo_left_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(left_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
+        demo_right_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(right_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
         
         return {
             'tcp_pose': tcp_pose,
             'joint_pos': joint_pos,
-            'policy_side_img': policy_side_img,
-            'policy_wrist_img': policy_wrist_img,
-            'demo_side_img': demo_side_img,
-            'demo_wrist_img': demo_wrist_img,
-            'side_img_raw': cam_data[0].copy(),
-            'wrist_img_raw': cam_data[1].copy()
+            'policy_left_img': policy_left_img,
+            'policy_right_img': policy_right_img,
+            'demo_left_img': demo_left_img,
+            'demo_right_img': demo_right_img,
+            'left_img_raw': left_img.copy(),
+            'right_img_raw': right_img.copy()
         }
     
     def deploy_action(self, tcp_action, gripper_action):
@@ -114,32 +134,31 @@ class RobotEnv:
     
     def save_scene_images(self, output_dir, episode_idx):
         """Save scene images to output directory"""
-        cam_data = []
-        for camera in self.cameras:
-            color_image, _ = camera.get_data()
-            cam_data.append(color_image)
-        side_img = cv2.cvtColor(cam_data[0].copy(), cv2.COLOR_BGR2RGB)
-        wrist_img = cv2.cvtColor(cam_data[1].copy(), cv2.COLOR_BGR2RGB)
-        Image.fromarray(side_img).save(f"{output_dir}/side_{episode_idx}.png")
-        Image.fromarray(wrist_img).save(f"{output_dir}/wrist_{episode_idx}.png")
-        return side_img, wrist_img
+        left_img_bgr, right_img_bgr = self._get_camera_frames()
+        if left_img_bgr is None or right_img_bgr is None:
+            return None, None
+        left_img = cv2.cvtColor(left_img_bgr.copy(), cv2.COLOR_BGR2RGB)
+        right_img = cv2.cvtColor(right_img_bgr.copy(), cv2.COLOR_BGR2RGB)
+        Image.fromarray(left_img).save(f"{output_dir}/left_{episode_idx}.png")
+        Image.fromarray(right_img).save(f"{output_dir}/right_{episode_idx}.png")
+        return left_img, right_img
     
-    def align_with_reference(self, ref_side_img, ref_wrist_img, raw=False):
+    def align_with_reference(self, ref_left_img, ref_right_img, raw=False):
         print("=====================================================align_with_reference")
         """Align current scene with reference images"""
-        cv2.namedWindow("Side", cv2.WINDOW_AUTOSIZE)
-        cv2.namedWindow("Wrist", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Left", cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow("Right", cv2.WINDOW_AUTOSIZE)
         if not self.is_multi_robot_env:
             while not self.keyboard.ctn:
                 state_data = self.get_robot_state()
                 if raw:
-                    side_img = state_data['side_img_raw']
-                    wrist_img = state_data['wrist_img_raw']
+                    left_img = state_data['left_img_raw']
+                    right_img = state_data['right_img_raw']
                 else:
-                    side_img = cv2.cvtColor(state_data['demo_side_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-                    wrist_img = cv2.cvtColor(state_data['demo_wrist_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-                cv2.imshow("Side", (np.array(side_img) * 0.5 + np.array(ref_side_img) * 0.5).astype(np.uint8))
-                cv2.imshow("Wrist", (np.array(wrist_img) * 0.5 + np.array(ref_wrist_img) * 0.5).astype(np.uint8))
+                    left_img = cv2.cvtColor(state_data['demo_left_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+                    right_img = cv2.cvtColor(state_data['demo_right_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+                cv2.imshow("Left", (np.array(left_img) * 0.5 + np.array(ref_left_img) * 0.5).astype(np.uint8))
+                cv2.imshow("Right", (np.array(right_img) * 0.5 + np.array(ref_right_img) * 0.5).astype(np.uint8))
                 cv2.waitKey(1)
             self.keyboard.ctn = False
             cv2.destroyAllWindows()
@@ -148,20 +167,20 @@ class RobotEnv:
             while (not input().strip().upper() == 'C'):
                 state_data = self.get_robot_state()
             if raw:
-                side_img = state_data['side_img_raw']
-                wrist_img = state_data['wrist_img_raw']
+                left_img = state_data['left_img_raw']
+                right_img = state_data['right_img_raw']
             else:
-                side_img = cv2.cvtColor(state_data['demo_side_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-                wrist_img = cv2.cvtColor(state_data['demo_wrist_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
-            cv2.imshow("Side", (np.array(side_img) * 0.5 + np.array(ref_side_img) * 0.5).astype(np.uint8))
-            cv2.imshow("Wrist", (np.array(wrist_img) * 0.5 + np.array(ref_wrist_img) * 0.5).astype(np.uint8))
+                left_img = cv2.cvtColor(state_data['demo_left_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+                right_img = cv2.cvtColor(state_data['demo_right_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.imshow("Left", (np.array(left_img) * 0.5 + np.array(ref_left_img) * 0.5).astype(np.uint8))
+            cv2.imshow("Right", (np.array(right_img) * 0.5 + np.array(ref_right_img) * 0.5).astype(np.uint8))
             cv2.waitKey(1)
     
     def align_scene_with_file(self, output_dir, episode_idx):
         """Align current scene with reference images from a given file path"""
-        ref_side_img = cv2.imread(f"{output_dir}/side_{episode_idx}.png")
-        ref_wrist_img = cv2.imread(f"{output_dir}/wrist_{episode_idx}.png")
-        self.align_with_reference(ref_side_img, ref_wrist_img, raw=True)
+        ref_left_img = cv2.imread(f"{output_dir}/left_{episode_idx}.png")
+        ref_right_img = cv2.imread(f"{output_dir}/right_{episode_idx}.png")
+        self.align_with_reference(ref_left_img, ref_right_img, raw=True)
     
     def detach_sigma(self):
         """Detach sigma device and store TCP pose"""
@@ -216,10 +235,10 @@ class RobotEnv:
         
         # Save demo data for return
         processed_data = {
-            'policy_wrist_img': state_data['policy_wrist_img'],
-            'policy_side_img': state_data['policy_side_img'],
-            'demo_wrist_img': state_data['demo_wrist_img'],
-            'demo_side_img': state_data['demo_side_img'],
+            'policy_right_img': state_data['policy_right_img'],
+            'policy_left_img': state_data['policy_left_img'],
+            'demo_right_img': state_data['demo_right_img'],
+            'demo_left_img': state_data['demo_left_img'],
             'tcp_pose': tcp_pose,
             'joint_pos': joint_pos,
             'action': np.concatenate((curr_p_action, curr_r_action.as_quat(scalar_first=True), [gripper_action])),

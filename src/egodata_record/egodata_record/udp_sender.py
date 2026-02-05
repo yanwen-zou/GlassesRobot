@@ -8,7 +8,8 @@ from typing import Final, Iterable, Tuple
 class UDPSender:
     """Lightweight helper for sending UDP messages to a fixed endpoint."""
 
-    def __init__(self, target_host: str = '192.168.43.138', target_port: int = 5007) -> None:
+    # def __init__(self, target_host: str = '192.168.43.138', target_port: int = 5007) -> None:
+    def __init__(self, target_host: str = '10.130.4.109', target_port: int = 5007) -> None:
         self._target: Final[Tuple[str, int]] = (target_host, target_port)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 

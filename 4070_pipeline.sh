@@ -397,21 +397,13 @@ if [ "${#READY_EPISODES[@]}" -eq 0 ]; then
   exit 1
 fi
 
-for episode in "${READY_EPISODES[@]}"; do
-  generate_hand_masks "$episode"
-done
-
-# === Robot arm masks (interactive click prompt) merged into mask_hand ===
+# === Robot arm masks (interactive click prompt) saved to mask_arm ===
 declare -a ARM_EPISODES=()
 for episode in "${READY_EPISODES[@]}"; do
   episode_dir="${DATA_ROOT}/${episode}"
-  hand_dir="${episode_dir}/mask_hand"
-  if [ ! -d "$hand_dir" ]; then
-    echo "⚠️  mask_hand missing for $episode; skipping robot arm mask." >&2
-    continue
-  fi
-  if find "$hand_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
-    echo "⏭️  mask_hand already exists for $episode; skipping robot arm mask."
+  arm_dir="${episode_dir}/mask_arm"
+  if [ -d "$arm_dir" ] && find "$arm_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  mask_arm already exists for $episode; skipping robot arm mask."
     continue
   fi
   ARM_EPISODES+=("$episode")
@@ -443,45 +435,17 @@ if [ "${#ARM_EPISODES[@]}" -gt 0 ]; then
     "${FOUNDATION_STEREO_DIR}/scripts/batch_sam_segmentation.py" \
     --data_root "$ARM_TEMP_ROOT"
 
-  # Merge robot arm masks into mask_hand
+  # Store robot arm masks to mask_arm (merge happens after grounded-SAM hand masks).
   for episode in "${ARM_EPISODES[@]}"; do
     episode_dir="${DATA_ROOT}/${episode}"
     temp_masks="${ARM_TEMP_ROOT}/${episode}/masks"
-    hand_dir="${episode_dir}/mask_hand"
-    if [ ! -d "$temp_masks" ]; then
-      echo "⚠️  No robot arm masks for $episode; skipping merge."
+    arm_dir="${episode_dir}/mask_arm"
+    if [ ! -d "$temp_masks" ] || ! find "$temp_masks" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+      echo "⚠️  No robot arm masks for $episode; skipping save."
       continue
     fi
-    run_glasses python - "$temp_masks" "$hand_dir" <<'PY'
-import sys
-from pathlib import Path
-import numpy as np
-from PIL import Image
-
-temp_masks = Path(sys.argv[1])
-hand_dir = Path(sys.argv[2])
-hand_dir.mkdir(parents=True, exist_ok=True)
-
-def read_mask(path: Path):
-    arr = np.array(Image.open(path).convert("L"), dtype=np.uint8)
-    return arr
-
-def write_mask(path: Path, arr: np.ndarray):
-    Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
-
-for mask_path in sorted(temp_masks.glob("*.png")):
-    out_path = hand_dir / mask_path.name
-    arm = read_mask(mask_path)
-    if out_path.exists():
-        hand = read_mask(out_path)
-        if hand.shape != arm.shape:
-            # Prefer arm shape; resize hand if needed
-            hand = np.array(Image.fromarray(hand).resize((arm.shape[1], arm.shape[0])))
-        merged = np.maximum(hand, arm)
-    else:
-        merged = arm
-    write_mask(out_path, merged)
-PY
+    mkdir -p "$arm_dir"
+    cp -f "$temp_masks"/*.png "$arm_dir"/
   done
 
   cleanup_arm
@@ -567,6 +531,54 @@ if [ "${#BALL_EPISODES[@]}" -gt 0 ]; then
 else
   echo "⏭️  All episodes already have ball masks; skipping ball sam."
 fi
+
+for episode in "${READY_EPISODES[@]}"; do
+  generate_hand_masks "$episode"
+done
+
+# Merge robot arm masks into mask_hand (after grounded-SAM hand masks).
+for episode in "${READY_EPISODES[@]}"; do
+  episode_dir="${DATA_ROOT}/${episode}"
+  arm_dir="${episode_dir}/mask_arm"
+  hand_dir="${episode_dir}/mask_hand"
+  if [ ! -d "$arm_dir" ] || ! find "$arm_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    continue
+  fi
+  if [ ! -d "$hand_dir" ] || ! find "$hand_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⚠️  mask_hand missing for $episode; skipping robot arm merge." >&2
+    continue
+  fi
+  run_glasses python - "$arm_dir" "$hand_dir" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+from PIL import Image
+
+arm_dir = Path(sys.argv[1])
+hand_dir = Path(sys.argv[2])
+hand_dir.mkdir(parents=True, exist_ok=True)
+
+def read_mask(path: Path):
+    arr = np.array(Image.open(path).convert("L"), dtype=np.uint8)
+    return arr
+
+def write_mask(path: Path, arr: np.ndarray):
+    Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
+
+for mask_path in sorted(arm_dir.glob("*.png")):
+    out_path = hand_dir / mask_path.name
+    arm = read_mask(mask_path)
+    if out_path.exists():
+        hand = read_mask(out_path)
+        if hand.shape != arm.shape:
+            # Prefer arm shape; resize hand if needed
+            hand = np.array(Image.fromarray(hand).resize((arm.shape[1], arm.shape[0])))
+        merged = np.maximum(hand, arm)
+    else:
+        merged = arm
+    write_mask(out_path, merged)
+PY
+done
 
 # Decide which episodes still need ball pipeline based on cam_to_base.txt presence,
 # unless explicitly requested to re-run ball calibration.

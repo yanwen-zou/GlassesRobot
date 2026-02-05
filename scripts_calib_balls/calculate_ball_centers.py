@@ -142,7 +142,7 @@ def calculate_ball_centroid(
     if ys.size == 0:
         return None
 
-    z = depth_m[ys, xs].astype(np.float32) / 1.0 # DEBUG: Hardcode scaling for depth unmatching
+    z = depth_m[ys, xs].astype(np.float32) / 1# DEBUG: Hardcode scaling for depth unmatching
     fx, fy = intrinsic[0, 0], intrinsic[1, 1]
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
     x = (xs - cx) * z / fx
@@ -193,6 +193,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="If set, save PNG debug images for masks invalidated by the shape check to this directory.",
     )
+    parser.add_argument(
+        "--first-frame-only",
+        action="store_true",
+        help="Only process the first depth frame (useful when tracking later frames via head pose).",
+    )
     return parser.parse_args()
 
 
@@ -218,6 +223,8 @@ def main():
         raise FileNotFoundError(f"No depth files found in {depth_dir}")
     
     frame_ids = [int(f.stem) for f in depth_files]
+    if args.first_frame_only and frame_ids:
+        frame_ids = frame_ids[:1]
     print(f"Found {len(frame_ids)} frames")
 
     # Process each frame

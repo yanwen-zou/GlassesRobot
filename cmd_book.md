@@ -44,9 +44,9 @@ torchrun --master_addr 127.0.0.1 --master_port 14524 \
   --batch_size 64 --num_epochs 1000 --save_epochs 50 --num_workers 24 \
   --lr 3e-4 --seed 233 --enable_mba --obj_pose_mode delta --num_action 10
 
-  # 3D Traj Preview
+  # 3D Traj view
 
-python MBA/dataset/traj_vis.py
+python src/egodata_eval/visualize_scripts/vis_eval.py --data-dir src/egodata_eval/eval_output/20260203_204815/ --spawn
 
 # -------------AnyGrasp------------------
 # This is amazing. It can literally grasp anything I want.
