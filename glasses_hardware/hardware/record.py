@@ -3,10 +3,16 @@ import os
 import h5py
 import numpy as np
 import argparse
+from datetime import datetime
 from scipy.spatial.transform import Rotation as R
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 
-from hardware.robot_env import RobotEnv
-from hardware.my_device.macros import CAM_SERIAL
+from robot_env import RobotEnv
+from my_device.macros import CAM_SERIAL
+
+
 def _get_next_episode_id(h5file: h5py.File) -> int:
     if "episodes" not in h5file:
         h5file.create_group("episodes")
@@ -33,12 +39,28 @@ def _write_episode(h5file: h5py.File, episode: dict) -> int:
     return episode_id
 
 
-def record(h5file: h5py.File, robot_env:RobotEnv):
+class HeadPoseSubscriber(Node):
+    def __init__(self, pose_topic: str):
+        super().__init__("record_headpose_sub")
+        self._latest = None
+        self.create_subscription(PoseStamped, pose_topic, self._on_pose, 10)
+
+    def _on_pose(self, msg: PoseStamped) -> None:
+        self._latest = msg
+
+    def get_latest(self):
+        rclpy.spin_once(self, timeout_sec=0.0)
+        return self._latest
+
+
+def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscriber | None = None):
     tcp_pose = []
     joint_pos = []
     action = []
     right_cam = []
     left_cam = []
+    headpose = []
+    robot_state = []
 
     robot_env.keyboard.start = False
     robot_env.keyboard.discard = False
@@ -59,19 +81,36 @@ def record(h5file: h5py.File, robot_env:RobotEnv):
 
         # Initialize at the beginning of the episode
         if cnt == 0:
-            random_init_pose = robot_env.robot.init_pose + np.random.uniform(-0.1, 0.1, size=7)
-            robot_env.reset_robot(random_init=True, random_init_pose=random_init_pose)
-            last_p = random_init_pose[:3]
-            last_r = R.from_quat(random_init_pose[3:7], scalar_first=True)
             cnt += 1
             print("Episode start!")
-            continue
         
         right_cam.append(transition_data['demo_right_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8))
         left_cam.append(transition_data['demo_left_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8))
         tcp_pose.append(transition_data['tcp_pose'])
         joint_pos.append(transition_data['joint_pos'])
-        action.append(transition_data['action'])
+        gripper_state = float(robot_env.gripper.get_gripper_state())
+        action.append(np.concatenate([last_p, last_r.as_quat(scalar_first=True), [gripper_state]], axis=0))
+        robot_state.append(np.concatenate([transition_data['tcp_pose'], [gripper_state]], axis=0))
+        if headpose_sub is not None:
+            msg = headpose_sub.get_latest()
+            if msg is None:
+                headpose.append(np.full((7,), np.nan, dtype=np.float32))
+                print("No headpose message received! Writing NaN. ")
+            else:
+                headpose.append(
+                    np.array(
+                        [
+                            msg.pose.position.x,
+                            msg.pose.position.y,
+                            msg.pose.position.z,
+                            msg.pose.orientation.x,
+                            msg.pose.orientation.y,
+                            msg.pose.orientation.z,
+                            msg.pose.orientation.w,
+                        ],
+                        dtype=np.float32,
+                    )
+                )
 
     if not robot_env.keyboard.start or robot_env.keyboard.quit or robot_env.keyboard.discard:
         print('WARNING: discard the demo!')
@@ -83,8 +122,11 @@ def record(h5file: h5py.File, robot_env:RobotEnv):
     episode['right_cam'] = np.stack(right_cam, axis=0)
     episode['left_cam'] = np.stack(left_cam, axis=0)
     episode['tcp_pose'] = np.stack(tcp_pose, axis=0)
+    episode['robot_state'] = np.stack(robot_state, axis=0)
     episode['joint_pos'] = np.stack(joint_pos, axis=0)
     episode['action'] = np.stack(action, axis=0)
+    if headpose:
+        episode['headpose'] = np.stack(headpose, axis=0)
     episode_id = _write_episode(h5file, episode)
     print('Saved episode ', episode_id)
 
@@ -93,20 +135,35 @@ def record(h5file: h5py.File, robot_env:RobotEnv):
 
 
 def main(args):
-    robot_env = RobotEnv(camera_serial=CAM_SERIAL, img_shape=[3]+args.resolution, fps=args.fps)
-    h5_path = os.path.join(args.output, 'replay_buffer.hdf5')
+    headpose_sub = None
+    if args.enable_headpose:
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        headpose_sub = HeadPoseSubscriber(args.headpose_topic)
+    if args.resolution is None:
+        args.resolution = [224, 224]
+    robot_env = RobotEnv(camera_serial=CAM_SERIAL, img_shape=[3] + args.resolution, fps=args.fps)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(args.output, exist_ok=True)
+    h5_path = os.path.join(args.output, f"replay_buffer_{timestamp}.hdf5")
     with h5py.File(h5_path, "a") as h5file:
         while not robot_env.keyboard.quit:
             print("start recording...")
-            record(h5file, robot_env)
+            record(h5file, robot_env, headpose_sub=headpose_sub)
             if not robot_env.keyboard.quit:
                 print("reset the environment...")
-                time.sleep(10)
+                time.sleep(2)
+    if headpose_sub is not None:
+        headpose_sub.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-o', '--output', type=str, required=True)
     parser.add_argument('-res', '--resolution', nargs='+', type=int)
     parser.add_argument('--fps', type=float, default=10.0)
+    parser.add_argument('--enable-headpose', action='store_true')
+    parser.add_argument('--headpose-topic', type=str, default='/glasses_pose')
     args = parser.parse_args()
     main(args)

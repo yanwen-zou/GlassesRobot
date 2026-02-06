@@ -220,7 +220,7 @@ class EvalHardware:
                 "rotation_6d",
             ).squeeze(0)
             target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
-            self._publish_head_cmd(target_xyz_rot6d)
+            # self._publish_head_cmd(target_xyz_rot6d)
             time.sleep(0.2)
 
     def execute_robot_traj(
@@ -276,7 +276,7 @@ class EvalHardware:
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
                 tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))
-                # print(f"[INFO] execute flexiv:{self.idx}")
+                print(f"[INFO] execute flexiv:{self.idx}")
                 self.idx += 1
                 time.sleep(LOOP_SLEEP_SEC)
         return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses

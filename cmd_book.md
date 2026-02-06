@@ -58,4 +58,10 @@ python scripts_data_processing/realsense_record_second.py --keyboard-control
 python src/egodata_eval/eval.py --ckpt MBA/ckpt_deploy/policy_last.ckpt 
 
 # in train dataset, offline
-python src/egodata_eval/eval_dataset.py --data-path data/train/20251210_210052/ --ckpt MBA/ckpt_1213/policy_epoch_1000_seed_233.ckpt 
+python src/egodata_eval/eval_dataset.py --data-path data/train_teapot/20260202_162226/ --ckpt ckpt/ckpt_0203_teapot_abs_wo_curr/policy_epoch_1000_seed_233.ckpt --add_curr_cond false --obj-pose-mode abs --task teapot --enable-headpose-head
+
+# vis the output:
+python src/egodata_eval/visualize_scripts/vis_train.py --data-dir src/egodata_eval/train_output/episode/20260202_162226_20260206_144411 --spawn
+
+# -- eval
+./src/egodata_eval/eval.sh --task book --ckpt ckpt/ckpt_0205_book_abs_wo_curr/policy_epoch_600_seed_233.ckpt --enable-headpose-head --obj-pose-mode abs

@@ -54,6 +54,7 @@ src/FoundationStereo/pretrained_models/
 src/FoundationStereo/sam2_root/checkpoints/
 foundationpose/FoundationPose/demo_data/
 install/
+test_record*/
 
 # Serialized data artifacts
 *.npz
@@ -79,6 +80,7 @@ glasses_hardware/calib/ball_centroids_*
 *.ply
 *.jpg
 *.png
+*.hdf5
 
 # Vendor SDKs / binaries
 glasses_hardware/anygrasp_sdk/

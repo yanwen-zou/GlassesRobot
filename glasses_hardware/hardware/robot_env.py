@@ -55,6 +55,7 @@ class RobotEnv:
 
         self.demo_image_processor = Compose([
             Resize((img_shape[1]+8, img_shape[2]+8), interpolation=BICUBIC),
+            CenterCrop((img_shape[1], img_shape[2]))
         ])
         
         # Keep track of throttle usage for human intervention
@@ -112,10 +113,10 @@ class RobotEnv:
             }
             
         # Process images
-        policy_left_img = self.policy_side_image_processor(torch.from_numpy(cv2.cvtColor(left_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        policy_right_img = self.policy_wrist_image_processor(torch.from_numpy(cv2.cvtColor(right_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        demo_left_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(left_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
-        demo_right_img = self.demo_image_processor(torch.from_numpy(cv2.cvtColor(right_img.copy(), cv2.COLOR_BGR2RGB)).permute(2, 0, 1))
+        policy_left_img = self.policy_side_image_processor(torch.from_numpy(left_img.copy()).permute(2, 0, 1))
+        policy_right_img = self.policy_wrist_image_processor(torch.from_numpy(right_img.copy()).permute(2, 0, 1))
+        demo_left_img = self.demo_image_processor(torch.from_numpy(left_img.copy()).permute(2, 0, 1))
+        demo_right_img = self.demo_image_processor(torch.from_numpy(right_img.copy()).permute(2, 0, 1))
         
         return {
             'tcp_pose': tcp_pose,

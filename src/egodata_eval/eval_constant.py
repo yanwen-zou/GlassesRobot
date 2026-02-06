@@ -6,7 +6,7 @@ I2RT_INIT_DURATION = 2.0
 I2RT_INIT_STEPS = 80
 TASK_CHOICES = ("teapot", "book", "sword", "cup")
 TASK_I2RT_TARGET_RAD = {
-    "teapot": np.array([0.1506, 0.6502, 0.9227, -0.2426, -0.2525, -0.0093, 0.0013], dtype=np.float32),
+    "teapot": np.array([0.0536, 0.3998, 0.6120, 0.0002, -0.0032, -0.0036, 0.0012], dtype=np.float32),
     "book": np.array([-0.2170, 0.6498, 0.5620, 0.1040, 0.0040, -0.0002, 0.0013], dtype=np.float32),
     "sword": np.deg2rad(np.array([
         -0.2292,
