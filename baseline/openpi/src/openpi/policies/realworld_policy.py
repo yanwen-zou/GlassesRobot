@@ -23,31 +23,36 @@ class RealWorldInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
-        wrist_image = _parse_image(datar["observation/wrist_image"]) # only head cam input
-        base_image = np.zeros_like(wrist_image)
-        right_wrist_image = np.zeros_like(wrist_image)
+        if "observation/image" in data: 
+            base_image = _parse_image(data["observation/image"])
+        else:
+            raise KeyError('Missing image key: expected "observation/image", which represents left camera')
+        
+        left_wrist_image = np.zeros_like(base_image)
+        right_wrist_image = np.zeros_like(base_image)
 
-        tcp_arm = np.asarray(data["observation/tcp_arm"], dtype=np.float32)
-        tcp_head = np.asarray(data["observation/tcp_head"], dtype=np.float32)
-        state = np.concatenate([tcp_arm, tcp_head], axis=-1)
+        if "observation/state" in data:
+            state = np.asarray(data["observation/state"], dtype=np.float32)
+        else:
+            raise KeyError('Missing state key: expected ("observation/state").')
 
         inputs = {
             "state": state,
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
+                "left_wrist_0_rgb": left_wrist_image,
                 "right_wrist_0_rgb": right_wrist_image,
             },
             "image_mask": {
-                "base_0_rgb": np.False_,
-                "left_wrist_0_rgb": np.True_,
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.False_,
                 "right_wrist_0_rgb": np.False_,
             },
         }
 
         # For pi0-fast, we don't mask missing images.
         if self.model_type == _model.ModelType.PI0_FAST:
-            inputs["image_mask"]["base_0_rgb"] = np.True_
+            inputs["image_mask"]["left_wrist_0_rgb"] = np.True_
             inputs["image_mask"]["right_wrist_0_rgb"] = np.True_
 
         if "actions" in data:

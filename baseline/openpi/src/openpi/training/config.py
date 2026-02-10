@@ -356,9 +356,10 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         )
 
 
+# use in our experiment
 @dataclasses.dataclass(frozen=True)
 class LeRobotRealWorldDataConfig(DataConfigFactory):
-    """Config for two-arm TCP data with a single wrist camera."""
+    """Config for realworld data with state + single wrist camera."""
 
     action_dim: int = 20
     default_prompt: str | None = None
@@ -369,9 +370,8 @@ class LeRobotRealWorldDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/wrist_image": "wrist_image",
-                        "observation/tcp_arm": "tcp_arm",
-                        "observation/tcp_head": "tcp_head",
+                        "observation/image": "image",
+                        "observation/state": "state",
                         "actions": "actions",
                         "prompt": "prompt",
                     }
@@ -718,7 +718,7 @@ _CONFIGS = [
         name="pi05_realworld",
         model=pi0_config.Pi0Config(action_dim=20, action_horizon=10, pi05=True),
         data=LeRobotRealWorldDataConfig(
-            repo_id="your_repo_id/realworld",
+            repo_id="shi-akihi/book_openpi",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
