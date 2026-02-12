@@ -56,19 +56,34 @@ def parse_args():
         default="src/FoundationStereo/Grounded-SAM-2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
         help="SAM2 config path (relative to repo root)",
     )
+    ap.add_argument("--batch-size", type=int, default=8, help="Batch size for GroundingDINO forward pass")
     return ap.parse_args()
+
+
+def _discover_episode_dirs(data_root: Path) -> list[Path]:
+    if (data_root / "rgb").is_dir():
+        return [data_root]
+    episodes = []
+    for child in sorted(data_root.iterdir()):
+        if child.is_dir() and (child / "rgb").is_dir():
+            episodes.append(child)
+    return episodes
+
+
+def _iter_batches(items, batch_size: int):
+    for i in range(0, len(items), batch_size):
+        yield items[i : i + batch_size]
 
 
 def main():
     args = parse_args()
+    if args.batch_size < 1:
+        raise ValueError(f"--batch-size must be >= 1, got {args.batch_size}")
 
     data_root = Path(args.data_root).expanduser().resolve()
-    rgb_dir = data_root / "rgb"
-    if not rgb_dir.is_dir():
-        raise FileNotFoundError(f"rgb dir not found: {rgb_dir}")
-
-    out_dir = data_root / args.output_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    episode_dirs = _discover_episode_dirs(data_root)
+    if not episode_dirs:
+        raise FileNotFoundError(f"No episode with rgb/ found under: {data_root}")
 
     # Enable bfloat16 + TF32 on Ampere+ for speed
     if torch.cuda.is_available():
@@ -112,54 +127,69 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    sam2_image_model = build_sam2(sam_config_name, str(sam_checkpoint))
+    sam2_image_model = build_sam2(sam_config_name, str(sam_checkpoint), device=device)
     image_predictor = SAM2ImagePredictor(sam2_image_model)
 
     processor = AutoProcessor.from_pretrained(args.model_id)
     grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(args.model_id).to(device)
+    for episode_dir in episode_dirs:
+        rgb_dir = episode_dir / "rgb"
+        out_dir = episode_dir / args.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        images = _sorted_images(rgb_dir)
+        if not images:
+            print(f"⚠️ No images found under: {rgb_dir}, skip.")
+            continue
 
-    images = _sorted_images(rgb_dir)
-    if not images:
-        raise RuntimeError(f"No images found under: {rgb_dir}")
+        print(f"[INFO] Grounded-SAM hand mask for {episode_dir.name}: {len(images)} frames, batch={args.batch_size}")
+        processed = 0
+        for batch_paths in _iter_batches(images, args.batch_size):
+            pil_images = [Image.open(p).convert("RGB") for p in batch_paths]
+            np_images = [np.array(img) for img in pil_images]
+            target_sizes = [img.size[::-1] for img in pil_images]
 
-    for idx, img_path in enumerate(images, start=1):
-        image = Image.open(img_path).convert("RGB")
-        np_image = np.array(image)
-
-        inputs = processor(images=image, text=args.text, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = grounding_model(**inputs)
-        results = processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=args.box_threshold,
-            text_threshold=args.text_threshold,
-            target_sizes=[image.size[::-1]],
-        )
-
-        if len(results) == 0 or results[0]["boxes"].shape[0] == 0:
-            mask = np.zeros((np_image.shape[0], np_image.shape[1]), dtype=np.uint8)
-        else:
-            image_predictor.set_image(np_image)
-            input_boxes = results[0]["boxes"].cpu().numpy()
-            masks, _, _ = image_predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=input_boxes,
-                multimask_output=False,
+            inputs = processor(
+                images=pil_images,
+                text=[args.text] * len(pil_images),
+                return_tensors="pt",
+            ).to(device)
+            with torch.inference_mode():
+                outputs = grounding_model(**inputs)
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                inputs.input_ids,
+                threshold=args.box_threshold,
+                text_threshold=args.text_threshold,
+                target_sizes=target_sizes,
             )
 
-            if masks.ndim == 3:
-                masks = masks[None]
-            elif masks.ndim == 4:
-                masks = masks.squeeze(1)
+            for i, img_path in enumerate(batch_paths):
+                np_image = np_images[i]
+                result = results[i]
+                if result["boxes"].shape[0] == 0:
+                    mask = np.zeros((np_image.shape[0], np_image.shape[1]), dtype=np.uint8)
+                else:
+                    image_predictor.set_image(np_image)
+                    input_boxes = result["boxes"].cpu().numpy()
+                    masks, _, _ = image_predictor.predict(
+                        point_coords=None,
+                        point_labels=None,
+                        box=input_boxes,
+                        multimask_output=False,
+                    )
 
-            mask = (np.any(masks, axis=0).astype(np.uint8)) * 255
-            mask = np.squeeze(mask)
+                    if masks.ndim == 3:
+                        masks = masks[None]
+                    elif masks.ndim == 4:
+                        masks = masks.squeeze(1)
 
-        out_path = out_dir / f"{img_path.stem}.png"
-        Image.fromarray(mask).save(out_path)
-        print(f"[{idx}/{len(images)}] {img_path.name} -> {out_path.name}")
+                    mask = (np.any(masks, axis=0).astype(np.uint8)) * 255
+                    mask = np.squeeze(mask)
+
+                out_path = out_dir / f"{img_path.stem}.png"
+                Image.fromarray(mask).save(out_path)
+                processed += 1
+                print(f"[{processed}/{len(images)}] {img_path.name} -> {out_path.name}")
 
 
 if __name__ == "__main__":

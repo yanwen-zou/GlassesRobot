@@ -4,19 +4,19 @@ import numpy as np
 
 I2RT_INIT_DURATION = 2.0
 I2RT_INIT_STEPS = 80
-TASK_CHOICES = ("teapot", "book", "sword", "cup")
+TASK_CHOICES = ("teapot", "book", "sword", "cup", "bread")
 TASK_I2RT_TARGET_RAD = {
-    "teapot": np.array([0.0536, 0.3998, 0.6120, 0.0002, -0.0032, -0.0036, 0.0012], dtype=np.float32),
+    "teapot": np.array([-0.0799, 0.5902, 0.9523, -0.5479, 0.1274, -0.0082, 0.0012], dtype=np.float32),
     "book": np.array([-0.2170, 0.6498, 0.5620, 0.1040, 0.0040, -0.0002, 0.0013], dtype=np.float32),
-    "sword": np.deg2rad(np.array([
-        -0.2292,
-        51.5547,
-        70.4222,
-        -22.0302,
-        0.8824,
-        -1.9538,
-        0.0917,
-    ], dtype=np.float32)),
+    "sword": np.array([
+        0.0609,
+        0.5528,
+        0.9009,
+        -0.4874,
+        0.2257,
+        0.0313,
+        np.deg2rad(0.0917),
+    ], dtype=np.float32),
     "cup": np.array([
         -0.8216,
         0.5913,
@@ -26,22 +26,48 @@ TASK_I2RT_TARGET_RAD = {
         -0.0861, 
         0.0013
         ], dtype=np.float32),
+    "bread": np.array([
+        -0.4992,
+        0.6492,
+        0.5575,
+        0.2149,
+        -0.3936,
+        0.0303,
+        0.0013,
+    ], dtype=np.float32),
+}
+
+# Task-specific calibration init pose (ball_base <- cam).
+# Keep values hardcoded to avoid runtime file dependency.
+# T_base_cam
+calib_init_pose = {
+    "teapot": None,
+    "book": np.array([
+        [0.251526689, 0.088033824, -0.963838353, 0.968090760],
+        [0.964353586, 0.061780472, 0.257303971, -0.292739480],
+        [0.082197841, -0.994199788, -0.069356296, 0.231739740],
+        [0.0, 0.0, 0.0, 1.0],
+    ], dtype=np.float32),
+    "sword": None,
+    "cup": None,
+    "bread": None,
 }
 
 # I2RT headpose-following parameters.
-I2RT_MAX_ROT = 0.1
+I2RT_MAX_ROT = 0.2
 I2RT_CMD_DURATION = 0.2
 I2RT_CMD_STEPS = 100
 
 # Trajectory execution parameters.
 UPDATE_INTERVAL = 2
 STEPS_TO_EXECUTE = 5
-STEPS_HEAD_TO_EXECUTE = 6
+STEPS_HEAD_TO_EXECUTE = 5
 GRIP_OPEN_THRESH = {
     "teapot": 0.85,
     "book": 0.7,
     "sword": 0.7,
     "cup": 0.7,
+    "bread": 0.7,
 }
 GRIPPER_OPEN_WIDTH_DEFAULT = 0.085
 LOOP_SLEEP_SEC = 0.05

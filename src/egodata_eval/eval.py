@@ -28,7 +28,8 @@ from egodata_eval.eval_utils import (
     init_robot_mask_tracker,
     update_robot_mask_tracker,
     cleanup_robot_mask_tracker,
-    headpose_i2rt_to_base_abs
+    headpose_i2rt_to_base_abs,
+    _load_calib_mat_safe,
 )  # type: ignore
 from egodata_eval.eval_hardware import EvalHardware
 
@@ -222,6 +223,12 @@ def main():
     ap.add_argument("--obj-pose-mode", type=str, choices=["abs", "delta"], default="delta", help="Model output pose mode: abs or delta.")
     ap.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
+    ap.add_argument(
+        "--calib-init-pose",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="After ball calibration, whether to compute T_i2rt_base_ball_base and move I2RT to task init pose.",
+    )
     args = ap.parse_args()
     # Shared interval controlling how often heavy ops run
     update_interval = UPDATE_INTERVAL
@@ -261,8 +268,57 @@ def main():
         move_robot_fn=lambda: move_i2rt_to_init_angles(exec_ctx.i2rt_robot, task_name=args.task),
         centroid_log_dir=out_dir,
     )
-    exec_ctx.i2rt_current_q = exec_ctx.i2rt_robot.current_joint_pos()
-    curr_headpose = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
+    T_cam0_base = np.linalg.inv(T_base_cam0).astype(np.float32)
+
+    if args.calib_init_pose:
+        T_base_cam1 = calib_init_pose.get(args.task, None)
+        if T_base_cam1 is None:
+            raise RuntimeError(f"[eval] Missing calib_init_pose for task={args.task}.")
+        exec_ctx.i2rt_current_q = exec_ctx.i2rt_robot.current_joint_pos()
+        curr_headpose = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs]).astype(np.float32)
+        # Calib-time transform chain:
+        # i2rt_base -> tcp (FK), tcp -> cam (fixed extrinsic), cam -> ball_base (from 3-ball calibration).
+        T_tcp_cam = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+        if T_tcp_cam is None:
+            raise RuntimeError(f"Failed to load fixed tcp->cam transform from {DEFAULT_I2RT_ZED_TXT}")
+        T_i2rt_base_ball_base = (
+            curr_headpose.astype(np.float32)
+            @ T_tcp_cam.astype(np.float32)
+            @ T_cam0_base.astype(np.float32)
+        ).astype(np.float32)
+        T_ball_base_i2rt_base = np.linalg.inv(T_i2rt_base_ball_base).astype(np.float32)
+        t_i2rt_ball_path = out_dir / "T_i2rt_base_ball_base.txt"
+        t_ball_i2rt_path = out_dir / "T_ball_base_i2rt_base.txt"
+        np.savetxt(t_i2rt_ball_path, T_i2rt_base_ball_base, fmt="%.8f")
+        np.savetxt(t_ball_i2rt_path, T_ball_base_i2rt_base, fmt="%.8f")
+        print(f"[INFO] Saved T_i2rt_base_ball_base to: {t_i2rt_ball_path}")
+        print(f"[INFO] Saved T_ball_base_i2rt_base to: {t_ball_i2rt_path}")
+
+        T_cam_tcp = np.linalg.inv(T_tcp_cam).astype(np.float32)
+        T_i2rt_tcp = (
+            T_i2rt_base_ball_base.astype(np.float32)
+            @ T_base_cam1.astype(np.float32)
+            @ T_cam_tcp.astype(np.float32)
+        ).astype(np.float32)
+        print(f"[INFO] Computed T_i2rt_tcp for init pose:\n{T_i2rt_tcp}")
+        success, q_sol = exec_ctx.i2rt_kin.ik(T_i2rt_tcp, "grasp_site", verbose=False)
+        if not success:
+            exec_ctx.i2rt_robot.close()
+            exec_ctx.i2rt_robot.destroy_node()
+            exec_ctx.i2rt_server_proc.terminate()
+            exec_ctx.i2rt_server_proc.join(timeout=2.0)
+            raise RuntimeError(f"[eval] I2RT IK failed for init pose (task={args.task}).")
+        q_target = exec_ctx.i2rt_robot.current_joint_pos().astype(np.float32)
+        q_target[:exec_ctx.i2rt_arm_dofs] = q_sol[:exec_ctx.i2rt_arm_dofs].astype(np.float32)
+        exec_ctx.i2rt_robot.send_joint_pos_rad(
+            q_target,
+            duration=I2RT_INIT_DURATION,
+            steps=I2RT_INIT_STEPS,
+        )
+        exec_ctx.i2rt_current_q = q_target.copy()
+        print(f"[INFO] Reached task init pose via IK for task={args.task}.")
+    else:
+        print("[INFO] Skip post-calib init-pose step (--no-calib-init-pose).")
     cam_size = cam.size
 
     disp_w = int(cam_size[0])
@@ -325,7 +381,7 @@ def main():
     if args.enable_headpose_head:
         if not rclpy.ok():
             rclpy.init(args=None)
-        headpose_reader = HeadPoseReader(headpose_topic, args.glass_zed, T_base_cam0)
+        headpose_reader = HeadPoseReader(headpose_topic, args.glass_zed, T_base_cam0 if not args.calib_init_pose else T_base_cam1)
     mesh_path = Path(__file__).resolve().parents[2] / "data" / args.task / "mesh.obj"
     if not mesh_path.exists():
         raise FileNotFoundError(f"Mesh not found: {mesh_path}")
@@ -383,7 +439,7 @@ def main():
             if depth_enabled:
                 do_update = (frame_idx % update_interval == 0)
                 headpose_norm = None
-                T_base_cam = T_base_cam0
+                T_base_cam = T_base_cam0 if not args.calib_init_pose else T_base_cam1
 
                 if do_update:
                     # Update robot mask at the same cadence as inference/update.
@@ -458,6 +514,7 @@ def main():
                             # only use delta to control headpose robot
                             headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
                             # record headpose (under base frame)
+                            # TODO: need fix
                             headpose_base_seq = headpose_i2rt_to_base_abs(
                                 headpose_rel_seq,
                                 T_base_cam_used,

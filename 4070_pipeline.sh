@@ -532,9 +532,37 @@ else
   echo "⏭️  All episodes already have ball masks; skipping ball sam."
 fi
 
+declare -a HAND_EPISODES=()
 for episode in "${READY_EPISODES[@]}"; do
-  generate_hand_masks "$episode"
+  episode_dir="${DATA_ROOT}/${episode}"
+  hand_dir="${episode_dir}/mask_hand"
+  if [ -d "$hand_dir" ] && find "$hand_dir" -maxdepth 1 -name '*.png' -print -quit >/dev/null; then
+    echo "⏭️  Hand masks already exist for $episode; skipping."
+    continue
+  fi
+  HAND_EPISODES+=("$episode")
 done
+
+if [ "${#HAND_EPISODES[@]}" -gt 0 ]; then
+  HAND_TEMP_ROOT=$(mktemp -d)
+  cleanup_hand() {
+    rm -rf "$HAND_TEMP_ROOT"
+  }
+  trap cleanup_hand EXIT
+
+  for episode in "${HAND_EPISODES[@]}"; do
+    ln -s "${DATA_ROOT}/${episode}" "${HAND_TEMP_ROOT}/${episode}"
+  done
+
+  echo "=============================="
+  echo "🖐️  Launching Grounded-SAM for hand masks (batch episodes)..."
+  run_glasses python -u "$HAND_MASK_SCRIPT" --data-root "$HAND_TEMP_ROOT" --batch-size 4
+
+  cleanup_hand
+  trap - EXIT
+else
+  echo "⏭️  All episodes already have hand masks; skipping grounded-sam."
+fi
 
 # Merge robot arm masks into mask_hand (after grounded-SAM hand masks).
 for episode in "${READY_EPISODES[@]}"; do

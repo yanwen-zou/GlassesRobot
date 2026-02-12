@@ -190,7 +190,7 @@ class TrajectoryPredictor:
         if self.model.enable_headpose_head:
             headpose_pred_norm = outputs["headpose_pred"].squeeze(0).detach().cpu().numpy()
 
-        print(f"[DEBUG] headpose norm: {headpose_pred_norm}")
+        # print(f"[DEBUG] headpose norm: {headpose_pred_norm}")
         if self.model.enable_headpose_head:
             headpose_denorm = _denormalize_obj_traj(headpose_pred_norm, obj_pose_mode="delta")
             # print(f"[DEBUG] headpose denorm: {headpose_denorm}") 

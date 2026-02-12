@@ -55,7 +55,6 @@ python glasses_hardware/hardware/anygrasp_debug.py --real_robot
 python scripts_data_processing/realsense_record_second.py --keyboard-control
 
 # -------------6D Pose prediction Inference ----------------
-python src/egodata_eval/eval.py --ckpt MBA/ckpt_deploy/policy_last.ckpt 
 
 # in train dataset, offline
 python src/egodata_eval/eval_dataset.py --data-path data/train_teapot/20260202_162226/ --ckpt ckpt/ckpt_0203_teapot_abs_wo_curr/policy_epoch_1000_seed_233.ckpt --add_curr_cond false --obj-pose-mode abs --task teapot --enable-headpose-head

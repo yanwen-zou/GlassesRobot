@@ -47,10 +47,11 @@ def wait_for_command() -> Literal["p", "q"]:
 def _select_delta_xyz(task_name: str) -> tuple[float, float, float]:
     # Placeholder values per task (update later as needed).
     task_to_delta = {
-        "teapot": (-0.25, -0.2, 0.1),
+        "teapot": (-0.28, -0.17, 0.1),
         "book": (0, -0.0, 0),
-        "sword": (0.1, -0.05, 0.05),
+        "sword": (0.08, -0.10, 0.08),
         "cup": (-0.3, -0.1, 0.05),
+        "bread": (0.04, -0.07, -0.02)
     }
     base_dx, base_dy, base_dz = task_to_delta.get(task_name, (0.05, 0.0, 0.05))
     dx = float(np.random.uniform(base_dx - 0.05, base_dx + 0))
@@ -70,8 +71,8 @@ def main() -> None:
 
     move_home(robot)
     center_pose = robot.get_tcp_pose().copy()
-    # Rotate center pose +20 degrees CCW about base Z
-    z_rad = np.deg2rad(10.0)
+    # Base rotation about Z
+    z_rad = np.deg2rad(3.0)
     Rz = np.array(
         [
             [np.cos(z_rad), -np.sin(z_rad), 0.0],
@@ -80,7 +81,20 @@ def main() -> None:
         ],
         dtype=np.float32,
     )
-    rot6d = rotation_transform(Rz[None, ...], "matrix", "rotation_6d").squeeze(0)
+    R = Rz
+    if args.task == "sword" or args.task == "bread":
+        y_rad = np.deg2rad(30.0)
+        Ry = np.array(
+            [
+                [np.cos(y_rad), 0.0, np.sin(y_rad)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(y_rad), 0.0, np.cos(y_rad)],
+            ],
+            dtype=np.float32,
+        )
+        R = Rz @ Ry
+
+    rot6d = rotation_transform(R[None, ...], "matrix", "rotation_6d").squeeze(0)
     delta_rot = np.concatenate([np.zeros(3, dtype=np.float32), rot6d], axis=0)
     delta_x, delta_y, delta_z = _select_delta_xyz(args.task)
 

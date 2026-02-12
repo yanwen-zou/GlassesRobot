@@ -26,6 +26,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "$TASK" in
+  teapot|book|sword|cup|bread) ;;
+  *)
+    echo "[ERROR] Unsupported task: $TASK (supported: teapot, book, sword, cup, bread)" >&2
+    exit 1
+    ;;
+esac
+
 python -u glasses_hardware/hardware/grasp_test.py --task "$TASK"
 
 python -u src/egodata_record/egodata_record/headpos_listener.py &

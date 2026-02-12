@@ -220,7 +220,7 @@ class EvalHardware:
                 "rotation_6d",
             ).squeeze(0)
             target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
-            # self._publish_head_cmd(target_xyz_rot6d)
+            self._publish_head_cmd(target_xyz_rot6d)
             time.sleep(0.2)
 
     def execute_robot_traj(

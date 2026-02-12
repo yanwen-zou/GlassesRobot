@@ -78,57 +78,54 @@ def review_episode(episode_dir: str, fps: float) -> str:
 
     stems = _sorted_frame_stems(rgb_files)
     mask_map = _load_mask_map(mask_dir)
+    # Review only the first frame in this episode.
+    stem = stems[0]
+    rgb_path = _find_image_path(rgb_dir, stem)
+    if rgb_path is None:
+        return "skip"
+    frame = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
+    if frame is None:
+        return "skip"
+
+    mask_paths = mask_map.get(stem)
+    if mask_paths:
+        colors = [
+            (0, 0, 255),
+            (0, 255, 0),
+            (255, 0, 0),
+        ]
+        for mask_path in mask_paths:
+            if not os.path.exists(mask_path):
+                continue
+            mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+            if mask is None:
+                continue
+            stem_name = os.path.splitext(os.path.basename(mask_path))[0]
+            parts = stem_name.split("_", 1)
+            color_idx = 0
+            if len(parts) == 2 and parts[1].startswith("id"):
+                try:
+                    color_idx = int(parts[1][2:]) - 1
+                except ValueError:
+                    color_idx = 0
+            color = colors[color_idx % len(colors)]
+            frame = _overlay_mask(frame, mask, color)
+
+    label = f"{os.path.basename(episode_dir)}  frame={stem}"
+    cv2.putText(
+        frame,
+        label,
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
     delay_ms = max(1, int(1000.0 / fps)) if fps > 0 else 1
-
-    idx = 0
     while True:
-        stem = stems[idx % len(stems)]
-        rgb_path = _find_image_path(rgb_dir, stem)
-        if rgb_path is None:
-            idx += 1
-            continue
-        frame = cv2.imread(rgb_path, cv2.IMREAD_COLOR)
-        if frame is None:
-            idx += 1
-            continue
-
-        mask_paths = mask_map.get(stem)
-        if mask_paths:
-            colors = [
-                (0, 0, 255),
-                (0, 255, 0),
-                (255, 0, 0),
-            ]
-            for mask_path in mask_paths:
-                if not os.path.exists(mask_path):
-                    continue
-                mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
-                if mask is None:
-                    continue
-                stem_name = os.path.splitext(os.path.basename(mask_path))[0]
-                parts = stem_name.split("_", 1)
-                color_idx = 0
-                if len(parts) == 2 and parts[1].startswith("id"):
-                    try:
-                        color_idx = int(parts[1][2:]) - 1
-                    except ValueError:
-                        color_idx = 0
-                color = colors[color_idx % len(colors)]
-                frame = _overlay_mask(frame, mask, color)
-
-        label = f"{os.path.basename(episode_dir)}  frame={stem}"
-        cv2.putText(
-            frame,
-            label,
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
         cv2.imshow("masks_balls review (p=pass, d=delete, q=quit)", frame)
-
         key = cv2.waitKey(delay_ms) & 0xFF
         if key == ord("p"):
             return "pass"
@@ -136,8 +133,6 @@ def review_episode(episode_dir: str, fps: float) -> str:
             return "delete"
         if key in (ord("q"), 27):
             return "quit"
-
-        idx += 1
 
 
 def main() -> int:

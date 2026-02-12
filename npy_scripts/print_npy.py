@@ -66,7 +66,7 @@ def main():
                     arr = data[key]
                     print_array(key, arr, args.full, args.limit)
         else:
-            arr = np.load(p, allow_pickle=False)
+            arr = np.load(p, allow_pickle=True)
             print_array(p.name, arr, args.full, args.limit)
     except Exception as e:
         print(f"Failed to load {p}: {e}", file=sys.stderr)
