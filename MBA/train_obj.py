@@ -72,10 +72,7 @@ def train(args_override):
 
     wandb_run = None
     if args.enable_wandb and RANK == 0:
-        try:
-            import wandb
-        except ImportError as exc:
-            raise ImportError("enable_wandb=True but wandb is not installed. Please `pip install wandb`.") from exc
+        import wandb
         wandb_run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
