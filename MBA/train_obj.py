@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import argparse
 import torch.nn as nn
@@ -8,6 +9,7 @@ import torch.distributed as dist
 
 from tqdm import tqdm
 from copy import deepcopy
+from pathlib import Path
 from easydict import EasyDict as edict
 from diffusers.optimization import get_cosine_schedule_with_warmup
 
@@ -64,6 +66,32 @@ def train(args_override):
     set_seed(args.seed)
     torch.cuda.set_device(LOCAL_RANK)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if args.wandb_run_name is None:
+        args.wandb_run_name = Path(args.ckpt_dir).resolve().name
+
+    wandb_run = None
+    if args.enable_wandb and RANK == 0:
+        try:
+            import wandb
+        except ImportError as exc:
+            raise ImportError("enable_wandb=True but wandb is not installed. Please `pip install wandb`.") from exc
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            dir=args.ckpt_dir,
+            mode=args.wandb_mode,
+            config=dict(args),
+        )
+
+    def _sync_scalar(value: float) -> float:
+        t = torch.tensor([value], dtype=torch.float64, device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        t /= WORLD_SIZE
+        return float(t.item())
+
+    def _maybe_sync_cuda() -> None:
+        return
 
     # load
     assert args.enable_mba, "train_obj.py requires --enable_mba to build object diffusion head."
@@ -151,6 +179,7 @@ def train(args_override):
 
     # training
     train_history = []
+    global_step = 0
 
     policy.train()
     for epoch in range(args.resume_epoch + 1, args.num_epochs):
@@ -162,8 +191,19 @@ def train(args_override):
         avg_loss = 0
         avg_obj_loss = 0
         avg_headpose_loss = 0
+        avg_data_time = 0.0
+        avg_prep_time = 0.0
+        avg_forward_time = 0.0
+        avg_backward_time = 0.0
+        avg_optim_time = 0.0
+        iter_end = time.perf_counter()
 
-        for data in pbar:
+        for step_idx, data in enumerate(pbar):
+            data_wait = time.perf_counter() - iter_end
+            avg_data_time += data_wait
+
+            _maybe_sync_cuda()
+            t0 = time.perf_counter()
             # cloud data processing
             cloud_coords = data['input_coords_list']
             cloud_feats = data['input_feats_list']
@@ -182,6 +222,10 @@ def train(args_override):
                 current_headpose = current_headpose.to(device)
             batch_size_cur = obj_data.shape[0]
             cloud_data = ME.SparseTensor(cloud_feats, cloud_coords)
+            _maybe_sync_cuda()
+            t1 = time.perf_counter()
+            avg_prep_time += (t1 - t0)
+
             losses = policy(cloud = cloud_data,
                             batch_size = batch_size_cur,
                             actions_obj = obj_data,
@@ -189,6 +233,10 @@ def train(args_override):
                             current_obj = current_obj,
                             headpose_data = headpose_data,
                             headpose_cond = current_headpose)
+            _maybe_sync_cuda()
+            t2 = time.perf_counter()
+            avg_forward_time += (t2 - t1)
+
             if isinstance(losses, dict):
                 loss = losses.get("obj_loss")
                 headpose_loss = losses.get("headpose_loss")
@@ -200,24 +248,102 @@ def train(args_override):
                     loss = loss + headpose_loss * args.headpose_loss_weight
             else:
                 loss = losses
+
             loss.backward()
+            _maybe_sync_cuda()
+            t3 = time.perf_counter()
+            avg_backward_time += (t3 - t2)
+
             optimizer.step()
             optimizer.zero_grad()
             lr_scheduler.step()
+            _maybe_sync_cuda()
+            t4 = time.perf_counter()
+            avg_optim_time += (t4 - t3)
+
             avg_loss += loss.item()
+            global_step += 1
+            iter_end = time.perf_counter()
+
+            if args.enable_wandb and RANK == 0 and (step_idx + 1) % args.wandb_log_interval == 0:
+                wandb.log(
+                    {
+                        "train/step_loss": float(loss.item()),
+                        "train/lr": float(optimizer.param_groups[0]["lr"]),
+                        "time/data_wait_s": float(avg_data_time / (step_idx + 1)),
+                        "time/prep_s": float(avg_prep_time / (step_idx + 1)),
+                        "time/forward_s": float(avg_forward_time / (step_idx + 1)),
+                        "time/backward_s": float(avg_backward_time / (step_idx + 1)),
+                        "time/optim_s": float(avg_optim_time / (step_idx + 1)),
+                    },
+                    step=global_step,
+                )
 
         avg_loss = avg_loss / num_steps
         avg_obj_loss = avg_obj_loss / num_steps
         avg_headpose_loss = avg_headpose_loss / num_steps
-        sync_loss(avg_loss, device)
+        avg_data_time = avg_data_time / num_steps
+        avg_prep_time = avg_prep_time / num_steps
+        avg_forward_time = avg_forward_time / num_steps
+        avg_backward_time = avg_backward_time / num_steps
+        avg_optim_time = avg_optim_time / num_steps
+
+        avg_loss = _sync_scalar(avg_loss)
+        avg_obj_loss = _sync_scalar(avg_obj_loss)
+        avg_headpose_loss = _sync_scalar(avg_headpose_loss)
+        avg_data_time = _sync_scalar(avg_data_time)
+        avg_prep_time = _sync_scalar(avg_prep_time)
+        avg_forward_time = _sync_scalar(avg_forward_time)
+        avg_backward_time = _sync_scalar(avg_backward_time)
+        avg_optim_time = _sync_scalar(avg_optim_time)
         train_history.append(avg_loss)
 
         if RANK == 0:
+            timings = {
+                "data_wait": avg_data_time,
+                "prep": avg_prep_time,
+                "forward": avg_forward_time,
+                "backward": avg_backward_time,
+                "optim": avg_optim_time,
+            }
+            step_total = sum(timings.values())
+            bottleneck = max(timings, key=timings.get)
             print(
                 "Train loss: {:.6f} (obj: {:.6f}, headpose: {:.6f})".format(
                     avg_loss, avg_obj_loss, avg_headpose_loss
                 )
             )
+            print(
+                "Time/step (ms) | data {:.2f} | prep {:.2f} | fwd {:.2f} | bwd {:.2f} | optim {:.2f} | bottleneck={} ({:.1f}%)".format(
+                    avg_data_time * 1000.0,
+                    avg_prep_time * 1000.0,
+                    avg_forward_time * 1000.0,
+                    avg_backward_time * 1000.0,
+                    avg_optim_time * 1000.0,
+                    bottleneck,
+                    100.0 * timings[bottleneck] / max(step_total, 1e-12),
+                )
+            )
+
+            if args.enable_wandb:
+                wandb.log(
+                    {
+                        "train/epoch": int(epoch),
+                        "train/loss": float(avg_loss),
+                        "train/obj_loss": float(avg_obj_loss),
+                        "train/headpose_loss": float(avg_headpose_loss),
+                        "train/lr": float(optimizer.param_groups[0]["lr"]),
+                        "time/data_wait_s": float(avg_data_time),
+                        "time/prep_s": float(avg_prep_time),
+                        "time/forward_s": float(avg_forward_time),
+                        "time/backward_s": float(avg_backward_time),
+                        "time/optim_s": float(avg_optim_time),
+                        "time/step_total_s": float(step_total),
+                        "time/bottleneck_name": bottleneck,
+                        "time/bottleneck_ratio": float(timings[bottleneck] / max(step_total, 1e-12)),
+                    },
+                    step=global_step,
+                )
 
             if (epoch + 1) % args.save_epochs == 0:
                 torch.save(
@@ -231,6 +357,8 @@ def train(args_override):
             policy.module.state_dict(),
             os.path.join(args.ckpt_dir, "policy_last.ckpt")
         )
+        if wandb_run is not None:
+            wandb_run.finish()
     
 
 if __name__ == '__main__':
@@ -264,4 +392,11 @@ if __name__ == '__main__':
     parser.add_argument('--obj_pose_mode', action='store', type=str, choices=['abs', 'delta'], required=False, default='delta', help='object pose prediction target type')
     parser.add_argument('--headpose_loss_weight', action = 'store', type = float, help = 'headpose loss weight', required = False, default = 0.3)
     parser.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
+    parser.add_argument('--disable_wandb', action='store_false', dest='enable_wandb', help='disable Weights & Biases logging')
+    parser.set_defaults(enable_wandb=True)
+    parser.add_argument('--wandb_project', action='store', type=str, required=False, default='ActiveGlass')
+    parser.add_argument('--wandb_entity', action='store', type=str, required=False, default=None)
+    parser.add_argument('--wandb_run_name', action='store', type=str, required=False, default=None)
+    parser.add_argument('--wandb_mode', action='store', type=str, required=False, default='online', choices=['online', 'offline', 'disabled'])
+    parser.add_argument('--wandb_log_interval', action='store', type=int, required=False, default=20, help='log every N steps to wandb')
     train(vars(parser.parse_args()))
