@@ -269,7 +269,7 @@ def main():
                 print(f"[WARN] Invalid frame count for video: {video_path}")
                 video_frame_count = None
 
-    pred_window = 10
+    pred_window = 5
     for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
@@ -348,9 +348,6 @@ def main():
                 rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
         if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
             headpose_entry = None
-            print(f"Headpose_pred_shape: {headpose_preds.shape}")
-            print(f"Frame_idx: {frame_idx}")
-            print(f"Headpose_preds: {headpose_preds.shape[0]}")
             if "headpose_pred_cursor" not in locals():
                 headpose_pred_cursor = 0
             cursor = headpose_pred_cursor
@@ -359,12 +356,12 @@ def main():
                 headpose_pred_cursor = cursor + 1
             if headpose_entry is not None:
                 headpose_entry = np.asarray(headpose_entry, dtype=np.float32)
+                # In eval output, headpose_pred.npy is already absolute in base frame.
                 headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
                 headpose_points = []
                 for headpose_T in headpose_mats:
                     headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
                     headpose_points.append(headpose_robot[:3, 3])
-                print(f"Logging {len(headpose_points)} headpose points for pred idx {cursor}")
                 rr.log(
                     f"frames/frame_{frame_idx}/headpose_pred/points",
                     rr.Points3D(
@@ -373,6 +370,9 @@ def main():
                         radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
                     ),
                 )
+                expired_idx = frame_idx - pred_window
+                if expired_idx >= 0:
+                    rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         # Prefer aligning camera transforms to the record index (they are saved per update step).
         cam_tf = _cam_transform_for_frame(rec_idx)

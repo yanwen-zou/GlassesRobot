@@ -164,6 +164,7 @@ def segment_episode(
     num_objects: int,
     output_dirname: str,
     obj_prompts: List[Tuple[np.ndarray, np.ndarray]],
+    first_frame_only: bool,
 ):
     out_dir = episode_dir / output_dirname
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -194,26 +195,29 @@ def segment_episode(
                 obj_id=cur_obj_id,
             )
 
-    # Propagate through the rest of the video.
-    for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-        print(f"[multi-sam] {episode_dir.name}: frame {out_frame_idx}")
-        frame_name = Path(frame_names[out_frame_idx]).stem
-        for cur_obj_id, logits in zip(out_obj_ids, out_mask_logits):
-            mask = (logits > 0.0).cpu().numpy()
-            try:
-                save_mask(
-                    mask,
-                    out_dir / f"{frame_name}_id{cur_obj_id}.png",
-                    frame_idx=out_frame_idx,
-                    obj_id=cur_obj_id,
-                )
-            except ValueError as exc:
-                print(f"[multi-sam] ⚠️  skip frame {out_frame_idx}, obj {cur_obj_id}: {exc}")
+    if first_frame_only:
+        print(f"[multi-sam] {episode_dir.name}: first-frame-only enabled, skip propagation.")
+    else:
+        # Propagate through the rest of the video.
+        for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
+            print(f"[multi-sam] {episode_dir.name}: frame {out_frame_idx}")
+            frame_name = Path(frame_names[out_frame_idx]).stem
+            for cur_obj_id, logits in zip(out_obj_ids, out_mask_logits):
+                mask = (logits > 0.0).cpu().numpy()
+                try:
+                    save_mask(
+                        mask,
+                        out_dir / f"{frame_name}_id{cur_obj_id}.png",
+                        frame_idx=out_frame_idx,
+                        obj_id=cur_obj_id,
+                    )
+                except ValueError as exc:
+                    print(f"[multi-sam] ⚠️  skip frame {out_frame_idx}, obj {cur_obj_id}: {exc}")
 
     print(f"[multi-sam] ✅ 完成 {episode_dir.name}，输出目录: {out_dir}")
 
 
-def main(data_root: Path, num_objects: int, output_dirname: str):
+def main(data_root: Path, num_objects: int, output_dirname: str, first_frame_only: bool):
     with WorkingDirectory(SAM_ROOT):
         predictor = build_sam2_video_predictor(
             str(CONFIG_REL_PATH),
@@ -256,6 +260,7 @@ def main(data_root: Path, num_objects: int, output_dirname: str):
             num_objects=num_objects,
             output_dirname=output_dirname,
             obj_prompts=obj_prompts,
+            first_frame_only=first_frame_only,
         )
         processed += 1
 
@@ -285,9 +290,19 @@ if __name__ == "__main__":
         default="masks_balls",
         help="Subdirectory name to store per-object masks.",
     )
+    parser.add_argument(
+        "--first-frame-only",
+        action="store_true",
+        help="Only save masks on the first frame and skip propagation.",
+    )
     args = parser.parse_args()
 
     default_root = PROJECT_ROOT / "data"
     data_root = Path(args.data_root).expanduser().resolve() if args.data_root else default_root
 
-    main(data_root=data_root, num_objects=args.num_objects, output_dirname=args.output_dirname)
+    main(
+        data_root=data_root,
+        num_objects=args.num_objects,
+        output_dirname=args.output_dirname,
+        first_frame_only=args.first_frame_only,
+    )

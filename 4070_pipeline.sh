@@ -523,7 +523,8 @@ if [ "${#BALL_EPISODES[@]}" -gt 0 ]; then
     "${FOUNDATION_STEREO_DIR}/scripts/multi_object_sam_segmentation.py" \
     --data_root "$BALL_TEMP_ROOT" \
     --num_objects 3 \
-    --output_dirname masks_balls
+    --output_dirname masks_balls \
+    --first-frame-only
 
   cleanup_ball
   trap - EXIT

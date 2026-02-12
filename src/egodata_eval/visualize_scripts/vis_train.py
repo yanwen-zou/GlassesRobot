@@ -38,6 +38,19 @@ def _build_pose_mats(translation: np.ndarray, rotation_6d: np.ndarray) -> np.nda
     mats[:, :3, 3] = translation
     return mats
 
+def _apply_rel_sequence(rel_seq: np.ndarray, start_pose: np.ndarray) -> np.ndarray:
+    """Apply relative headpose sequence on top of current-frame headpose."""
+    rel_seq = np.asarray(rel_seq, dtype=np.float32)
+    cur = np.asarray(start_pose, dtype=np.float32).copy()
+    out = np.repeat(np.eye(4, dtype=np.float32)[None, ...], rel_seq.shape[0], axis=0)
+    for i in range(rel_seq.shape[0]):
+        nxt = np.eye(4, dtype=np.float32)
+        nxt[:3, :3] = rel_seq[i, :3, :3] @ cur[:3, :3]
+        nxt[:3, 3] = rel_seq[i, :3, 3] + cur[:3, 3]
+        out[i] = nxt
+        cur = nxt
+    return out
+
 
 def load_records(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
@@ -153,6 +166,7 @@ def main():
         frame_idx = rec.get("frame_idx", -1)
         pose_robot = rec.get("object_pose_robot")
         pred_seq = rec.get("pred_seq_robot")
+        pred_window = 5
         if pose_robot is None:
             continue
         pose_robot = np.asarray(pose_robot, dtype=np.float32).reshape(4, 4)
@@ -175,13 +189,21 @@ def main():
                     radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
                 ),
             )
+            expired_idx = frame_idx - pred_window
+            if expired_idx >= 0:
+                rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
         if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
             headpose_entry = None
             if 0 <= frame_idx < headpose_preds.shape[0]:
                 headpose_entry = headpose_preds[frame_idx]
             if headpose_entry is not None:
                 headpose_entry = np.asarray(headpose_entry, dtype=np.float32)
-                headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
+                headpose_rel_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
+                cam_tf = _cam_transform_for_frame(frame_idx)
+                if cam_tf is None:
+                    headpose_mats = headpose_rel_mats
+                else:
+                    headpose_mats = _apply_rel_sequence(headpose_rel_mats, cam_tf)
                 headpose_points = []
                 for headpose_T in headpose_mats:
                     headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
@@ -194,6 +216,9 @@ def main():
                         radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
                     ),
                 )
+                expired_idx = frame_idx - pred_window
+                if expired_idx >= 0:
+                    rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_tf = _cam_transform_for_frame(frame_idx) # load T_base_cam for this frame
         if cam_tf is not None:

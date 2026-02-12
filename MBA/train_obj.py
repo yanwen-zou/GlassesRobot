@@ -38,6 +38,7 @@ default_args = edict({
     "num_epochs": 1000,
     "save_epochs": 50,
     "num_workers": 24,
+    "prefetch_factor": 4,
     "seed": 233,
     "enable_mba": True,
     "obj_dim": 10,
@@ -123,6 +124,9 @@ def train(args_override):
         dataset,
         batch_size = args.batch_size // WORLD_SIZE,
         num_workers = args.num_workers,
+        prefetch_factor = args.prefetch_factor if args.num_workers > 0 else None,
+        persistent_workers = bool(args.num_workers > 0),
+        pin_memory = True,
         collate_fn = collate_fn,
         sampler = sampler
     )
@@ -383,6 +387,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_epochs', action = 'store', type = int, help = 'training epochs', required = False, default = 1000)
     parser.add_argument('--save_epochs', action = 'store', type = int, help = 'saving epochs', required = False, default = 50)
     parser.add_argument('--num_workers', action = 'store', type = int, help = 'number of workers', required = False, default = 24)
+    parser.add_argument('--prefetch_factor', action='store', type=int, help='dataloader prefetch factor per worker', required=False, default=4)
     parser.add_argument('--seed', action = 'store', type = int, help = 'seed', required = False, default = 233)
 
     parser.add_argument('--enable_mba', action = 'store_true', help = 'mba enabled / disabled')

@@ -48,14 +48,14 @@ def _select_delta_xyz(task_name: str) -> tuple[float, float, float]:
     # Placeholder values per task (update later as needed).
     task_to_delta = {
         "teapot": (-0.28, -0.17, 0.1),
-        "book": (0, -0.0, 0),
+        "book": (-0.03, 0.03, 0),
         "sword": (0.08, -0.10, 0.08),
         "cup": (-0.3, -0.1, 0.05),
         "bread": (0.04, -0.07, -0.02)
     }
     base_dx, base_dy, base_dz = task_to_delta.get(task_name, (0.05, 0.0, 0.05))
-    dx = float(np.random.uniform(base_dx - 0.05, base_dx + 0))
-    dy = float(np.random.uniform(base_dy - 0, base_dy + 0))
+    dx = float(np.random.uniform(base_dx - 0.03, base_dx + 0.02))
+    dy = float(np.random.uniform(base_dy - 0.03, base_dy + 0.03))
     return dx, dy, base_dz
 
 
