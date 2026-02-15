@@ -39,6 +39,7 @@ from egodata_eval.eval_constant import (
     DEPTH_EST_SCALE,
     DEFAULT_I2RT_ZED_TXT,
     DEFAULT_GLASSES_ZED_TXT,
+    TASK_TCP_TO_OBJECT_SE3,
 )
 from egodata_eval.eval_utils import (
     _build_pose_mats,
@@ -234,38 +235,51 @@ class EvalHardware:
             traj_denorm[:, :3],
             traj_denorm[:, 3:3+6],
         )
+        # print(f"[INFO] pose_seq_base: {pose_seq_base}")
         pose_seq_robot = np.einsum(
             'ij,njk->nik',
             self.T_robot_base.astype(np.float32),
             pose_seq_base.astype(np.float32),
         ) # [N,4,4], SE3 in robot frame
-
+        # print(f"[INFO] pose_seq_robot:\n{pose_seq_robot[1,:3,3]}")
+        T_tcp_object = TASK_TCP_TO_OBJECT_SE3.get(self.task_name, np.eye(4, dtype=np.float32)).astype(np.float32)
+        T_object_tcp = np.linalg.inv(T_tcp_object).astype(np.float32)
+        print(f"[INFO] pose_robot_ob:\n{pose_robot_ob}")
+        pose_robot_tcp = (pose_robot_ob @ T_object_tcp).astype(np.float32)
+        print(f"[INFO] pose_robot_tcp:\n{pose_robot_tcp}")
+        tcp_seq_robot = np.einsum(
+            "nij,jk->nik",
+            pose_seq_robot.astype(np.float32),
+            T_object_tcp,
+        ).astype(np.float32)
+        # print(f"[INFO] tcp_seq_robot:\n{tcp_seq_robot[:,:3,3]}")
         steps_grip = None
         steps_to_execute = self.steps_to_execute
         if grip_seq is not None:
             steps_grip = grip_seq[1:1+int(steps_to_execute)]
         executed_poses: list[np.ndarray] = []
         tcp_history: list[np.ndarray] = []
-        if pose_seq_robot.size > 0:
-            robot_rel_pts = pose_seq_robot[1:1+int(steps_to_execute), :3, 3] - pose_robot_ob[:3, 3][None, :]
+        if tcp_seq_robot.size > 0:
+            robot_rel_pts = tcp_seq_robot[1:1+int(steps_to_execute), :3, 3] - pose_robot_tcp[:3, 3][None, :]
+            # print(f"[INFO] rel_pts:\n{robot_rel_pts}")
             curr_pose7 = self.flexiv_robot.get_tcp_pose().astype(np.float32)
             start_xyz = curr_pose7[:3].astype(np.float32)
             start_quat = curr_pose7[3:7].astype(np.float32)
             start_rot = rotation_transform(start_quat[None, :], "quaternion", "matrix").squeeze(0)
-            base_obj_rot = pose_robot_ob[:3, :3].astype(np.float32)
+            base_obj_rot = pose_robot_tcp[:3, :3].astype(np.float32)
             open_width = getattr(self.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
             open_thresh = GRIP_OPEN_THRESH.get(self.task_name, GRIP_OPEN_THRESH["book"])
             for i in range(robot_rel_pts.shape[0]):
                 xyz = start_xyz + robot_rel_pts[i]
-                step_rot = pose_seq_robot[1 + i, :3, :3].astype(np.float32)
-                rel_rot = step_rot @ base_obj_rot.T # TODO: Here suppose object is at TCP, offset should be considered.
+                step_rot = tcp_seq_robot[1 + i, :3, :3].astype(np.float32)
+                rel_rot = step_rot @ base_obj_rot.T 
                 target_rot = rel_rot @ start_rot
                 target_quat = rotation_transform(target_rot[None, ...], "matrix", "quaternion").squeeze(0)
                 pose7 = np.concatenate([xyz, target_quat], axis=0).astype(np.float32)
                 width_cmd = 0.0
                 if steps_grip is not None and i < len(steps_grip):
                     grip_val = float(steps_grip[i])
-                    print(f"[INFO] grip_val:{grip_val}")
+                    # print(f"[INFO] grip_val:{grip_val}")
                     if grip_val > open_thresh:
                         if self.task_name == "teapot":
                             print("[INFO] Teapot grip > threshold; stopping arm without opening gripper.")
@@ -273,13 +287,14 @@ class EvalHardware:
                         width_cmd = open_width
                     else:
                         width_cmd = 0.0
+                # print(f"[INFO] pose7:\n{pose7}")
                 self._publish_arm_cmd(pose7, width_cmd)
                 executed_poses.append(pose7.copy())
                 tcp_history.append(self.flexiv_robot.get_tcp_pose().astype(np.float32))
-                print(f"[INFO] execute flexiv:{self.idx}")
+                # print(f"[INFO] execute flexiv:{self.idx}")
                 self.idx += 1
                 time.sleep(LOOP_SLEEP_SEC)
-        return pose_robot_ob.astype(np.float32), pose_seq_robot.astype(np.float32), executed_poses
+        return pose_robot_ob.astype(np.float32), tcp_seq_robot.astype(np.float32), executed_poses
 
     def close(self, timeout_s: float = 15.0) -> None:
         """Return I2RT to home pose before closing the clients."""
