@@ -26,26 +26,27 @@ ros2 launch egodata_record zed_handeye.launch.py \
 # -------------MBA Env------------------
 # Train a obj pose prediction model
 
-MPLBACKEND=Agg MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 WORLD_SIZE=1 RANK=0 LOCAL_RANK=0 \
-python MBA/train_obj.py \
-  --data_path data \
-  --ckpt_dir MBA/ckpt_delta \
-  --batch_size 8 \
-  --num_epochs  500\
-  --save_epochs 50 \
-  --enable_mba \
-  --obj_pose_mode delta
+  MPLBACKEND=Agg MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 WORLD_SIZE=1 RANK=0 LOCAL_RANK=0 \
+  python MBA/train_obj.py \
+    --data_path data \
+    --ckpt_dir MBA/ckpt_delta \
+    --batch_size 8 \
+    --num_epochs  500\
+    --save_epochs 50 \
+    --enable_mba \
+    --obj_pose_mode delta
 
-  We put all prediction at the coordinate of ball, as well as eval.
+    We put all prediction at the coordinate of ball, as well as eval.
 
-CUDA_VISIBLE_DEVICES=0,1 \
-torchrun --master_addr 127.0.0.1 --master_port 14524 \
-  --nproc_per_node 2 --nnodes 1 --node_rank 0 \
-  MBA/train_obj.py \
-  --data_path /mnt/data/yanwen/glass_data/ \
-  --ckpt_dir MBA/ckpt_0116_book \
-  --batch_size 64 --num_epochs 1000 --save_epochs 50 --num_workers 24 \
-  --lr 3e-4 --seed 233 --enable_mba --obj_pose_mode delta --num_action 10
+  PYTHONPATH=$(pwd) CUDA_VISIBLE_DEVICES=0,1 \
+  torchrun --master_addr 127.0.0.1 --master_port 14524 \
+    --nproc_per_node 2 --nnodes 1 --node_rank 0 \
+    MBA/train_obj.py \
+    --data_path /mnt/data/yanwen/glass_data/train_0207_teapot \
+    --ckpt_dir /mnt/data/yanwen/glass_ckpt/0215_teapot \
+    --batch_size 64 --num_epochs 1000 --save_epochs 100 --num_workers 24 \
+    --lr 2e-4 --seed 233 --enable_mba --obj_pose_mode abs --num_action 10 \
+    --resume_ckpt /mnt/data/yanwen/glass_ckpt/0215_teapot/policy_epoch_500_seed_233.ckpt --resume_epoch 500 
 
   # 3D Traj view
 
@@ -67,3 +68,10 @@ python src/egodata_eval/visualize_scripts/vis_train.py --data-dir src/egodata_ev
 
 # -- eval
 ./src/egodata_eval/eval.sh --task book --ckpt ckpt/ckpt_0205_book_abs_wo_curr/policy_epoch_600_seed_233.ckpt --enable-headpose-head --obj-pose-mode abs
+
+# openpi training
+export HF_LEROBOT_HOME=/mnt/data/yanwen/glass_data
+
+uv run scripts/compute_norm_stats.py --config-name pi05_realworld
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_realworld --exp-name=openpi_book_0217 --batch-size=64 --overwrite

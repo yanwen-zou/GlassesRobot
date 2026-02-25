@@ -361,7 +361,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 class LeRobotRealWorldDataConfig(DataConfigFactory):
     """Config for realworld data with state + single wrist camera."""
 
-    action_dim: int = 20
+    action_dim: int = 32
     default_prompt: str | None = None
 
     @override
@@ -552,7 +552,7 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 1000
+    save_interval: int = 3000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -716,7 +716,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_realworld",
-        model=pi0_config.Pi0Config(action_dim=20, action_horizon=10, pi05=True),
+        model=pi0_config.Pi0Config(action_dim=32, action_horizon=10, pi05=True),
         data=LeRobotRealWorldDataConfig(
             repo_id="shi-akihi/book_openpi",
             base_config=DataConfig(prompt_from_task=True),
