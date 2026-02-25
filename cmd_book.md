@@ -9,6 +9,9 @@ ros2 launch egodata_record zed_handeye.launch.py \
   intrinsic_scale:=1.0 \
   output:=/home/yanwen/research/unity_comm/glasses_hardware/calib/T_zed_tcp_calib.txt
 
+# after data processing, view:
+./src/egodata_eval/visualize_scripts/vis_datset.sh data/train_teapot_2/ --spawn --episode-idx 2
+
 # -------------foundation_stereo Env----------
 # SAM2 For Mask -> FoundationStereo For Depth -> FoundationPose for Obj Pose Tracking
 ./cmd_book_pipeline.sh
