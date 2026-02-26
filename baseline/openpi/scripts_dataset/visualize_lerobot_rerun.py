@@ -60,6 +60,18 @@ def _log_vector(rr: Any, base: str, vec: Any) -> None:
         rr.log(f"{base}/{i}", rr.Scalars(float(v)))
 
 
+def _first_action_vec(sample: dict[str, Any]) -> np.ndarray | None:
+    key = "actions" if "actions" in sample else ("action" if "action" in sample else None)
+    if key is None:
+        return None
+    arr = np.asarray(sample[key], dtype=np.float32)
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim >= 2:
+        return arr.reshape(-1, arr.shape[-1])[0]
+    return None
+
+
 def main(args: Args) -> None:
     try:
         import rerun as rr  # type: ignore
@@ -70,6 +82,9 @@ def main(args: Args) -> None:
     print(f"Loaded dataset: {args.repo_id}, len={len(ds)}")
 
     rr.init(args.recording_name, spawn=args.spawn)
+
+    # Per-episode accumulated headpose xyz (action[8:11] are per-frame deltas).
+    headpose_xyz_acc: dict[int, np.ndarray] = {}
 
     shown = 0
     for idx in range(0, len(ds), max(1, args.stride)):
@@ -98,6 +113,23 @@ def main(args: Args) -> None:
                 _log_vector(rr, "act/step0", actions[0])
             else:
                 _log_vector(rr, "act/step0", actions)
+        elif "action" in sample:
+            action = np.asarray(sample["action"])
+            if action.ndim == 2:
+                _log_vector(rr, "act/step0", action[0])
+            else:
+                _log_vector(rr, "act/step0", action)
+
+        # Reconstruct headpose xyz by cumulatively summing per-frame delta xyz.
+        action_vec = _first_action_vec(sample)
+        if action_vec is not None and action_vec.shape[0] >= 11:
+            delta_xyz = np.asarray(action_vec[8:11], dtype=np.float32)
+            if epi not in headpose_xyz_acc:
+                headpose_xyz_acc[epi] = np.zeros(3, dtype=np.float32)
+            headpose_xyz_acc[epi] = headpose_xyz_acc[epi] + delta_xyz
+            rr.log("headpose/delta_xyz", rr.Points3D([delta_xyz]))
+            rr.log("headpose/accum_xyz", rr.Points3D([headpose_xyz_acc[epi]]))
+            _log_vector(rr, "headpose/accum_xyz_scalar", headpose_xyz_acc[epi])
 
         task = sample.get("task", "")
         prompt = sample.get("prompt", "")

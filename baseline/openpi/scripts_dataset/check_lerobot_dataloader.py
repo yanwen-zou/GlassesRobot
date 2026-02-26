@@ -24,9 +24,9 @@ class Args:
     # Base openpi config to reuse transforms/model setup.
     config_name: str = "pi05_realworld"
     # Number of batches to iterate.
-    num_batches: int = 3
+    num_batches: int = 1
     # Global batch size.
-    batch_size: int = 4
+    batch_size: int = 1
     # Data loader workers.
     num_workers: int = 0
     # Shuffle dataset.
