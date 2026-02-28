@@ -19,7 +19,7 @@ from egodata_eval.eval_constant import (
     WIN_CALIB,
 )
 from egodata_eval.get_depth import DepthEstimator  # type: ignore
-from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer  # type: ignore
+from glasses_hardware.hardware.my_device.i2rt_robo import I2RT, I2RTServer, I2RTClient  # type: ignore
 
 RDF_TO_ROBOT = np.array(
     [
@@ -530,13 +530,13 @@ def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:
 
 
 def move_i2rt_to_init_angles(
-    robot: Optional["I2RT"],
+    robot: Optional["I2RT | I2RTClient"],
     task_name: Optional[str] = None,
     target_rad: np.ndarray = TASK_I2RT_TARGET_RAD["book"],
     duration: float = I2RT_INIT_DURATION,
     steps: int = I2RT_INIT_STEPS,
 ) -> None:
-    """Move I2RT arm to the evaluation target joint configuration."""
+    """Move I2RT arm (local or RPC client) to the evaluation target joint configuration."""
     if robot is None:
         print("[WARN] I2RT arm not initialized; cannot move to init pose.")
         return

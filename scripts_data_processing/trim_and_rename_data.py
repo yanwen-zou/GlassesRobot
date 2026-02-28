@@ -1,10 +1,10 @@
 from pathlib import Path
 
-ROOT = Path("data/train_teapot_2")   # 换成你的 data 也可以
+ROOT = Path("data")   # 换成你的 data 也可以
 TARGET_DIRS = ["zed_left", "zed_right"]
 TARGET_DOC = "head_pos.txt"
-CUT_FRONT = 60
-CUT_BACK = 15
+CUT_FRONT = 36
+CUT_BACK = 20
 
 
 def _parse_indexed_rows(txt_path: Path):

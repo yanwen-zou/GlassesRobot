@@ -117,6 +117,14 @@ class FlexivArmCmdNode(Node):
     def get_gripper_state(self) -> float:
         return float(self._gripper.get_gripper_state())
 
+    def get_state(self) -> dict[str, np.ndarray | float]:
+        tcp_pose = self.get_tcp_pose().astype(np.float32)
+        gripper_width = self.get_gripper_state()
+        return {
+            "tcp_pose": tcp_pose,
+            "gripper_width": float(gripper_width),
+        }
+
     def close(self) -> None:
         try:
             self._robot.close()
@@ -243,10 +251,11 @@ class EvalHardware:
         ) # [N,4,4], SE3 in robot frame
         # print(f"[INFO] pose_seq_robot:\n{pose_seq_robot[1,:3,3]}")
         T_tcp_object = TASK_TCP_TO_OBJECT_SE3.get(self.task_name, np.eye(4, dtype=np.float32)).astype(np.float32)
+        # print(f"[INFO] Using T_tcp_object for task '{self.task_name}':\n{T_tcp_object}")
         T_object_tcp = np.linalg.inv(T_tcp_object).astype(np.float32)
-        print(f"[INFO] pose_robot_ob:\n{pose_robot_ob}")
+        # print(f"[INFO] pose_robot_ob:\n{pose_robot_ob}")
         pose_robot_tcp = (pose_robot_ob @ T_object_tcp).astype(np.float32)
-        print(f"[INFO] pose_robot_tcp:\n{pose_robot_tcp}")
+        # print(f"[INFO] pose_robot_tcp:\n{pose_robot_tcp}")
         tcp_seq_robot = np.einsum(
             "nij,jk->nik",
             pose_seq_robot.astype(np.float32),

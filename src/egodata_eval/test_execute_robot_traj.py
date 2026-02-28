@@ -22,7 +22,7 @@ for path in (src_root, mba_root, project_root):
 from MBA.utils.transformation import rotation_transform  # type: ignore
 from egodata_eval.eval_constant import DEFAULT_BASE_TO_ROBOT_TXT, DEPTH_EST_SCALE, TASK_TCP_TO_OBJECT_SE3
 from egodata_eval.eval_hardware import EvalHardware
-from egodata_eval.eval_utils import calibrate_from_three_balls, click_mask
+from egodata_eval.eval_utils import calibrate_from_three_balls, click_mask, move_i2rt_to_init_angles
 from egodata_eval.get_depth import DepthEstimator
 from egodata_eval.get_pose import PoseEstimatorFP
 
@@ -147,7 +147,7 @@ def main() -> None:
     ap.add_argument("--grip", type=float, default=0.0, help="Constant gripper signal in traj_denorm[:, 9].")
     ap.add_argument("--obj-x", type=float, default=0.5, help="Object base-frame x for pose_base_ob.")
     ap.add_argument("--obj-y", type=float, default=-0.20, help="Object base-frame y for pose_base_ob.")
-    ap.add_argument("--obj-z", type=float, default=0.25, help="Object base-frame z for pose_base_ob.")
+    ap.add_argument("--obj-z", type=float, default=0.3, help="Object base-frame z for pose_base_ob.")
     ap.add_argument("--grip-close-width", type=float, default=0.0, help="Closed gripper width command.")
     ap.add_argument("--settle-sec", type=float, default=1.0, help="Sleep after execution for observation.")
     args = ap.parse_args()
@@ -161,12 +161,14 @@ def main() -> None:
     )
 
     try:
+        print(f"[INFO] Move I2RT to init angles for task={args.task} before calibration...")
+        move_i2rt_to_init_angles(hw.i2rt_robot, task_name=args.task)
         print("[INFO] Running ball calibration to get T_base_cam...")
         depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=hw.camera)
         T_base_cam = calibrate_from_three_balls(
             hw.camera,
             depth_est,
-            move_robot_fn=None,
+            move_robot_fn=lambda: move_i2rt_to_init_angles(hw.i2rt_robot, task_name=args.task),
             centroid_log_dir=None,
         ).astype(np.float32)
         print(f"[INFO] T_base_cam:\n{T_base_cam}")
@@ -191,21 +193,23 @@ def main() -> None:
         pose_base_ob = (T_base_cam @ pose_cam_ob.astype(np.float32)).astype(np.float32)
         print(f"[INFO] first-frame pose_base_ob:\n{pose_base_ob}")
 
-        # Update task transform using the requested formula:
-        # R_object_tcp = inv(R_tcp_current) @ R_object_robot
-        R_object_robot = (hw.T_robot_base[:3, :3].astype(np.float32) @ pose_base_ob[:3, :3].astype(np.float32)).astype(np.float32)
+        # Update task transform using the same logic as run_calib_and_vis_tcp_object:
+        # 1) T_tcp_obj_calib = inv(T_robot_tcp) @ T_robot_obj
+        # 2) Keep translation from constants, use calibrated rotation.
+        T_robot_obj = (hw.T_robot_base.astype(np.float32) @ pose_base_ob.astype(np.float32)).astype(np.float32)
         curr_tcp_pose7 = hw.flexiv_robot.get_tcp_pose().astype(np.float32)
-        R_tcp_current = _quat_to_rot(curr_tcp_pose7[3:7].astype(np.float32))
-        R_object_tcp = (np.linalg.inv(R_tcp_current) @ R_object_robot).astype(np.float32)
+        T_robot_tcp = _pose7_to_se3(curr_tcp_pose7)
+        T_tcp_obj_calib = (np.linalg.inv(T_robot_tcp) @ T_robot_obj).astype(np.float32)
 
-        T_tcp_object = TASK_TCP_TO_OBJECT_SE3.get(args.task, np.eye(4, dtype=np.float32)).astype(np.float32)
-        T_tcp_object_new = T_tcp_object.copy()
-        # Only update rotation; keep existing translation unchanged.
-        T_tcp_object_new[:3, :3] = np.linalg.inv(R_object_tcp).astype(np.float32)
+        T_tcp_object_const = TASK_TCP_TO_OBJECT_SE3.get(args.task, np.eye(4, dtype=np.float32)).astype(np.float32)
+        T_tcp_object_new = T_tcp_obj_calib.copy()
+        T_tcp_object_new[:3, 3] = T_tcp_object_const[:3, 3].astype(np.float32)
         TASK_TCP_TO_OBJECT_SE3[args.task] = T_tcp_object_new
         _persist_task_tcp_to_object_se3(args.task, T_tcp_object_new)
         T_object_tcp = np.linalg.inv(T_tcp_object_new).astype(np.float32)
-        print(f"[INFO] updated T_object_tcp rotation for task={args.task}:\n{T_object_tcp}")
+        print(f"[INFO] T_tcp_obj_calib for task={args.task}:\n{T_tcp_obj_calib}")
+        print(f"[INFO] T_tcp_obj_const for task={args.task}:\n{T_tcp_object_const}")
+        print(f"[INFO] updated T_object_tcp for task={args.task}:\n{T_object_tcp}")
 
         gripper_closed = False
         current_angle_deg = 0.0

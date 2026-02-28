@@ -42,9 +42,9 @@ TASK_I2RT_TARGET_RAD = {
 TASK_TCP_TO_OBJECT_SE3 = {
     "teapot": np.array(
         [
-            [-0.96602160, -0.05211345, 0.25315332, -0.08000000],
-            [-0.24720275, -0.09964244, -0.96382684, 0.00000000],
-            [0.07545314, -0.99365765, 0.08337418, 0.15000001],
+            [0.81253284, -0.57030559, -0.12059095, -0.05000000],
+            [-0.00574543, -0.21470079, 0.97666276, 0.00000000],
+            [-0.58288735, -0.79287803, -0.17772797, 0.13000010],
             [0.00000000, 0.00000000, 0.00000000, 1.00000000],
         ],
         dtype=np.float32,
@@ -110,8 +110,8 @@ I2RT_CMD_STEPS = 100
 
 # Trajectory execution parameters.
 UPDATE_INTERVAL = 2
-STEPS_TO_EXECUTE = 5
-STEPS_HEAD_TO_EXECUTE = 5
+STEPS_TO_EXECUTE = 8
+STEPS_HEAD_TO_EXECUTE = 8
 GRIP_OPEN_THRESH = {
     "teapot": 0.85,
     "book": 0.7,

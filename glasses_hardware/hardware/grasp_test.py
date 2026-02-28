@@ -50,7 +50,7 @@ def _select_delta_xyz(task_name: str) -> tuple[float, float, float]:
         "teapot": (-0.33, -0.12, 0.07),
         "book": (-0.03, 0.03, 0),
         "sword": (0.08, -0.10, 0.08),
-        "cup": (-0.3, -0.1, 0.05),
+        "cup": (-0.3, -0.1, 0),
         "bread": (0.08, -0.06, -0.02)
     }
     base_dx, base_dy, base_dz = task_to_delta.get(task_name, (0.05, 0.0, 0.05))

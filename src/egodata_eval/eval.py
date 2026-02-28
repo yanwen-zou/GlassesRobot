@@ -147,7 +147,7 @@ def _run_depth_traj(
 ) -> tuple[np.ndarray, dict | None]:
     frame = state["frame"]
     frame_right = state["frame_right"]
-    if state.get("mask") is not None:
+    if state["mask"] is not None:
         ctx["last_mask"] = state["mask"]
     with torch.no_grad():
         ctx["last_depth_m"] = depth_est.depth(frame, frame_right)
@@ -171,14 +171,14 @@ def _run_depth_traj(
     if ctx["pose_ready"] and ctx["pose_est"] is not None:
         ctx["pose_est"].track(frame, depth_m, ctx["K"])
 
-        if ctx.get("robot_mask") is not None:
+        if ctx["robot_mask"] is not None:
             depth_m = depth_m.copy()
             depth_m[ctx["robot_mask"] > 0] = 0.0
             ctx["last_depth_m"] = depth_m
 
         if traj_pred is not None and ctx["pose_est"].pose_cam_ob is not None:
             T_base_cam = state["T_base_cam"]
-            headpose_norm = state.get("headpose_norm")
+            headpose_norm = state["headpose_norm"]
             frame_overlay, frame_cloud = traj_pred.predict_and_overlay(
                 frame,
                 depth_m,
@@ -188,14 +188,11 @@ def _run_depth_traj(
                 headpose_cond=headpose_norm,
             ) # overlay traj
             if cloud_out_path is not None:
-                try:
-                    np.savez_compressed(
-                        str(cloud_out_path),
-                        cloud=np.asarray(frame_cloud, dtype=np.float32),
-                        frame_idx=np.array([int(state.get("frame_idx", -1))], dtype=np.int32),
-                    )
-                except Exception as e:
-                    print(f"[WARN] Failed to save frame_cloud npz: {cloud_out_path} ({e})")
+                np.savez_compressed(
+                    str(cloud_out_path),
+                    cloud=np.asarray(frame_cloud, dtype=np.float32),
+                    frame_idx=np.array([int(state["frame_idx"])], dtype=np.int32),
+                )
             frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
             pred_state = {
                 "pose_cam_ob": ctx["pose_est"].pose_cam_ob.astype(np.float32),
@@ -271,7 +268,7 @@ def main():
     T_cam0_base = np.linalg.inv(T_base_cam0).astype(np.float32)
 
     if args.calib_init_pose:
-        T_base_cam1 = calib_init_pose.get(args.task, None)
+        T_base_cam1 = calib_init_pose[args.task]
         if T_base_cam1 is None:
             raise RuntimeError(f"[eval] Missing calib_init_pose for task={args.task}.")
         exec_ctx.i2rt_current_q = exec_ctx.i2rt_robot.current_joint_pos()
@@ -400,6 +397,7 @@ def main():
     pose_records: list[dict[str, object]] = []
     headpose_pred_records: list[np.ndarray] = []
     T_base_cam_runtime: list[np.ndarray] = []
+    tcp_obj_ready = False
 
     frame_idx = 0
     try:
@@ -473,6 +471,7 @@ def main():
                     state = {
                         "frame": frame,
                         "frame_right": frame_right,
+                        "frame_idx": frame_idx,
                         "T_base_cam": T_base_cam,
                         "headpose_norm": headpose_norm,
                         "mask": mask,
@@ -533,6 +532,25 @@ def main():
                             exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
                             time.sleep(1.0)  # wait for motion to finish
 
+                        if not tcp_obj_ready:
+                            pose_base_ob_calib = (T_base_cam_used.astype(np.float32) @ pose_cam_ob.astype(np.float32)).astype(np.float32)
+                            T_robot_obj = (exec_ctx.T_robot_base.astype(np.float32) @ pose_base_ob_calib).astype(np.float32)
+                            curr_tcp_pose7 = exec_ctx.flexiv_robot.get_tcp_pose().astype(np.float32)
+                            T_robot_tcp = np.eye(4, dtype=np.float32)
+                            T_robot_tcp[:3, 3] = curr_tcp_pose7[:3].astype(np.float32)
+                            T_robot_tcp[:3, :3] = rotation_transform(
+                                curr_tcp_pose7[3:7][None, :],
+                                "quaternion",
+                                "matrix",
+                            ).squeeze(0).astype(np.float32)
+                            T_tcp_obj_calib = (np.linalg.inv(T_robot_tcp) @ T_robot_obj).astype(np.float32)
+                            T_tcp_obj_const = TASK_TCP_TO_OBJECT_SE3[args.task].astype(np.float32)
+                            T_tcp_obj_new = T_tcp_obj_calib.copy()
+                            T_tcp_obj_new[:3, 3] = T_tcp_obj_const[:3, 3].astype(np.float32)
+                            TASK_TCP_TO_OBJECT_SE3[args.task] = T_tcp_obj_new
+                            tcp_obj_ready = True
+                            print(f"[INFO] T_tcp_obj calibrated for task={args.task} (rot=calib, trans=const):\n{T_tcp_obj_new}")
+
                         if args.add_curr_cond:
                             pose_base_ob = T_base_cam_used.astype(np.float32) @ pose_cam_ob.astype(np.float32)
                         else:
@@ -540,27 +558,37 @@ def main():
                                 traj_denorm[:1, :3],
                                 traj_denorm[:1, 3:3+6],
                             )[0].astype(np.float32)
-                        pose_robot_ob, pose_seq_robot, step_poses = exec_ctx.execute_robot_traj(
+                        pred_obj_seq_base = _build_pose_mats(
+                            traj_denorm[:, :3],
+                            traj_denorm[:, 3:3+6],
+                        ).astype(np.float32)
+                        pred_obj_seq_robot = np.einsum(
+                            "ij,njk->nik",
+                            exec_ctx.T_robot_base.astype(np.float32),
+                            pred_obj_seq_base.astype(np.float32),
+                        ).astype(np.float32)
+                        pose_robot_ob, tcp_seq_robot, step_poses = exec_ctx.execute_robot_traj(
                             traj_denorm,
                             pose_base_ob,
                         )
                         # Stop policy if predicted gripper signal exceeds threshold within steps_to_execute.
-                        try:
-                            grip_seq = traj_denorm[:, 9].astype(np.float32)
-                            steps_to_execute = int(getattr(exec_ctx, "steps_to_execute", STEPS_TO_EXECUTE))
-                            grip_window = grip_seq[1:1 + steps_to_execute]
-                            open_thresh = GRIP_OPEN_THRESH.get(args.task, GRIP_OPEN_THRESH["book"])
-                            if grip_window.size > 0 and np.any(grip_window > open_thresh):
-                                print("[INFO] Predicted gripper open in steps_to_execute; stopping policy.")
-                                break
-                        except Exception as e:
-                            print(f"[WARN] Failed to check predicted gripper signal: {e}")
+                        grip_seq = traj_denorm[:, 9].astype(np.float32)
+                        steps_to_execute = int(exec_ctx.steps_to_execute)
+                        grip_window = grip_seq[1:1 + steps_to_execute]
+                        open_thresh = GRIP_OPEN_THRESH[args.task]
+                        if grip_window.size > 0 and np.any(grip_window > open_thresh):
+                            print("[INFO] Predicted gripper open in steps_to_execute; stopping policy.")
+                            break
                         pose_records.append(
                             {
                                 "timestamp": float(time.time()),
                                 "frame_idx": int(frame_idx),
                                 "object_pose_robot": pose_robot_ob,
-                                "pred_seq_robot": pose_seq_robot,
+                                "pred_obj_seq_robot": pred_obj_seq_robot,
+                                # Keep pred_seq_robot for visualizer compatibility; set it to object trajectory.
+                                "pred_seq_robot": pred_obj_seq_robot,
+                                # This sequence is TCP poses in robot frame.
+                                "pred_tcp_seq_robot": tcp_seq_robot,
                             }
                         )
                         if step_poses:

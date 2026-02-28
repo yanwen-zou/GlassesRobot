@@ -75,3 +75,12 @@ export HF_LEROBOT_HOME=/mnt/data/yanwen/glass_data
 uv run scripts/compute_norm_stats.py --config-name pi05_realworld
 
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_realworld --exp-name=openpi_book_0217 --batch-size=64 --overwrite
+
+# openpi eval
+```bash
+cd baseline/openpi
+
+uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_realworld --policy.dir=checkpoints/pi05_realworld/openpi_book_0225/29999
+
+
+```

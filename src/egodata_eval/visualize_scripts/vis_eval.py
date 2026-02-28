@@ -43,7 +43,7 @@ def _build_pose_mats(translation: np.ndarray, rotation_6d: np.ndarray) -> np.nda
 
 def load_records(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
-        return []
+        raise RuntimeError(f"Path does not exist: {path}")
     arr = np.load(path, allow_pickle=True)
     return [dict(item) for item in arr]
 
@@ -94,31 +94,21 @@ def main():
 
     data_dir = args.data_dir.resolve()
     pose_records = load_records(data_dir / "robot_pose_records.npy")
-    try:
-        executed = load_array(data_dir / "robot_executed_poses.npy")
-        # tcp_hist = load_array(data_dir / "robot_tcp_history.npy")
-    except Exception:
-        executed = None
+    executed = load_array(data_dir / "robot_executed_poses.npy")
     tcp_hist = None
-    try:
-        headpose_preds = load_array(data_dir / "headpose_pred.npy")
-    except Exception:
-        print("No headpose predictions found.")
-        headpose_preds = None
+    headpose_preds = load_array(data_dir / "headpose_pred.npy")
 
     T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
     T_base_cam_seq = load_array(runtime_cam_path)
     pointcloud_dir = (data_dir / "pointcloud") if args.pointcloud_dir is None else args.pointcloud_dir.resolve()
 
-    def _load_ball_centroids(path: Optional[Path], search_root: Path) -> tuple[np.ndarray | None, Optional[Path]]:
-        search_path = path
-        if search_path is None:
-            candidates = sorted(search_root.glob("ball_centroids_*.txt"))
-            if candidates:
-                search_path = candidates[-1]
-        if search_path is None or not search_path.exists():
+    def _load_ball_centroids(path: Optional[Path]) -> tuple[np.ndarray | None, Optional[Path]]:
+        if path is None:
             return None, None
+        search_path = path
+        if not search_path.exists():
+            raise RuntimeError(f"Ball centroids path does not exist: {search_path}")
         points: list[list[float]] = []
         with open(search_path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -137,7 +127,7 @@ def main():
             return None, None
         return np.array(points, dtype=np.float32), search_path
 
-    ball_centroids, centroid_source_path = _load_ball_centroids(args.ball_centroids, data_dir) # in cam coordinate
+    ball_centroids, centroid_source_path = _load_ball_centroids(args.ball_centroids) # in cam coordinate
 
     try:
         import rerun as rr
@@ -145,14 +135,11 @@ def main():
         raise RuntimeError("rerun package required. `pip install rerun-sdk`.") from exc
     try:
         import cv2
-    except Exception:
-        cv2 = None
+    except Exception as exc:
+        raise RuntimeError("OpenCV required. `pip install opencv-python`.") from exc
 
     rr.init(f"Eval Visualization ({data_dir.name})", spawn=args.spawn)
-    try:
-        rr.log("world", rr.ViewCoordinates.FRU)
-    except Exception:
-        pass
+    rr.log("world", rr.ViewCoordinates.FRU)
 
     def log_axis(path: str, T: np.ndarray, scale: float) -> None:
         rr.log(
@@ -172,49 +159,34 @@ def main():
             ),
         )
 
-    def _coerce_matrix(T: np.ndarray) -> np.ndarray | None:
-        if T is None:
-            return None
+    def _coerce_matrix(T: np.ndarray) -> np.ndarray:
         T = np.asarray(T, dtype=np.float32)
         if T.shape == (4, 4):
             return T
-        if T.shape == (3, 4):
-            pad = np.array([[0, 0, 0, 1]], dtype=np.float32)
-            return np.vstack([T, pad])
-        return None
+        raise RuntimeError(f"Expected (4,4) transform, got {T.shape}")
 
-    def _cam_transform_for_frame(idx: int) -> np.ndarray | None:
-
+    def _cam_transform_for_frame(idx: int) -> np.ndarray:
         if idx < 0 or idx >= T_base_cam_seq.shape[0]:
-            return None
+            raise RuntimeError(f"Camera transform index out of range: idx={idx}, len={T_base_cam_seq.shape[0]}")
         return _coerce_matrix(T_base_cam_seq[idx])
 
-    def _load_pointcloud_npz(frame_idx: int, fallback_idx: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _load_pointcloud_npz(frame_idx: int) -> tuple[np.ndarray, np.ndarray]:
         if not pointcloud_dir.exists():
-            return None, None
-        candidates = [
-            pointcloud_dir / f"{frame_idx:06d}.npz",
-            pointcloud_dir / f"{fallback_idx:06d}.npz",
-        ]
-        pcd_path = next((p for p in candidates if p.exists()), None)
-        if pcd_path is None:
-            return None, None
+            raise RuntimeError(f"Pointcloud directory does not exist: {pointcloud_dir}")
+        pcd_path = pointcloud_dir / f"{frame_idx:06d}.npz"
+        if not pcd_path.exists():
+            raise RuntimeError(f"Missing pointcloud npz: {pcd_path}")
         data = np.load(pcd_path, allow_pickle=True)
-        # New format from eval.py: `cloud` is (N,6) with xyz in base frame + normalized rgb (like dataset).
-        if data.get("cloud") is not None:
-            cloud = np.asarray(data["cloud"], dtype=np.float32)
-            if cloud.ndim != 2 or cloud.shape[1] < 6:
-                raise RuntimeError(f"Invalid cloud shape in {pcd_path}: {cloud.shape}")
-            xyz_base = cloud[:, :3]
-            colors_norm = cloud[:, 3:6]
-            colors = np.clip(colors_norm * IMG_STD + IMG_MEAN, 0.0, 1.0)
-            rgb_u8 = (colors * 255).astype(np.uint8)
-            return xyz_base, rgb_u8
-
-        # Backward compatibility: older format stored camera-frame xyz + uint8 rgb.
-        xyz_cam = np.asarray(data.get("xyz_cam"), dtype=np.float32) if data.get("xyz_cam") is not None else None
-        rgb = np.asarray(data.get("rgb"), dtype=np.uint8) if data.get("rgb") is not None else None
-        return xyz_cam, rgb
+        if data.get("cloud") is None:
+            raise RuntimeError(f"Missing 'cloud' key in pointcloud npz: {pcd_path}")
+        cloud = np.asarray(data["cloud"], dtype=np.float32)
+        if cloud.ndim != 2 or cloud.shape[1] < 6:
+            raise RuntimeError(f"Invalid cloud shape in {pcd_path}: {cloud.shape}")
+        xyz_base = cloud[:, :3]
+        colors_norm = cloud[:, 3:6]
+        colors = np.clip(colors_norm * IMG_STD + IMG_MEAN, 0.0, 1.0)
+        rgb_u8 = (colors * 255).astype(np.uint8)
+        return xyz_base, rgb_u8
 
     def _transform_points_cam_to_robot(points_cam: np.ndarray, cam_tf: np.ndarray) -> np.ndarray:
         homog = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1), dtype=np.float32)], axis=1)
@@ -227,13 +199,11 @@ def main():
         pts_robot = (T_robot_base @ homog.T).T
         return pts_robot[:, :3]
 
-    def _transform_points_cam_to_robot_first(points_cam: np.ndarray) -> np.ndarray | None:
+    def _transform_points_cam_to_robot_first(points_cam: np.ndarray) -> np.ndarray:
         if T_base_cam_seq.ndim == 3:
             T_base_cam = _coerce_matrix(T_base_cam_seq[0])
         else:
             T_base_cam = _coerce_matrix(T_base_cam_seq)
-        if T_base_cam is None:
-            return None
         homog = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1), dtype=np.float32)], axis=1)
         pts_base = (T_base_cam @ homog.T).T
         pts_robot = (T_robot_base @ pts_base.T).T
@@ -254,75 +224,56 @@ def main():
             print(f"[INFO] Visualizing ball centroids from {centroid_source_path}")
 
     video_path = data_dir / "stream.mp4"
-    video_cap = None
-    video_frame_count = None
-    if video_path.exists():
-        if cv2 is None:
-            raise RuntimeError("OpenCV required to load stream.mp4. `pip install opencv-python`.") 
-        video_cap = cv2.VideoCapture(str(video_path))
-        if not video_cap.isOpened():
-            print(f"[WARN] Failed to open video: {video_path}")
-            video_cap = None
-        else:
-            video_frame_count = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if video_frame_count <= 0:
-                print(f"[WARN] Invalid frame count for video: {video_path}")
-                video_frame_count = None
+    if not video_path.exists():
+        raise RuntimeError(f"Missing video file: {video_path}")
+    video_cap = cv2.VideoCapture(str(video_path))
+    if not video_cap.isOpened():
+        raise RuntimeError(f"Failed to open video: {video_path}")
+    video_frame_count = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if video_frame_count <= 0:
+        raise RuntimeError(f"Invalid frame count for video: {video_path}")
 
     pred_window = 5
     for rec_idx, rec in enumerate(pose_records):
-        pose_robot = rec.get("object_pose_robot")
-        pred_seq = rec.get("pred_seq_robot")
-
-        frame_idx = int(rec.get("frame_idx", rec_idx))
+        pose_robot = rec["object_pose_robot"]
+        pred_seq = rec["pred_obj_seq_robot"]
+        frame_idx = int(rec["frame_idx"])
         rr.set_time_sequence("frame", frame_idx)
 
         # Pointcloud (saved per update step from eval.py).
-        cloud_xyz, rgb = _load_pointcloud_npz(frame_idx, rec_idx)
-        if cloud_xyz is not None:
-            if cloud_xyz.size == 0:
-                print(f"[pcd] frame_idx={frame_idx} rec_idx={rec_idx} empty pointcloud")
-                pts_robot = cloud_xyz.reshape(0, 3).astype(np.float32)
-            else:
-                # New format stores xyz in base frame; transform directly to robot frame.
-                if cloud_xyz.shape[1] != 3:
-                    raise RuntimeError(f"Unexpected point xyz shape: {cloud_xyz.shape}")
-                pts_robot = _transform_points_base_to_robot(cloud_xyz)
-
-            if args.max_points and pts_robot.shape[0] > args.max_points:
-                step = int(np.ceil(pts_robot.shape[0] / args.max_points))
-                pts_robot = pts_robot[::step]
-                if rgb is not None:
-                    rgb = rgb[::step]
-            # Log to a fixed path so playback only shows the current frame's pointcloud.
-            rr.log("frame/pointcloud", rr.Clear(recursive=True))
-            rr.log(
-                "frame/pointcloud",
-                rr.Points3D(
-                    positions=pts_robot,
-                    colors=rgb if rgb is not None else None,
-                    radii=np.full(pts_robot.shape[0], args.point_radius, dtype=np.float32),
-                ),
-            )
+        cloud_xyz, rgb = _load_pointcloud_npz(frame_idx)
+        if cloud_xyz.size == 0:
+            print(f"[pcd] frame_idx={frame_idx} rec_idx={rec_idx} empty pointcloud")
+            pts_robot = cloud_xyz.reshape(0, 3).astype(np.float32)
         else:
-            print(f"[pcd] frame_idx={frame_idx} rec_idx={rec_idx} missing pointcloud npz under {pointcloud_dir}")
+            if cloud_xyz.shape[1] != 3:
+                raise RuntimeError(f"Unexpected point xyz shape: {cloud_xyz.shape}")
+            pts_robot = _transform_points_base_to_robot(cloud_xyz)
 
-        if video_cap is not None and video_frame_count:
-            if len(pose_records) > 1 and video_frame_count > 1:
-                video_idx = int(round((frame_idx / (len(pose_records) - 1)) * (video_frame_count - 1)))
-            else:
-                video_idx = 0
-            video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
-            ok, frame = video_cap.read()
-            if ok:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                rr.log("video/stream", rr.Image(frame_rgb))
-            else:
-                video_cap.release()
-                video_cap = None
+        if args.max_points and pts_robot.shape[0] > args.max_points:
+            step = int(np.ceil(pts_robot.shape[0] / args.max_points))
+            pts_robot = pts_robot[::step]
+            rgb = rgb[::step]
+        rr.log("frame/pointcloud", rr.Clear(recursive=True))
+        rr.log(
+            "frame/pointcloud",
+            rr.Points3D(
+                positions=pts_robot,
+                colors=rgb,
+                radii=np.full(pts_robot.shape[0], args.point_radius, dtype=np.float32),
+            ),
+        )
 
-        if pose_robot is None:
-            continue
+        if len(pose_records) <= 1 or video_frame_count <= 1:
+            raise RuntimeError("pose_records and video must both contain at least 2 frames.")
+        video_idx = int(round((frame_idx / (len(pose_records) - 1)) * (video_frame_count - 1)))
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
+        ok, frame = video_cap.read()
+        if not ok:
+            raise RuntimeError(f"Failed to read frame {video_idx} from video.")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rr.log("video/stream", rr.Image(frame_rgb))
+
         pose_robot = np.asarray(pose_robot, dtype=np.float32).reshape(4, 4)
         obj_position = pose_robot[:3, 3]
         rr.log(
@@ -333,57 +284,48 @@ def main():
                 radii=args.axis_len * 0.05,
             ),
         )
-        if pred_seq is not None:
-            pred_seq = np.asarray(pred_seq, dtype=np.float32)
-            rr.log(
-                f"frames/frame_{frame_idx}/pred_points",
-                rr.Points3D(
-                    positions=pred_seq[:, :3, 3],
-                    colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
-                    radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
-                ),
+        pred_seq = np.asarray(pred_seq, dtype=np.float32)
+        rr.log(
+            f"frames/frame_{frame_idx}/pred_points",
+            rr.Points3D(
+                positions=pred_seq[:, :3, 3],
+                colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
+                radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
+            ),
+        )
+        expired_idx = frame_idx - pred_window
+        if expired_idx >= 0:
+            rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
+        if rec_idx >= headpose_preds.shape[0]:
+            raise RuntimeError(
+                f"headpose_pred length mismatch: rec_idx={rec_idx}, headpose_len={headpose_preds.shape[0]}"
             )
-            expired_idx = frame_idx - pred_window
-            if expired_idx >= 0:
-                rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
-        if headpose_preds is not None:  # headpose_pred:[frames, num_actions, 9]
-            headpose_entry = None
-            if "headpose_pred_cursor" not in locals():
-                headpose_pred_cursor = 0
-            cursor = headpose_pred_cursor
-            if 0 <= cursor < headpose_preds.shape[0]:
-                headpose_entry = headpose_preds[cursor]
-                headpose_pred_cursor = cursor + 1
-            if headpose_entry is not None:
-                headpose_entry = np.asarray(headpose_entry, dtype=np.float32)
-                # In eval output, headpose_pred.npy is already absolute in base frame.
-                headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
-                headpose_points = []
-                for headpose_T in headpose_mats:
-                    headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
-                    headpose_points.append(headpose_robot[:3, 3])
-                rr.log(
-                    f"frames/frame_{frame_idx}/headpose_pred/points",
-                    rr.Points3D(
-                        positions=np.asarray(headpose_points, dtype=np.float32),
-                        colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
-                        radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
-                    ),
-                )
-                expired_idx = frame_idx - pred_window
-                if expired_idx >= 0:
-                    rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
+        headpose_entry = np.asarray(headpose_preds[rec_idx], dtype=np.float32)
+        headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
+        headpose_points = []
+        for headpose_T in headpose_mats:
+            headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
+            headpose_points.append(headpose_robot[:3, 3])
+        rr.log(
+            f"frames/frame_{frame_idx}/headpose_pred/points",
+            rr.Points3D(
+                positions=np.asarray(headpose_points, dtype=np.float32),
+                colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
+                radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
+            ),
+        )
+        expired_idx = frame_idx - pred_window
+        if expired_idx >= 0:
+            rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         # Prefer aligning camera transforms to the record index (they are saved per update step).
         cam_tf = _cam_transform_for_frame(rec_idx)
-        if cam_tf is not None:
-            cam_robot = T_robot_base @ cam_tf 
-            log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)
+        cam_robot = T_robot_base @ cam_tf
+        log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)
 
-    if video_cap is not None:
-        video_cap.release()
+    video_cap.release()
 
-    if executed is not None and executed.size > 0:
+    if executed.size > 0:
         rr.log(
             "executed/points",
             rr.Points3D(
