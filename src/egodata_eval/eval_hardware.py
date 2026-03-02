@@ -155,6 +155,10 @@ class EvalHardware:
                 print(f"[INFO] Loaded T_robot_base from {base_to_robot_txt}")
             else:
                 print(f"[WARN] Failed to load T_robot_base from {base_to_robot_txt}; using identity.")
+        self.T_i2rt_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+
+        self.T_zed_glasses = np.linalg.inv(_load_calib_mat_safe(Path(DEFAULT_GLASSES_ZED_TXT))).astype(np.float32)
+
 
         self.i2rt_max_rot = i2rt_max_rot
         self.i2rt_cmd_duration = i2rt_cmd_duration
@@ -202,21 +206,30 @@ class EvalHardware:
         ZEDCamera = _import_zed_class()
         return ZEDCamera(resolution=ZED_RESOLUTION, fps=ZED_FPS)
 
-    def execute_pred_tcp_rel(self, tcp_rel_seq: np.ndarray) -> None: # rel tcp in i2rt frame, [N, xyz+6d rot] DEBUG:Basepose payload
-        if tcp_rel_seq is None or tcp_rel_seq.shape[0] == 0:
-            return
+    def execute_pred_tcp_rel(self, tcp_rel_seq: np.ndarray) -> np.ndarray: # rel tcp in i2rt frame, [N, xyz+6d rot] DEBUG:Basepose payload
         rel_seq = _build_pose_mats(
             tcp_rel_seq[:, :3],
             tcp_rel_seq[:, 3:3+6],
         ).astype(np.float32)
+
         self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
-        current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32) # the starting pose of an action chunk
+        # The starting pose of an action chunk, converted from TCP to glasses frame.
+        current_pose = (
+            self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+        )
+        # T_tcp_glasses = self.T_i2rt_zed.astype(np.float32) @ self.T_zed_glasses.astype(np.float32)
+        # glass_pose = current_pose @ T_tcp_glasses
+        # print("[DEBUG] Last rel_seq xyz norm from step 0: {:.4f} m".format(np.linalg.norm(rel_seq[-1, :3, 3])))
+        new_pose_seq: list[np.ndarray] = []
         for idx in range(rel_seq.shape[0]):
             # print(f"[DEBUG] Current TCP Pose :\n{current_pose}")
             # print(f"[DEBUG] Rel seq translation:{np.round(rel_seq[idx,:3, 3],4)}")
-            new_pose = add_relative(rel_seq[idx], current_pose)
-            # print(f"[DEBUG] New TCP Pose :\n{new_pose}")
-            # print("--------------------------------------------------")
+            # glass_new_pose = add_relative(rel_seq[idx], glass_pose)
+            # glass_new_pose = rel_seq[idx] @ glass_pose
+            new_pose = rel_seq[idx] @ current_pose
+            new_pose_seq.append(new_pose.astype(np.float32))
+            print(f"[DEBUG] New TCP Pose :\n{new_pose}")
+            print("--------------------------------------------------")
             success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
             if not success:
                 print("[WARN] I2RT IK failed for relative tcp pose.")
@@ -228,9 +241,42 @@ class EvalHardware:
                 "matrix",
                 "rotation_6d",
             ).squeeze(0)
+            # target_rot6d = rotation_transform( #DEBUG: no rot version
+            #     current_pose[:3, :3][None, ...],
+            #     "matrix",
+            #     "rotation_6d",
+            # ).squeeze(0)
             target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
             self._publish_head_cmd(target_xyz_rot6d)
             time.sleep(0.2)
+        return np.stack(new_pose_seq, axis=0).astype(np.float32)
+    def execute_pred_tcp_abs(self, tcp_i2rt_abs: np.ndarray) -> np.ndarray: # abs headpose in i2rt frame, [N, xyz+6d rot]
+        new_pose_seq: list[np.ndarray] = []
+        new_pose_base = tcp_i2rt_abs[0].astype(np.float32)
+        self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
+        current_pose = (
+            self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+        )
+        for idx in range(tcp_i2rt_abs.shape[0]):
+            new_pose_delta = tcp_i2rt_abs[idx] @ np.linalg.inv(new_pose_base)
+            print(f"new_pose_delta:{new_pose_delta[:3,3]}")
+            new_pose = new_pose_delta @ current_pose
+            new_pose_seq.append(new_pose.copy())
+            # print (f"[DEBUG] New TCP Pose :{new_pose[:3,3]}")
+            success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
+            if not success:
+                print("[WARN] I2RT IK failed for absolute tcp pose.")
+                continue
+            self.i2rt_target_pose = new_pose
+            target_rot6d = rotation_transform(
+                new_pose[:3, :3][None, ...],
+                "matrix",
+                "rotation_6d",
+            ).squeeze(0)
+            target_xyz_rot6d = np.concatenate([new_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
+            self._publish_head_cmd(target_xyz_rot6d)
+            time.sleep(0.2)
+        return np.stack(new_pose_seq, axis=0).astype(np.float32)
 
     def execute_robot_traj(
         self,

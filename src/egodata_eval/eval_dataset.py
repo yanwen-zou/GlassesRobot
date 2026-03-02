@@ -293,7 +293,7 @@ def _predict_sequence(
                 obj_traj_abs, obj_pose_mode=predictor.obj_pose_mode
             )
     if predictor.last_headpose_pred is not None:
-        print(f"predictor.last_headpose_pred: {predictor.last_headpose_pred}")
+        # print(f"predictor.last_headpose_pred: {predictor.last_headpose_pred}")
         outputs["headpose_pred"] = _normalize_headpose_seq(
             predictor.last_headpose_pred.astype(np.float32)
         )
@@ -570,7 +570,8 @@ def main() -> None:
         )
         headpose_preds.append(None if headpose_pred is None else headpose_pred.astype(np.float32))
         headpose_preds_norm.append(None if headpose_pred_norm is None else headpose_pred_norm.astype(np.float32))
-        print(f"headpose pred: {headpose_pred}")
+        # print(f"headpose pred: {headpose_pred}")
+        print(f"headpose norm pred: {headpose_pred_norm[:,:3]}")
         print(f"[INFO] processed frame {frame_idx:04d} -> pose record saved.")
 
     np.save(episode_dir / "robot_pose_records.npy", np.array(pose_records, dtype=object))

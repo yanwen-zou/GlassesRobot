@@ -30,7 +30,8 @@ def _rotation_6d_to_matrix(rot_6d: np.ndarray) -> np.ndarray:
     b2 = a2 - proj * b1
     b2 = b2 / (np.linalg.norm(b2, axis=-1, keepdims=True) + 1e-8)
     b3 = np.cross(b1, b2)
-    return np.stack([b1, b2, b3], axis=-1)
+    # Align with eval_utils/MBA convention used by runtime code.
+    return np.transpose(np.stack([b1, b2, b3], axis=-1), (0, 2, 1))
 
 
 def _build_pose_mats(translation: np.ndarray, rotation_6d: np.ndarray) -> np.ndarray:
@@ -96,7 +97,7 @@ def main():
     pose_records = load_records(data_dir / "robot_pose_records.npy")
     executed = load_array(data_dir / "robot_executed_poses.npy")
     tcp_hist = None
-    headpose_preds = load_array(data_dir / "headpose_pred.npy")
+    headpose_abs_seqs = load_array(data_dir / "headpose_abs_seq.npy")
 
     T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
@@ -237,6 +238,9 @@ def main():
     for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec["object_pose_robot"]
         pred_seq = rec["pred_obj_seq_robot"]
+        pred_tcp_seq = rec.get("pred_tcp_after_trans")
+        headpose_i2rt_abs = rec.get("headpose_i2rt_abs")
+        tcp_i2rt_abs = rec.get("tcp_i2rt_abs")
         frame_idx = int(rec["frame_idx"])
         rr.set_time_sequence("frame", frame_idx)
 
@@ -296,18 +300,50 @@ def main():
         expired_idx = frame_idx - pred_window
         if expired_idx >= 0:
             rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
-        if rec_idx >= headpose_preds.shape[0]:
+
+        # if pred_tcp_seq is not None:
+        #     pred_tcp_seq = np.asarray(pred_tcp_seq, dtype=np.float32)
+
+        #     rr.log(
+        #         f"frames/frame_{frame_idx}/pred_tcp_points",
+        #         rr.Points3D(
+        #             positions=_transform_points_base_to_robot(pred_tcp_seq[:, :3, 3]),
+        #             colors=np.array([[0, 255, 255, 255]], dtype=np.uint8),
+        #             radii=np.full(pred_tcp_seq.shape[0], args.axis_len * 0.035, dtype=np.float32),
+        #         ),
+        #     )
+        #     expired_idx = frame_idx - pred_window
+        #     if expired_idx >= 0:
+        #         rr.log(f"frames/frame_{expired_idx}/pred_tcp_points", rr.Clear(recursive=True))
+        # if tcp_i2rt_abs is not None:
+        #     tcp_i2rt_abs = np.asarray(tcp_i2rt_abs, dtype=np.float32)
+        #     rr.log(
+        #         f"frames/frame_{frame_idx}/tcp_i2rt_abs_points",
+        #         rr.Points3D(
+        #             positions=tcp_i2rt_abs[:, :3, 3],
+        #             colors=np.array([[255, 0, 0, 255]], dtype=np.uint8),
+        #             radii=np.full(tcp_i2rt_abs.shape[0], args.axis_len * 0.03, dtype=np.float32),
+        #         ),
+        #     )
+        #     expired_idx = frame_idx - pred_window
+        #     if expired_idx >= 0:
+        #         rr.log(f"frames/frame_{expired_idx}/tcp_i2rt_abs_points", rr.Clear(recursive=True))
+        # Prefer aligning camera transforms to the record index (they are saved per update step).
+        cam_tf = _cam_transform_for_frame(rec_idx)
+
+        if rec_idx >= headpose_abs_seqs.shape[0]:
             raise RuntimeError(
-                f"headpose_pred length mismatch: rec_idx={rec_idx}, headpose_len={headpose_preds.shape[0]}"
+                f"headpose_abs_seq length mismatch: rec_idx={rec_idx}, headpose_len={headpose_abs_seqs.shape[0]}"
             )
-        headpose_entry = np.asarray(headpose_preds[rec_idx], dtype=np.float32)
-        headpose_mats = _build_pose_mats(headpose_entry[:, :3], headpose_entry[:, 3:9])
+        headpose_mats = np.asarray(headpose_abs_seqs[rec_idx], dtype=np.float32)
+        if headpose_mats.ndim != 3 or headpose_mats.shape[1:] != (4, 4):
+            raise RuntimeError(f"Invalid headpose_abs_seq shape at rec_idx={rec_idx}: {headpose_mats.shape}")
         headpose_points = []
-        for headpose_T in headpose_mats:
-            headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
+        for headpose_base in headpose_mats:
+            headpose_robot = T_robot_base @ headpose_base
             headpose_points.append(headpose_robot[:3, 3])
         rr.log(
-            f"frames/frame_{frame_idx}/headpose_pred/points",
+            f"frames/frame_{frame_idx}/headpose_abs_seq/points",
             rr.Points3D(
                 positions=np.asarray(headpose_points, dtype=np.float32),
                 colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
@@ -316,10 +352,8 @@ def main():
         )
         expired_idx = frame_idx - pred_window
         if expired_idx >= 0:
-            rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
+            rr.log(f"frames/frame_{expired_idx}/headpose_abs_seq/points", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
-        # Prefer aligning camera transforms to the record index (they are saved per update step).
-        cam_tf = _cam_transform_for_frame(rec_idx)
         cam_robot = T_robot_base @ cam_tf
         log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)
 

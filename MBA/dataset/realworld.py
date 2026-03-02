@@ -706,6 +706,7 @@ class RealWorldDataset(Dataset):
             #     headposes_norm_input = self._absolute_to_delta(headposes_norm_input, current_headpose)
             headposes_norm_input = self._absolute_to_delta(action_headposes.copy(), current_headpose) # sensing arm always use delta control
             action_headposes_normalized = self._normalize_headpose(headposes_norm_input, obj_pose_mode="delta")
+            print(f"Action headpose norm:{action_headposes_normalized[:,:3]}")
             ret_dict["action_headpose"] = torch.from_numpy(action_headposes).float() # abs head pose in base frame
             ret_dict["action_headpose_normalized"] = torch.from_numpy(action_headposes_normalized).float() # normalized head pose(delta / abs)
             # Normalize on a copy so current_headpose stays in raw coordinates.

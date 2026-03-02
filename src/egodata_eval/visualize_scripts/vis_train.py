@@ -49,6 +49,9 @@ def _apply_rel_sequence(rel_seq: np.ndarray, start_pose: np.ndarray) -> np.ndarr
         nxt[:3, 3] = rel_seq[i, :3, 3] + cur[:3, 3]
         out[i] = nxt
         cur = nxt
+        # nxt = rel_seq[i] @ cur
+        # out[i] = nxt
+        # cur = nxt
     return out
 
 
@@ -204,21 +207,17 @@ def main():
                     headpose_mats = headpose_rel_mats
                 else:
                     headpose_mats = _apply_rel_sequence(headpose_rel_mats, cam_tf)
-                headpose_points = []
-                for headpose_T in headpose_mats:
+                rr.log(f"frames/frame_{frame_idx}/headpose_pred", rr.Clear(recursive=True))
+                for pred_idx, headpose_T in enumerate(headpose_mats):
                     headpose_robot = T_robot_base @ headpose_T.astype(np.float32)
-                    headpose_points.append(headpose_robot[:3, 3])
-                rr.log(
-                    f"frames/frame_{frame_idx}/headpose_pred/points",
-                    rr.Points3D(
-                        positions=np.asarray(headpose_points, dtype=np.float32),
-                        colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
-                        radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
-                    ),
-                )
+                    log_axis(
+                        f"frames/frame_{frame_idx}/headpose_pred/pose_{pred_idx}",
+                        headpose_robot,
+                        args.axis_len * 0.12,
+                    )
                 expired_idx = frame_idx - pred_window
                 if expired_idx >= 0:
-                    rr.log(f"frames/frame_{expired_idx}/headpose_pred/points", rr.Clear(recursive=True))
+                    rr.log(f"frames/frame_{expired_idx}/headpose_pred", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_tf = _cam_transform_for_frame(frame_idx) # load T_base_cam for this frame
         if cam_tf is not None:

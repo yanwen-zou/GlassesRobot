@@ -30,6 +30,7 @@ from egodata_eval.eval_utils import (
     cleanup_robot_mask_tracker,
     headpose_i2rt_to_base_abs,
     _load_calib_mat_safe,
+    add_relative,
 )  # type: ignore
 from egodata_eval.eval_hardware import EvalHardware
 
@@ -79,6 +80,22 @@ def _safe_save_mask_png(path: Path, mask: np.ndarray, win: str | None = None) ->
         return False
     os.replace(tmp, path)
     return True
+
+
+def _mul_pose_seq_fixed(pose_seq: np.ndarray, T_fixed: np.ndarray, side: str = "right") -> np.ndarray:
+    """Multiply an Nx4x4 pose sequence with one fixed 4x4 transform."""
+    if pose_seq.ndim != 3 or pose_seq.shape[1:] != (4, 4):
+        raise ValueError(f"pose_seq must be Nx4x4, got {pose_seq.shape}")
+    if T_fixed.shape != (4, 4):
+        raise ValueError(f"T_fixed must be 4x4, got {T_fixed.shape}")
+
+    pose_seq = pose_seq.astype(np.float32)
+    T_fixed = T_fixed.astype(np.float32)
+    if side == "right":
+        return np.einsum("nij,jk->nik", pose_seq, T_fixed).astype(np.float32)
+    if side == "left":
+        return np.einsum("ij,njk->nik", T_fixed, pose_seq).astype(np.float32)
+    raise ValueError(f"Unsupported side={side}, expected 'left' or 'right'")
 
 
 def _depth_to_pointcloud_np(
@@ -266,7 +283,7 @@ def main():
         centroid_log_dir=out_dir,
     )
     T_cam0_base = np.linalg.inv(T_base_cam0).astype(np.float32)
-
+    T_tcp_cam = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
     if args.calib_init_pose:
         T_base_cam1 = calib_init_pose[args.task]
         if T_base_cam1 is None:
@@ -275,7 +292,7 @@ def main():
         curr_headpose = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs]).astype(np.float32)
         # Calib-time transform chain:
         # i2rt_base -> tcp (FK), tcp -> cam (fixed extrinsic), cam -> ball_base (from 3-ball calibration).
-        T_tcp_cam = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+        
         if T_tcp_cam is None:
             raise RuntimeError(f"Failed to load fixed tcp->cam transform from {DEFAULT_I2RT_ZED_TXT}")
         T_i2rt_base_ball_base = (
@@ -395,7 +412,7 @@ def main():
     executed_poses: list[np.ndarray] = []
     # tcp_history: list[np.ndarray] = []
     pose_records: list[dict[str, object]] = []
-    headpose_pred_records: list[np.ndarray] = []
+    headpose_abs_seq_records: list[np.ndarray] = []
     T_base_cam_runtime: list[np.ndarray] = []
     tcp_obj_ready = False
 
@@ -488,9 +505,14 @@ def main():
                         pose_cam_ob = pred_state["pose_cam_ob"]
                         traj_denorm = pred_state["traj_denorm"]
                         headpose_pred = pred_state["headpose_pred"]
+                        # print(f"headpose_pred:{headpose_pred[:5]}")
                         T_base_cam_used = pred_state["T_base_cam"]
                         pose_mode = pred_state["pose_mode"]
                         # print(f"[INFO] pred_state:{pred_state}")
+                        pred_tcp_after_trans = np.zeros((0, 4, 4), dtype=np.float32)
+                        headpose_abs_seq_rec = np.zeros((0, 4, 4), dtype=np.float32)
+                        tcp_i2rt_abs_rec = np.zeros((0, 4, 4), dtype=np.float32)
+                        headpose_i2rt_abs_rec = np.zeros((0, 4, 4), dtype=np.float32)
                         if args.enable_headpose_head and headpose_pred is not None:
                             T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
                             # if pose_mode == "abs": 
@@ -514,22 +536,56 @@ def main():
                             headpose_rel_seq = headpose_pred.astype(np.float32) # headpose base relative
                             # record headpose (under base frame)
                             # TODO: need fix
-                            headpose_base_seq = headpose_i2rt_to_base_abs(
-                                headpose_rel_seq,
-                                T_base_cam_used,
-                                T_i2rt_tcp,
-                            ) 
-                            headpose_pred_records.append(headpose_base_seq.copy())
+                            # headpose_base_seq = headpose_i2rt_to_base_abs(
+                            #     headpose_rel_seq,
+                            #     T_base_cam_used,
+                            #     T_i2rt_tcp,
+                            # ) 
+                            
+                            # print(f"T_base_cam_used:\n{T_base_cam_used}")
+                            headpose_rel_pose_seq = _build_pose_mats(headpose_rel_seq[:, :3],headpose_rel_seq[:, 3:3 + 6]).astype(np.float32)
+                            # print(f"headpose_rel_pose_seq: {headpose_rel_pose_seq[:5,:3,3]}")
+                            headpose_abs_seq = add_relative(headpose_rel_pose_seq,T_base_cam_used.astype(np.float32)) # abs under base
+                            headpose_abs_seq_rec = headpose_abs_seq.astype(np.float32).copy()
+                            headpose_abs_seq_records.append(headpose_abs_seq_rec.copy())  # abs under base
+                            # print(f"headpose_abs_seq: {headpose_abs_seq[:5,:3,3]}")
+                            T_i2rt_base = T_i2rt_tcp @ T_tcp_cam @ np.linalg.inv(T_base_cam_used)
+                            headpose_i2rt_abs = _mul_pose_seq_fixed(
+                                headpose_abs_seq,
+                                T_i2rt_base,
+                                side="left",
+                            ) # abs under i2rt
+                            headpose_i2rt_abs_rec = headpose_i2rt_abs.astype(np.float32).copy()
+                            tcp_i2rt_abs = _mul_pose_seq_fixed(
+                                headpose_i2rt_abs,
+                                np.linalg.inv(T_tcp_cam),
+                                side="right",
+                            ) # headpose traj -> tcp traj
+                            tcp_i2rt_abs_rec = tcp_i2rt_abs.astype(np.float32).copy()
+                            print(f"tcp_i2rt_abs: {tcp_i2rt_abs[:5,:3,3]}")
+                            
+                            end_idx = min(tcp_i2rt_abs.shape[0], STEPS_HEAD_TO_EXECUTE)
+                            pred_tcp_after_trans_i2rt = exec_ctx.execute_pred_tcp_abs(tcp_i2rt_abs[0:end_idx])
+                            T_base_i2rt = np.linalg.inv(T_i2rt_base).astype(np.float32)
+                            pred_tcp_after_trans = np.einsum(
+                                "ij,njk->nik",
+                                T_base_i2rt,
+                                pred_tcp_after_trans_i2rt.astype(np.float32),
+                            ).astype(np.float32)
 
+
+                            # pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
+                            # print(f"pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[:3]}")
+                            '''
+                            end_idx = min(headpose_rel_seq.shape[0], STEPS_HEAD_TO_EXECUTE)
+                            
                             headpose_i2rt_rel = headpose_base_to_i2rt_rel(
                                 headpose_rel_seq,
                                 T_base_cam_used,
                                 T_i2rt_tcp,
                             )
-                            pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
-                            # print(f"pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[:3]}")
-                            end_idx = min(pred_tcp_i2rt_rel.shape[0], STEPS_HEAD_TO_EXECUTE)
-                            exec_ctx.execute_pred_tcp_rel(pred_tcp_i2rt_rel[0:end_idx])
+                            pred_tcp_after_trans = exec_ctx.execute_pred_tcp_rel(headpose_i2rt_rel[0:end_idx])
+                            '''
                             time.sleep(1.0)  # wait for motion to finish
 
                         if not tcp_obj_ready:
@@ -549,7 +605,7 @@ def main():
                             T_tcp_obj_new[:3, 3] = T_tcp_obj_const[:3, 3].astype(np.float32)
                             TASK_TCP_TO_OBJECT_SE3[args.task] = T_tcp_obj_new
                             tcp_obj_ready = True
-                            print(f"[INFO] T_tcp_obj calibrated for task={args.task} (rot=calib, trans=const):\n{T_tcp_obj_new}")
+                            # print(f"[INFO] T_tcp_obj calibrated for task={args.task} (rot=calib, trans=const):\n{T_tcp_obj_new}")
 
                         if args.add_curr_cond:
                             pose_base_ob = T_base_cam_used.astype(np.float32) @ pose_cam_ob.astype(np.float32)
@@ -589,6 +645,12 @@ def main():
                                 "pred_seq_robot": pred_obj_seq_robot,
                                 # This sequence is TCP poses in robot frame.
                                 "pred_tcp_seq_robot": tcp_seq_robot,
+                                # Transformed TCP sequence returned by execute_pred_tcp_rel (Nx4x4).
+                                "pred_tcp_after_trans": pred_tcp_after_trans,
+                                # TCP absolute sequence in i2rt frame (Nx4x4).
+                                "tcp_i2rt_abs": tcp_i2rt_abs_rec,
+                                # Headpose absolute sequence under base frame (Nx4x4).
+                                "headpose_abs_seq": headpose_abs_seq_rec,
                             }
                         )
                         if step_poses:
@@ -660,10 +722,10 @@ def main():
             np.save(executed_path, np.stack(executed_poses, axis=0))
             print(f"[INFO] Saved executed robot poses to: {executed_path}")
 
-        if headpose_pred_records:
-            headpose_pred_path = out_dir / "headpose_pred.npy"
-            np.save(headpose_pred_path, np.stack(headpose_pred_records, axis=0))
-            print(f"[INFO] Saved headpose predictions to: {headpose_pred_path}")
+        if headpose_abs_seq_records:
+            headpose_abs_seq_path = out_dir / "headpose_abs_seq.npy"
+            np.save(headpose_abs_seq_path, np.stack(headpose_abs_seq_records, axis=0))
+            print(f"[INFO] Saved headpose abs sequences to: {headpose_abs_seq_path}")
 
         # if tcp_history:
         #     tcp_path = out_dir / "robot_tcp_history.npy"

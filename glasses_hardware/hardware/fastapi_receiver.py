@@ -41,7 +41,7 @@ def unity2zup_right_frame(pos_quat):
     fit_mat = t3d.euler.axangle2mat([0,1,0],np.pi/2)
     fit_mat = fit_mat@t3d.euler.axangle2mat([0,0,1],-np.pi/2)
     target_rot_mat=fit_mat@rot_mat
-    target_rot_mat= target_rot_mat @ t3d.euler.axangle2mat([0, 0, 1], -np.pi / 2)
+    target_rot_mat= t3d.euler.axangle2mat([0,1,0],np.pi/2)@ target_rot_mat @ t3d.euler.axangle2mat([0, 0, 1], -np.pi / 2)
     target_pos_vec=fit_mat@pos_vec
     target = np.array(target_pos_vec.tolist()+t3d.quaternions.mat2quat(target_rot_mat).tolist())
     return target

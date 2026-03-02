@@ -269,8 +269,9 @@ def _build_pose_mats(translation: np.ndarray, rotation_6d: np.ndarray) -> np.nda
     translation = np.asarray(translation, dtype=np.float32)
     rotation_6d = np.asarray(rotation_6d, dtype=np.float32)
     mats = np.repeat(np.eye(4, dtype=np.float32)[None, ...], len(translation), axis=0)
-    rot_mats = rotation_transform(rotation_6d, "rotation_6d", "matrix")
-    mats[:, :3, :3] = rot_mats.astype(np.float32)
+    rot_mats = rotation_transform(rotation_6d, "rotation_6d", "matrix").astype(np.float32)
+    # rot_mats = np.transpose(rot_mats, (0, 2, 1))
+    mats[:, :3, :3] = rot_mats
     mats[:, :3, 3] = translation
     return mats
 
@@ -399,10 +400,6 @@ def headpose_base_to_i2rt_rel(
         "matrix",
         "rotation_6d",
     )
-
-    translate_scale = 1
-
-    trans_i2rt *= translate_scale # scale translation for debug
     
     # 组合结果
     return np.concatenate([trans_i2rt, rot6d_i2rt], axis=1).astype(np.float32)
@@ -489,10 +486,13 @@ def headpose_to_tcp(
     T_glasses_zed: Optional[np.ndarray] = None,
     T_zed_tcp: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    pose_seq_i2rt = _build_pose_mats(
-        headpose_i2rt_rel[:, :3],
-        headpose_i2rt_rel[:, 3:3+6],
-    )
+    trans_i2rt = np.asarray(headpose_i2rt_rel[:, :3], dtype=np.float32)
+    rot6d_i2rt = np.asarray(headpose_i2rt_rel[:, 3:3 + 6], dtype=np.float32)
+    rot_mat_i2rt = rotation_transform(
+        rot6d_i2rt,
+        "rotation_6d",
+        "matrix",
+    ).astype(np.float32)
     if T_glasses_zed is None:
         T_glasses_zed = _load_calib_mat_safe(Path(DEFAULT_GLASSES_ZED_TXT))
         if T_glasses_zed is None:
@@ -500,20 +500,28 @@ def headpose_to_tcp(
     if T_zed_tcp is None:
         T_zed_tcp = np.linalg.inv(T_glasses_zed.astype(np.float32))
     T_glasses_tcp = T_zed_tcp.astype(np.float32) @ T_glasses_zed.astype(np.float32)
-    T_tcp_glasses = np.linalg.inv(T_glasses_tcp)
-    pose_seq_tcp = np.einsum(
-        "ij,njk,kl->nil",
-        T_glasses_tcp,
-        pose_seq_i2rt.astype(np.float32),
-        T_tcp_glasses,
+
+    # For relative poses, translation is a vector and should only be rotated.
+    R_glasses_tcp = T_glasses_tcp[:3, :3].astype(np.float32)
+    trans_tcp = np.einsum(
+        "ij,nj->ni",
+        R_glasses_tcp,
+        trans_i2rt,
     )
-    xyz_tcp = pose_seq_tcp[:, :3, 3]
+
+    # Relative rotation uses conjugation in SO(3): R' = C R C^T.
+    rot_mat_tcp = np.einsum(
+        "ij,njk,kl->nil",
+        R_glasses_tcp,
+        rot_mat_i2rt,
+        R_glasses_tcp.T,
+    )
     r6_tcp = rotation_transform(
-        pose_seq_tcp[:, :3, :3],
+        rot_mat_tcp,
         "matrix",
         "rotation_6d",
     )
-    return np.concatenate([xyz_tcp, r6_tcp], axis=1).astype(np.float32)
+    return np.concatenate([trans_tcp, r6_tcp], axis=1).astype(np.float32)
 
 
 def _load_calib_mat_safe(path: Path) -> Optional[np.ndarray]:

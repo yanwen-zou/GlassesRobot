@@ -66,6 +66,7 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
     robot_env.keyboard.discard = False
     robot_env.keyboard.finish = False
     cnt = 0
+    episode_start_time = None
 
     robot_env.reset_robot()
     last_p = robot_env.robot.init_pose[:3]
@@ -82,6 +83,7 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
         # Initialize at the beginning of the episode
         if cnt == 0:
             cnt += 1
+            episode_start_time = time.time()
             print("Episode start!")
         
         right_cam.append(transition_data['demo_right_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8))
@@ -116,6 +118,9 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
         print('WARNING: discard the demo!')
         robot_env.gripper.move(robot_env.gripper.max_width)
         time.sleep(0.5)
+        if episode_start_time is not None:
+            elapsed_sec = time.time() - episode_start_time
+            print(f"Discarded episode elapsed time (including detach): {elapsed_sec:.3f}s")
         return
     
     episode = dict()
@@ -127,11 +132,18 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
     episode['action'] = np.stack(action, axis=0)
     if headpose:
         episode['headpose'] = np.stack(headpose, axis=0)
-    episode_id = _write_episode(h5file, episode)
-    print('Saved episode ', episode_id)
 
     robot_env.gripper.move(robot_env.gripper.max_width)
     time.sleep(0.5)
+    if episode_start_time is not None:
+        elapsed_sec = time.time() - episode_start_time
+    else:
+        elapsed_sec = 0.0
+    # episode['episode_duration_sec'] = np.array(elapsed_sec, dtype=np.float32)
+
+    episode_id = _write_episode(h5file, episode)
+    print('Saved episode ', episode_id)
+    print(f"Episode {episode_id} elapsed time (including detach): {elapsed_sec:.3f}s")
 
 
 def main(args):
