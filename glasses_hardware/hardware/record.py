@@ -65,10 +65,11 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
     robot_env.keyboard.start = False
     robot_env.keyboard.discard = False
     robot_env.keyboard.finish = False
+    robot_env.keyboard.manual_reset = False
     cnt = 0
     episode_start_time = None
 
-    robot_env.reset_robot()
+    # robot_env.reset_robot()
     last_p = robot_env.robot.init_pose[:3]
     last_r = R.from_quat(robot_env.robot.init_pose[3:7], scalar_first=True)
 
@@ -76,6 +77,14 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
     np.random.seed(seed)
 
     while not robot_env.keyboard.quit and not robot_env.keyboard.discard and not robot_env.keyboard.finish:
+        if robot_env.keyboard.manual_reset:
+            print("Manual reset requested.")
+            robot_env.reset_robot()
+            last_p = robot_env.robot.init_pose[:3]
+            last_r = R.from_quat(robot_env.robot.init_pose[3:7], scalar_first=True)
+            robot_env.keyboard.manual_reset = False
+            continue
+
         transition_data, last_p, last_r = robot_env.human_teleop_step(last_p, last_r)
         if not robot_env.keyboard.start or transition_data is None:
             continue
@@ -116,7 +125,7 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
 
     if not robot_env.keyboard.start or robot_env.keyboard.quit or robot_env.keyboard.discard:
         print('WARNING: discard the demo!')
-        robot_env.gripper.move(robot_env.gripper.max_width)
+        # robot_env.gripper.move(robot_env.gripper.max_width)
         time.sleep(0.5)
         if episode_start_time is not None:
             elapsed_sec = time.time() - episode_start_time
@@ -133,7 +142,7 @@ def record(h5file: h5py.File, robot_env: RobotEnv, headpose_sub: HeadPoseSubscri
     if headpose:
         episode['headpose'] = np.stack(headpose, axis=0)
 
-    robot_env.gripper.move(robot_env.gripper.max_width)
+    # robot_env.gripper.move(robot_env.gripper.max_width)
     time.sleep(0.5)
     if episode_start_time is not None:
         elapsed_sec = time.time() - episode_start_time

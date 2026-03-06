@@ -234,6 +234,22 @@ def main():
     if video_frame_count <= 0:
         raise RuntimeError(f"Invalid frame count for video: {video_path}")
 
+    frame_indices = np.array([int(rec["frame_idx"]) for rec in pose_records], dtype=np.int32)
+    if frame_indices.size == 0:
+        raise RuntimeError("robot_pose_records is empty.")
+    max_logged_frame_idx = int(frame_indices.max())
+    use_direct_video_index = video_frame_count >= (max_logged_frame_idx + 1)
+    if use_direct_video_index:
+        print(
+            f"[INFO] Video alignment: using direct frame_idx -> video_idx "
+            f"(video_frames={video_frame_count}, max_frame_idx={max_logged_frame_idx})"
+        )
+    else:
+        print(
+            f"[WARN] Video shorter than logged frame_idx range; using proportional mapping "
+            f"(video_frames={video_frame_count}, max_frame_idx={max_logged_frame_idx})"
+        )
+
     pred_window = 5
     for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec["object_pose_robot"]
@@ -268,9 +284,16 @@ def main():
             ),
         )
 
-        if len(pose_records) <= 1 or video_frame_count <= 1:
-            raise RuntimeError("pose_records and video must both contain at least 2 frames.")
-        video_idx = int(round((frame_idx / (len(pose_records) - 1)) * (video_frame_count - 1)))
+        if video_frame_count <= 1:
+            raise RuntimeError("video must contain at least 2 frames.")
+        if use_direct_video_index:
+            video_idx = min(max(frame_idx, 0), video_frame_count - 1)
+        else:
+            if max_logged_frame_idx <= 0:
+                video_idx = 0
+            else:
+                video_idx = int(round((frame_idx / max_logged_frame_idx) * (video_frame_count - 1)))
+                video_idx = min(max(video_idx, 0), video_frame_count - 1)
         video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
         ok, frame = video_cap.read()
         if not ok:
@@ -338,21 +361,41 @@ def main():
         headpose_mats = np.asarray(headpose_abs_seqs[rec_idx], dtype=np.float32)
         if headpose_mats.ndim != 3 or headpose_mats.shape[1:] != (4, 4):
             raise RuntimeError(f"Invalid headpose_abs_seq shape at rec_idx={rec_idx}: {headpose_mats.shape}")
-        headpose_points = []
-        for headpose_base in headpose_mats:
-            headpose_robot = T_robot_base @ headpose_base
-            headpose_points.append(headpose_robot[:3, 3])
+        headpose_robot_seq = [(T_robot_base @ headpose_base).astype(np.float32) for headpose_base in headpose_mats]
+        axis_scale = args.axis_len * 0.12
+        axis_origins = []
+        axis_vectors = []
+        axis_colors = []
+        for headpose_robot in headpose_robot_seq:
+            origin = headpose_robot[:3, 3]
+            rot = headpose_robot[:3, :3]
+            axis_origins.extend([origin, origin, origin])
+            axis_vectors.extend(
+                [
+                    rot[:, 0] * axis_scale,  # X axis
+                    rot[:, 1] * axis_scale,  # Y axis
+                    rot[:, 2] * axis_scale,  # Z axis
+                ]
+            )
+            axis_colors.extend(
+                [
+                    [255, 0, 0, 255],
+                    [0, 255, 0, 255],
+                    [0, 0, 255, 255],
+                ]
+            )
         rr.log(
-            f"frames/frame_{frame_idx}/headpose_abs_seq/points",
-            rr.Points3D(
-                positions=np.asarray(headpose_points, dtype=np.float32),
-                colors=np.array([[255, 120, 0, 255]], dtype=np.uint8),
-                radii=np.full(len(headpose_points), args.axis_len * 0.04, dtype=np.float32),
+            f"frames/frame_{frame_idx}/headpose_abs_seq/axes",
+            rr.Arrows3D(
+                origins=np.asarray(axis_origins, dtype=np.float32),
+                vectors=np.asarray(axis_vectors, dtype=np.float32),
+                colors=np.asarray(axis_colors, dtype=np.uint8),
+                radii=np.full(len(axis_vectors), args.axis_len * 0.01, dtype=np.float32),
             ),
         )
         expired_idx = frame_idx - pred_window
         if expired_idx >= 0:
-            rr.log(f"frames/frame_{expired_idx}/headpose_abs_seq/points", rr.Clear(recursive=True))
+            rr.log(f"frames/frame_{expired_idx}/headpose_abs_seq/axes", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_robot = T_robot_base @ cam_tf
         log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)

@@ -123,16 +123,21 @@ def main() -> None:
                 joint_pos = group["joint_pos"]
                 action = group["action"]
                 robot_state = group["robot_state"]
+                headpose = group.get("headpose")
 
-                num_frames = min(
+                frame_lengths = [
                     left.shape[0],
                     right.shape[0],
                     joint_pos.shape[0],
                     action.shape[0],
                     robot_state.shape[0],
-                )
+                ]
+                if headpose is not None:
+                    frame_lengths.append(headpose.shape[0])
+                num_frames = min(frame_lengths)
 
                 robot_points = []
+                headpose_points = []
                 for idx in range(num_frames):
                     rr.set_time_sequence("frame", idx)
                     rr.log("left_cam", rr.Image(left[idx]))
@@ -155,6 +160,25 @@ def main() -> None:
                             "robot_state/position",
                             rr.Points3D(np.stack(robot_points, axis=0), radii=0.03),
                         )
+
+                    if headpose is not None:
+                        hp = headpose[idx].astype(np.float32)
+                        if hp.shape[0] >= 3:
+                            headpose_points.append(hp[:3])
+                            rr.log(
+                                "headpose/position",
+                                rr.Points3D(
+                                    hp[:3][None, :],
+                                    radii=0.04,
+                                ),
+                            )
+                            rr.log(
+                                "headpose/trajectory",
+                                rr.Points3D(
+                                    np.stack(headpose_points, axis=0),
+                                    radii=0.02,
+                                ),
+                            )
 
 
 if __name__ == "__main__":

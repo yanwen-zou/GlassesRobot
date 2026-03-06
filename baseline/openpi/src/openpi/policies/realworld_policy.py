@@ -138,7 +138,7 @@ class RealWorldInputs(transforms.DataTransformFn):
 
         if "actions" in data:
             inputs["actions"] = _relative_to_chunk_first_action(data["actions"])
-            print("[DEBUG] Converted actions to relative-to-first chunk:\n", inputs["actions"])
+            # print("[DEBUG] Converted actions to relative-to-first chunk:\n", inputs["actions"])
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]

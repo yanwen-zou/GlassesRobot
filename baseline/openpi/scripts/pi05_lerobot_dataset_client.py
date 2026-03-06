@@ -38,12 +38,16 @@ class Args:
     image_size: int = 224
     # State dim expected by serving checkpoint norm stats.
     # Set to None to keep raw dataset state unchanged.
-    state_dim: int | None = 8
+    state_dim: int | None = 15
 
     # Optional visualization for model input image.
     visualize_input_image: bool = False
     visualize_window_name: str = "pi05_lerobot_model_input"
     visualize_wait_ms: int = 1
+    # Optional rerun visualization.
+    use_rerun: bool = False
+    rerun_spawn: bool = True
+    rerun_recording_name: str = "pi05_lerobot_headpose_vis"
 
 
 def _choose_key(sample: dict[str, Any], candidates: list[str], user_key: str | None, desc: str) -> str:
@@ -119,7 +123,74 @@ def _align_state_dim(state: np.ndarray, target_dim: int | None) -> np.ndarray:
     return np.concatenate([state.astype(np.float32, copy=False), pad], axis=0)
 
 
+def _quat_normalize(q: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(q, axis=-1, keepdims=True)
+    return q / np.clip(norm, 1e-12, None)
+
+
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    x1, y1, z1, w1 = np.moveaxis(q1, -1, 0)
+    x2, y2, z2, w2 = np.moveaxis(q2, -1, 0)
+    return np.stack(
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ],
+        axis=-1,
+    )
+
+
+def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    q = _quat_normalize(q)
+    q_xyz = q[..., :3]
+    q_w = q[..., 3:4]
+    t = 2.0 * np.cross(q_xyz, v)
+    return v + q_w * t + np.cross(q_xyz, t)
+
+
+def _quat_wxyz_to_xyzw(q: np.ndarray) -> np.ndarray:
+    return q[..., [1, 2, 3, 0]]
+
+
+def _quat_xyzw_to_wxyz(q: np.ndarray) -> np.ndarray:
+    return q[..., [3, 0, 1, 2]]
+
+
+def _compose_action_with_state(relative_action: np.ndarray, current_state: np.ndarray) -> np.ndarray:
+    rel = np.asarray(relative_action, dtype=np.float32).reshape(-1)
+    base = np.asarray(current_state, dtype=np.float32).reshape(-1)
+    if rel.shape[0] < 8 or base.shape[0] < 8:
+        raise ValueError(f"Need at least 8 dims for rel/base, got rel={rel.shape[0]}, base={base.shape[0]}")
+    if rel.shape[0] > base.shape[0]:
+        raise ValueError(f"Relative action dim {rel.shape[0]} > state dim {base.shape[0]}")
+
+    out = rel.copy()
+    p0 = base[:3]
+    q0_xyzw = _quat_normalize(_quat_wxyz_to_xyzw(base[3:7][None, :]))[0]
+    out[:3] = _quat_rotate(q0_xyzw[None, :], rel[None, :3])[0] + p0
+    out[3:7] = _quat_xyzw_to_wxyz(
+        _quat_normalize(_quat_mul(q0_xyzw[None, :], _quat_wxyz_to_xyzw(rel[None, 3:7])))[0]
+    )
+    out[7] = rel[7] + base[7]
+
+    if rel.shape[0] >= 15 and base.shape[0] >= 15:
+        hp_t0 = base[8:11]
+        hp_q0 = _quat_normalize(base[11:15][None, :])[0]
+        out[8:11] = _quat_rotate(hp_q0[None, :], rel[None, 8:11])[0] + hp_t0
+        out[11:15] = _quat_normalize(_quat_mul(hp_q0[None, :], rel[None, 11:15]))[0]
+    return out
+
+
 def main(args: Args) -> None:
+    rr = None
+    if args.use_rerun:
+        try:
+            import rerun as rr  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("Failed to import rerun. Please install rerun-sdk.") from exc
+
     ds = LeRobotDataset(args.repo_id)
     episode_indices = _collect_episode_indices(ds, args.episode_index)
     sample = ds[episode_indices[0]]
@@ -144,11 +215,16 @@ def main(args: Args) -> None:
     print(f"state_key: {state_key}")
     print(f"action_key: {action_key}")
     print(f"prompt_key: {prompt_key}")
+    if rr is not None:
+        rr.init(args.rerun_recording_name, spawn=args.rerun_spawn)
+    # Keep per-episode trajectory history for headpose visualization.
+    state_headpose_traj: dict[int, list[np.ndarray]] = {}
 
     for i, sample_idx in enumerate(episode_indices):
         sample = ds[sample_idx]
         image = _to_hwc_uint8(sample[image_key], args.image_size)
         raw_state = np.asarray(sample[state_key], dtype=np.float32).reshape(-1)
+        print(f"Raw state shape: {raw_state.shape}, values: {raw_state}")
         state = _align_state_dim(raw_state, args.state_dim)
         dataset_action = np.asarray(sample[action_key], dtype=np.float32)
 
@@ -173,29 +249,80 @@ def main(args: Args) -> None:
         }
         result = client.infer(observation)
         pred_action = np.asarray(result["actions"], dtype=np.float32)
+        pred_action_chunk = pred_action.reshape(-1, pred_action.shape[-1])[:, :15]
+        pred_action_abs_chunk = np.stack(
+            [_compose_action_with_state(chunk_step, state)[:15] for chunk_step in pred_action_chunk],
+            axis=0,
+        )
+        pred_action_abs_1d = pred_action_abs_chunk[0]
 
         epi = int(sample.get("episode_index", -1))
         frame = int(sample.get("frame_index", sample_idx))
-        pred_action_1d = _first_action_vec(pred_action)
+        pred_action_1d = _first_action_vec(pred_action_chunk)
         data_action_1d = _first_action_vec(dataset_action)
         pred_15 = np.round(pred_action_1d[:15], 5)
+        pred_abs_15 = np.round(pred_action_abs_1d[:15], 5)
         data_15 = np.round(data_action_1d[:15], 5)
         # In 15-dim action, headpose is [8:15], so headpose xyz is [8:11].
-        pred_headpose_xyz = np.round(pred_15[8:11], 5)
+        pred_headpose_xyz = np.round(pred_abs_15[8:11], 5)
         data_headpose_xyz = np.round(data_15[8:11], 5)
         diff_headpose_xyz = np.round(pred_headpose_xyz - data_headpose_xyz, 5)
+        pred_gripper = np.round(pred_abs_15[7], 5)
+        data_gripper = np.round(data_15[7], 5)
+        diff_gripper = np.round(pred_gripper - data_gripper, 5)
 
         print(f"\n=== Frame {i + 1}/{len(episode_indices)} ===")
-        print(f"global_index: {sample_idx}")
-        print(f"episode_index: {epi}")
-        print(f"frame_index: {frame}")
-        print(f"image_shape: {image.shape}, raw_state_shape: {raw_state.shape}, send_state_shape: {state.shape}")
-        print("Model Output Action (first 15 / 32):")
+        print("Model Output Action RAW relative (first 15 / 32):")
         print(pred_15)
+        print("Model Output Action converted to ABS (first 15, used for compare):")
+        print(pred_abs_15)
+        # print("Dataset Raw State (first 15):")
+        # print(state[:15])
         print("Dataset Raw Action (first 15):")
         print(data_15)
+        print(f"Gripper compare (model_abs vs dataset): {pred_gripper} vs {data_gripper} (diff={diff_gripper})")
         print(f"Headpose XYZ compare (model vs dataset): {pred_headpose_xyz} vs {data_headpose_xyz}")
         print(f"Headpose XYZ diff (model - dataset): {diff_headpose_xyz}")
+
+        if rr is not None and state.shape[0] >= 15:
+            rr.set_time("frame", sequence=frame)
+            rr.set_time("sample_idx", sequence=sample_idx)
+            rr.set_time("episode", sequence=epi)
+            rr.log("obs/image", rr.Image(image))
+
+            state_t = state[8:11].astype(np.float32)
+            state_q = _quat_normalize(state[11:15][None, :])[0]
+            pred_ts = pred_action_abs_chunk[:, 8:11].astype(np.float32)
+            pred_qs = _quat_normalize(pred_action_abs_chunk[:, 11:15])
+            axis_len = 0.05
+            basis = np.eye(3, dtype=np.float32) * axis_len
+            state_axes = _quat_rotate(np.repeat(state_q[None, :], 3, axis=0), basis)
+            colors = np.asarray([[255, 0, 0], [0, 255, 0], [0, 128, 255]], dtype=np.uint8)
+            chunk_axes = _quat_rotate(np.repeat(pred_qs, 3, axis=0), np.tile(basis, (pred_qs.shape[0], 1)))
+            chunk_axes_origins = np.repeat(pred_ts, 3, axis=0)
+            chunk_axes_colors = np.tile(colors, (pred_qs.shape[0], 1))
+            chunk_point_colors = np.tile(np.asarray([[255, 220, 0]], dtype=np.uint8), (pred_ts.shape[0], 1))
+
+            rr.log("headpose/current", rr.Transform3D(translation=state_t, quaternion=rr.Quaternion(xyzw=state_q)))
+            rr.log(
+                "headpose/action_chunk",
+                rr.Transform3D(translation=pred_ts[0], quaternion=rr.Quaternion(xyzw=pred_qs[0])),
+            )
+            rr.log("headpose/current_axes", rr.Arrows3D(origins=np.repeat(state_t[None, :], 3, axis=0), vectors=state_axes, colors=colors))
+            rr.log(
+                "headpose/action_chunk_axes",
+                rr.Arrows3D(origins=chunk_axes_origins, vectors=chunk_axes, colors=chunk_axes_colors),
+            )
+            rr.log("headpose/state_point", rr.Points3D([state_t], colors=[[255, 255, 255]], radii=[0.006]))
+            rr.log("headpose/action_chunk_points", rr.Points3D(pred_ts, colors=chunk_point_colors, radii=[0.004]))
+
+            if epi not in state_headpose_traj:
+                state_headpose_traj[epi] = []
+            state_headpose_traj[epi].append(state_t.copy())
+            rr.log(
+                "headpose/current_traj",
+                rr.LineStrips3D([np.asarray(state_headpose_traj[epi], dtype=np.float32)], colors=[[200, 200, 200]]),
+            )
 
     if args.visualize_input_image:
         cv2.destroyAllWindows()

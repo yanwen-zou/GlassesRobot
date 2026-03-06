@@ -361,21 +361,27 @@ class RobotEnv:
         self.gripper.move(gripper_action)
         time.sleep(0.2)
 
+    def update_current_pose(self): 
+        if self.i2rt_robot is None:
+            return
+        self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
+        self.i2rt_current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+
     def deploy_i2rt_action(self, delta_headpose):
         delta_tcp = self.delta_headpose_to_delta_tcp(delta_headpose)
-        print("[DEBUG] Delta headpose (glasses frame):\n", delta_headpose)
-        print("[DEBUG] Delta TCP (TCP frame):\n", delta_tcp)
-        # delta_tcp = delta_headpose # temp test
-        self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
-        current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
-        # new_pose = add_relative(delta_tcp, current_pose)
-        new_pose = current_pose @ delta_tcp
+        # self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
+        # current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+
+        if self.i2rt_current_pose is None:
+            raise RuntimeError("Current I2RT pose is not available. Call update_current_pose() first.")
+
+        new_pose = self.i2rt_current_pose @ delta_tcp
         success, q_sol = self.i2rt_kin.ik(new_pose, "grasp_site", verbose=False)
         if not success: 
             print("[WARN] IK failed for delta_headpose.")
             return
         self.i2rt_target_pose = new_pose
-        print("[DEBUG] Current TCP pose:\n", current_pose)
+        print("[DEBUG] Current TCP pose:\n", self.i2rt_current_pose)
         print("[DEBUG] Target TCP pose:\n", new_pose)
         target_rot6d = rotation_transform(
             new_pose[:3, :3][None, ...],
@@ -390,55 +396,47 @@ class RobotEnv:
         self,
         delta_headpose: np.ndarray,
         T_glasses_zed: Optional[np.ndarray] = None,
-        T_i2rt_zed: Optional[np.ndarray] = None,
+        T_tcp_zed: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Convert a delta headpose from the glasses/eye frame to the TCP frame.
 
-        Applies two fixed frame changes in sequence:
-          1. Glasses/eye frame -> ZED frame  (via T_glasses_zed)
-          2. ZED frame         -> TCP frame  (via inv(T_i2rt_zed))
+        First build the fixed transform from TCP frame to glasses frame:
+            T_tcp_glasses = T_tcp_zed @ inv(T_glasses_zed)
 
-        For a relative (delta) SE3 transform, each frame change is a similarity
-        transform:
-            delta_B = T_B_A @ delta_A @ inv(T_B_A)
+        Then apply one similarity transform directly:
+            delta_tcp = T_tcp_glasses @ delta_glasses @ inv(T_tcp_glasses)
 
         Args:
             delta_headpose: (4, 4) SE3 delta transform expressed in glasses/eye frame.
             T_glasses_zed:  (4, 4) fixed transform from glasses frame to ZED frame.
                             Loaded from DEFAULT_GLASSES_ZED_TXT when None.
-            T_i2rt_zed:     (4, 4) fixed transform from i2rt/TCP frame to ZED frame.
-                            Loaded from DEFAULT_I2RT_ZED_TXT when None.
-                            Its inverse gives the ZED -> TCP transform.
+            T_tcp_zed:      (4, 4) fixed transform from TCP frame to ZED frame.
+                             Loaded from DEFAULT_I2RT_ZED_TXT when None.
 
         Returns:
             (4, 4) SE3 delta transform expressed in the TCP frame.
         """
         if T_glasses_zed is None:
             T_glasses_zed = _load_calib_mat_safe(Path(DEFAULT_GLASSES_ZED_TXT))
+            # print(f"[INFO] Loaded T_glasses_zed from {DEFAULT_GLASSES_ZED_TXT}:\n{T_glasses_zed}")
             if T_glasses_zed is None:
                 raise ValueError(f"Failed to load T_glasses_zed from {DEFAULT_GLASSES_ZED_TXT}")
 
-        if T_i2rt_zed is None:
-            T_i2rt_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
-            if T_i2rt_zed is None:
-                raise ValueError(f"Failed to load T_i2rt_zed from {DEFAULT_I2RT_ZED_TXT}")
+        if T_tcp_zed is None:
+            T_tcp_zed = _load_calib_mat_safe(Path(DEFAULT_I2RT_ZED_TXT))
+            # print(f"[INFO] Loaded T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}:\n{T_tcp_zed}")
+            if T_tcp_zed is None:
+                raise ValueError(f"Failed to load T_tcp_zed from {DEFAULT_I2RT_ZED_TXT}")
 
         T_glasses_zed = np.asarray(T_glasses_zed, dtype=np.float32)
-        T_i2rt_zed = np.asarray(T_i2rt_zed, dtype=np.float32)
+        T_tcp_zed = np.asarray(T_tcp_zed, dtype=np.float32)
         delta = np.asarray(delta_headpose, dtype=np.float32)
 
-        # Step 1: glasses/eye frame -> ZED frame
-        # delta_zed = T_glasses_zed @ delta_glasses @ inv(T_glasses_zed)
         T_zed_glasses = np.linalg.inv(T_glasses_zed)
-        delta_zed = T_glasses_zed @ delta @ T_zed_glasses
-
-        # Step 2: ZED frame -> TCP frame
-        # T_tcp_zed = inv(T_i2rt_zed)
-        # delta_tcp = T_tcp_zed @ delta_zed @ inv(T_tcp_zed)
-        #           = inv(T_i2rt_zed) @ delta_zed @ T_i2rt_zed
-        T_tcp_zed = np.linalg.inv(T_i2rt_zed)
-        delta_tcp = T_tcp_zed @ delta_zed @ T_i2rt_zed
+        T_tcp_glasses = T_tcp_zed @ T_zed_glasses
+        T_glasses_tcp = np.linalg.inv(T_tcp_glasses)
+        delta_tcp = T_tcp_glasses @ delta @ T_glasses_tcp
 
         return delta_tcp
 

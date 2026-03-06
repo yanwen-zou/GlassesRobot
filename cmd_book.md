@@ -69,6 +69,13 @@ python src/egodata_eval/visualize_scripts/vis_train.py --data-dir src/egodata_ev
 # -- eval
 ./src/egodata_eval/eval.sh --task book --ckpt ckpt/ckpt_0205_book_abs_wo_curr/policy_epoch_600_seed_233.ckpt --enable-headpose-head --obj-pose-mode abs
 
+# openpi data processing
+export HF_LEROBOT_HOME=~/yanwen/GlassesRobot/data
+
+python baseline/openpi/scripts_dataset/convert_hdf5_to_lerobot.py --data_dir data/train_bread_teleop --repo-name shi-akihi/bread_openpi
+
+python baseline/openpi/scripts_dataset/push_lerobot_to_hub.py --local-path data/shi-akihi/bread_openpi --hub-repo-id shi-akihi/
+
 # openpi training
 export HF_LEROBOT_HOME=/mnt/data/yanwen/glass_data
 
@@ -80,7 +87,9 @@ XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_realworld --exp-
 ```bash
 cd baseline/openpi
 
-uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_realworld --policy.dir=checkpoints/pi05_realworld/openpi_book_0225/29999
+uv run scripts/serve_policy.py policy:checkpoint --policy.config=pi05_realworld --policy.dir=checkpoints/pi05_realworld/openpi_bread_0304/29999
 
+python baseline/openpi/scripts/pi05_realworld_client.py 
 
+python src/egodata_record/egodata_record/headpos_listener.py 
 ```

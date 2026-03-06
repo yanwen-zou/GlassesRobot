@@ -545,7 +545,7 @@ def main():
                             # print(f"T_base_cam_used:\n{T_base_cam_used}")
                             headpose_rel_pose_seq = _build_pose_mats(headpose_rel_seq[:, :3],headpose_rel_seq[:, 3:3 + 6]).astype(np.float32)
                             # print(f"headpose_rel_pose_seq: {headpose_rel_pose_seq[:5,:3,3]}")
-                            headpose_abs_seq = add_relative(headpose_rel_pose_seq,T_base_cam_used.astype(np.float32)) # abs under base
+                            headpose_abs_seq = add_relative(headpose_rel_pose_seq,T_base_cam_used.astype(np.float32)) # abs under base, align with transformation in data processing
                             headpose_abs_seq_rec = headpose_abs_seq.astype(np.float32).copy()
                             headpose_abs_seq_records.append(headpose_abs_seq_rec.copy())  # abs under base
                             # print(f"headpose_abs_seq: {headpose_abs_seq[:5,:3,3]}")
@@ -586,7 +586,7 @@ def main():
                             )
                             pred_tcp_after_trans = exec_ctx.execute_pred_tcp_rel(headpose_i2rt_rel[0:end_idx])
                             '''
-                            time.sleep(1.0)  # wait for motion to finish
+                            # time.sleep(1.0)  # wait for motion to finish
 
                         if not tcp_obj_ready:
                             pose_base_ob_calib = (T_base_cam_used.astype(np.float32) @ pose_cam_ob.astype(np.float32)).astype(np.float32)

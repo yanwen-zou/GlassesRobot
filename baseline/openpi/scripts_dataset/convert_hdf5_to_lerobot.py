@@ -15,7 +15,7 @@ import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 from pathlib import Path
 
 import h5py
@@ -30,6 +30,7 @@ REPO_NAME = "shi-akihi/book_openpi" # Remember to change this to your own huggin
 
 
 LOGGER = logging.getLogger(__name__)
+FRAMES_TO_DROP = 3
 
 
 def _relative_headpose_to_first(headpose_data: np.ndarray) -> np.ndarray:
@@ -89,7 +90,8 @@ def _relative_headpose_to_prev(headpose_data: np.ndarray) -> np.ndarray:
 @dataclass
 class ConversionConfig:
     data_dir: str
-    output_path: str = str(HF_LEROBOT_HOME / REPO_NAME)
+    repo_name: str = REPO_NAME
+    output_path: Optional[str] = None
     push_to_hub: bool = False
     num_workers: int = 4
     headpose_mode: str = "abs"  # "abs" for absolute, "delta" for relative to previous headpose
@@ -113,7 +115,7 @@ def _compute_max_duration(hdf5_path: str) -> int:
         episode_keys = _get_episode_keys(h5_file)
         if not episode_keys:
             raise ValueError(f"No episodes found in {hdf5_path}")
-        return max(len(_get_episode_group(h5_file, key)["action"]) for key in episode_keys) - 1
+        return max(len(_get_episode_group(h5_file, key)["action"]) for key in episode_keys) - FRAMES_TO_DROP
 
 
 def _resolve_hdf5_paths(path: str) -> List[str]:
@@ -138,7 +140,17 @@ def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, he
     with h5py.File(hdf5_path, "r") as h5_file:
         episode = _get_episode_group(h5_file, episode_key)
         num_steps = episode["action"].shape[0]
-        values = np.arange(-num_steps + 1, 1, dtype=np.float32)[:, None] / max_duration
+        if num_steps <= FRAMES_TO_DROP:
+            LOGGER.warning(
+                "Episode %s has <=%d frames, skipped after dropping first %d frames",
+                episode_key,
+                FRAMES_TO_DROP,
+                FRAMES_TO_DROP,
+            )
+            return []
+
+        kept_steps = num_steps - FRAMES_TO_DROP
+        values = np.arange(-kept_steps + 1, 1, dtype=np.float32)[:, None] / max_duration
         frames: List[Dict[str, np.ndarray]] = []
         
         headpose = episode.get("headpose")
@@ -149,7 +161,8 @@ def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, he
                 # print(f"Episode {episode_key} headpose converted to relative-to-first frame:\n{headpose_data}")
                 LOGGER.debug("Episode %s: Converted headpose to relative-to-first frame", episode_key)
         
-        for step in range(num_steps):
+        # Drop the first several frames of each episode before conversion.
+        for out_step, step in enumerate(range(FRAMES_TO_DROP, num_steps)):
             robot_state = episode["robot_state"][step].astype(np.float32)
             action = episode["action"][step].astype(np.float32)
             if headpose is not None:
@@ -166,7 +179,7 @@ def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, he
                     "wrist_image": episode["right_cam"][step][..., ::-1],
                     "state": state,
                     "actions": actions,
-                    "value": values[step],
+                    "value": values[out_step],
                     "task": "Put the book in the shelf",
                 }
             )
@@ -176,10 +189,11 @@ def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, he
 def main(config: ConversionConfig) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    output_path = Path(config.output_path)
+    output_path = Path(config.output_path) if config.output_path else HF_LEROBOT_HOME / config.repo_name
     if output_path.exists() and not config.append_to_existing:
         shutil.rmtree(output_path)
     logging.info("Output dataset path: %s", output_path)
+    logging.info("Target repo id: %s", config.repo_name)
 
     state_dim = 8 if config.headpose_mode == "delta" else 15
     features = {
@@ -213,12 +227,12 @@ def main(config: ConversionConfig) -> None:
     if output_path.exists() and config.append_to_existing:
         logging.info("Appending to existing dataset at %s", output_path)
         dataset = LeRobotDataset(
-            repo_id=REPO_NAME,
+            repo_id=config.repo_name,
             root=output_path,
         )
     else:
         dataset = LeRobotDataset.create(
-            repo_id=REPO_NAME,
+            repo_id=config.repo_name,
             robot_type="single_flexiv_rizon4",
             fps=10,
             root=output_path,
@@ -250,13 +264,15 @@ def main(config: ConversionConfig) -> None:
             ]
             for future in as_completed(futures):
                 frames = future.result()
+                if not frames:
+                    continue
                 for frame in frames:
                     dataset.add_frame(frame)
                 dataset.save_episode()
 
     if config.push_to_hub:
         dataset.push_to_hub()
-        logging.info("Dataset pushed to hub at %s", REPO_NAME)
+        logging.info("Dataset pushed to hub at %s", config.repo_name)
 
 
 if __name__ == "__main__":

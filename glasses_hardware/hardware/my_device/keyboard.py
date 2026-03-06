@@ -18,6 +18,7 @@ class Keyboard:
         self.bad = False
         self.help = False
         self.infer = False
+        self.manual_reset = False
         self.listener = None
         # make a thread to listen to keyboard and register our callback functions
         if not is_multi_robot_env:
@@ -62,6 +63,7 @@ class Keyboard:
         ###########
         print_command("h", "human")
         print_command("r", "robot")
+        print_command("z", "manual reset")
         print("")
 
     def on_press(self, key):
@@ -113,6 +115,9 @@ class Keyboard:
                 self.help = True
             elif key.char == "r":
                 self.infer = True
+            elif key.char == "z":
+                self.manual_reset = True
+                print("manual reset!")
         except AttributeError as e:
             pass
 

@@ -1,4 +1,4 @@
-"""Visualize absolute headpose from one episode in an HDF5 file with Rerun.
+"""Visualize absolute headpose and robot TCP from one episode in an HDF5 file with Rerun.
 
 Example:
   python baseline/openpi/scripts_dataset/visualize_hdf5_headpose_rerun.py \
@@ -15,6 +15,19 @@ from typing import List
 import h5py
 import numpy as np
 import tyro
+
+
+def _quat_normalize(q: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(q, axis=-1, keepdims=True)
+    return q / np.clip(norm, 1e-12, None)
+
+
+def _quat_rotate(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    q = _quat_normalize(q)
+    q_xyz = q[..., :3]
+    q_w = q[..., 3:4]
+    t = 2.0 * np.cross(q_xyz, v)
+    return v + q_w * t + np.cross(q_xyz, t)
 
 
 def _get_episode_keys(h5_file: h5py.File) -> List[str]:
@@ -60,6 +73,8 @@ def main(args: Args) -> None:
         headpose = np.asarray(episode["headpose"][:], dtype=np.float32)
         left_cam = np.asarray(episode["left_cam"][:]) if "left_cam" in episode else None
         right_cam = np.asarray(episode["right_cam"][:]) if "right_cam" in episode else None
+        tcp_pose = np.asarray(episode["tcp_pose"][:], dtype=np.float32) if "tcp_pose" in episode else None
+        robot_state = np.asarray(episode["robot_state"][:], dtype=np.float32) if "robot_state" in episode else None
 
     if headpose.ndim != 2 or headpose.shape[1] != 7:
         raise ValueError(f"Expected headpose shape (T, 7), got {headpose.shape}")
@@ -67,10 +82,24 @@ def main(args: Args) -> None:
         raise ValueError(f"left_cam length {left_cam.shape[0]} != headpose length {headpose.shape[0]}")
     if right_cam is not None and right_cam.shape[0] != headpose.shape[0]:
         raise ValueError(f"right_cam length {right_cam.shape[0]} != headpose length {headpose.shape[0]}")
+    if tcp_pose is not None:
+        if tcp_pose.ndim != 2 or tcp_pose.shape[1] != 7:
+            raise ValueError(f"Expected tcp_pose shape (T, 7), got {tcp_pose.shape}")
+        if tcp_pose.shape[0] != headpose.shape[0]:
+            raise ValueError(f"tcp_pose length {tcp_pose.shape[0]} != headpose length {headpose.shape[0]}")
+    if robot_state is not None:
+        if robot_state.ndim != 2 or robot_state.shape[1] < 7:
+            raise ValueError(f"Expected robot_state shape (T, >=7), got {robot_state.shape}")
+        if robot_state.shape[0] != headpose.shape[0]:
+            raise ValueError(f"robot_state length {robot_state.shape[0]} != headpose length {headpose.shape[0]}")
+
+    # record.py format: prefer tcp_pose; fallback to robot_state[:7].
+    tcp_state = tcp_pose if tcp_pose is not None else (robot_state[:, :7] if robot_state is not None else None)
 
     rr.init(args.recording_name, spawn=args.spawn)
 
     traj_xyz: list[np.ndarray] = []
+    tcp_traj_xyz: list[np.ndarray] = []
     total = headpose.shape[0]
     limit = total if args.max_frames <= 0 else min(total, int(args.max_frames))
     for i in range(limit):
@@ -85,6 +114,42 @@ def main(args: Args) -> None:
         rr.log("headpose/trajectory", rr.LineStrips3D([xyz_arr], colors=[[80, 170, 255]]))
         rr.log("headpose/all_points", rr.Points3D(xyz_arr, colors=[[255, 255, 255]], radii=[0.0035]))
         rr.log("headpose/quat_xyzw", rr.TextLog(np.array2string(quat_xyzw, precision=5)))
+        axis_len = 0.06
+        unit_axes = np.eye(3, dtype=np.float32)
+        rotated_axes = _quat_rotate(np.repeat(quat_xyzw[None, :], 3, axis=0), unit_axes * axis_len)
+        rr.log(
+            "headpose/pose",
+            rr.Transform3D(translation=xyz, quaternion=rr.Quaternion(xyzw=_quat_normalize(quat_xyzw))),
+        )
+        rr.log(
+            "headpose/axes",
+            rr.Arrows3D(
+                origins=np.repeat(xyz[None, :], 3, axis=0),
+                vectors=rotated_axes,
+                colors=np.asarray([[255, 0, 0], [0, 255, 0], [0, 128, 255]], dtype=np.uint8),
+            ),
+        )
+        if tcp_state is not None:
+            tcp = tcp_state[i]
+            tcp_xyz = tcp[:3].astype(np.float32)
+            tcp_quat_xyzw = tcp[3:7].astype(np.float32)
+            tcp_traj_xyz.append(tcp_xyz.copy())
+            tcp_xyz_arr = np.asarray(tcp_traj_xyz, dtype=np.float32)
+            rr.log("robot_tcp/current", rr.Points3D([tcp_xyz], colors=[[255, 100, 0]], radii=[0.008]))
+            rr.log("robot_tcp/trajectory", rr.LineStrips3D([tcp_xyz_arr], colors=[[255, 180, 80]]))
+            rr.log(
+                "robot_tcp/pose",
+                rr.Transform3D(translation=tcp_xyz, quaternion=rr.Quaternion(xyzw=_quat_normalize(tcp_quat_xyzw))),
+            )
+            tcp_rotated_axes = _quat_rotate(np.repeat(tcp_quat_xyzw[None, :], 3, axis=0), unit_axes * axis_len)
+            rr.log(
+                "robot_tcp/axes",
+                rr.Arrows3D(
+                    origins=np.repeat(tcp_xyz[None, :], 3, axis=0),
+                    vectors=tcp_rotated_axes,
+                    colors=np.asarray([[255, 80, 80], [80, 255, 80], [80, 160, 255]], dtype=np.uint8),
+                ),
+            )
         if left_cam is not None:
             rr.log("obs/left_cam", rr.Image(left_cam[i]))
         if right_cam is not None:
