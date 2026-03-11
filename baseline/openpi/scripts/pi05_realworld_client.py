@@ -264,6 +264,7 @@ def main(args: Args) -> None:
     logged_robot_state: list[np.ndarray] = []
     logged_headpose_state: list[np.ndarray] = []
     logged_action_abs: list[np.ndarray] = []
+    logged_left_cam_raw: list[np.ndarray] = []
     if args.enable_headpose:
         if not rclpy.ok():
             rclpy.init(args=None)
@@ -345,6 +346,7 @@ def main(args: Args) -> None:
             else:
                 logged_headpose_state.append(np.full((7,), np.nan, dtype=np.float32))
             logged_action_abs.append(np.asarray(action_chunk_abs, dtype=np.float32).copy())
+            logged_left_cam_raw.append(left_bgr.copy())
 
             logging.info("[step %d]", step)
 
@@ -389,6 +391,23 @@ def main(args: Args) -> None:
             action_abs=action_abs_arr,
         )
         logging.info("Saved inference step log to: %s (num_steps=%d)", str(infer_log_path), len(logged_infer_step))
+
+        if logged_left_cam_raw:
+            video_path = log_dir / f"left_cam_raw_{ts}.mp4"
+            height, width = logged_left_cam_raw[0].shape[:2]
+            writer = cv2.VideoWriter(
+                str(video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10.0,
+                (width, height),
+            )
+            if writer.isOpened():
+                for frame in logged_left_cam_raw:
+                    writer.write(np.asarray(frame, dtype=np.uint8))
+                writer.release()
+                logging.info("Saved left raw camera video to: %s (num_frames=%d)", str(video_path), len(logged_left_cam_raw))
+            else:
+                logging.warning("Failed to open VideoWriter for: %s", str(video_path))
 
         if args.enable_headpose and first_hp_vec is not None:
             log_path = log_dir / f"policy_headpose_delta_log_{ts}.npz"

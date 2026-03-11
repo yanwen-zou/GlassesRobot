@@ -718,7 +718,17 @@ _CONFIGS = [
         name="pi05_realworld",
         model=pi0_config.Pi0Config(action_dim=32, action_horizon=10, pi05=True),
         data=LeRobotRealWorldDataConfig(
-            repo_id="shi-akihi/bread_openpi",
+            repo_id="shi-akihi/teapot_openpi",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_realworld_teapot",
+        model=pi0_config.Pi0Config(action_dim=32, action_horizon=10, pi05=True),
+        data=LeRobotRealWorldDataConfig(
+            repo_id="shi-akihi/teapot_openpi",
             base_config=DataConfig(prompt_from_task=True),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),

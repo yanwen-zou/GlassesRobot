@@ -39,6 +39,7 @@ src/FoundationStereo/test_outputs/
 src/egodata_eval/eval_output/
 *.ipynb_checkpoints/
 .TimeRecord
+eval_output/
 
 
 # Model checkpoints and weights
@@ -81,6 +82,7 @@ glasses_hardware/calib/ball_centroids_*
 *.jpg
 *.png
 *.hdf5
+*.stl
 
 # Vendor SDKs / binaries
 glasses_hardware/anygrasp_sdk/

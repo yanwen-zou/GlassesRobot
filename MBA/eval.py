@@ -184,8 +184,12 @@ def evaluate(args_override):
         with torch.inference_mode():
             policy.eval()
             prev_width = None
+            inference_started = False
             for t in range(args.max_steps):
                 if t % args.num_inference_step == 0:
+                    if not inference_started:
+                        agent.close_gripper(blocking = True)
+                        inference_started = True
                     # pre-process inputs
                     colors, depths = agent.get_observation()
                     coords, feats, cloud = create_input(

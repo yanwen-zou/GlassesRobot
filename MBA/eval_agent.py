@@ -78,6 +78,11 @@ class Agent:
         self.gripper.action(width)
         if blocking:
             time.sleep(0.5)
+
+    def close_gripper(self, blocking = False):
+        self.gripper.close_gripper()
+        if blocking:
+            time.sleep(0.5)
     
     def stop(self):
         self.robot.stop()

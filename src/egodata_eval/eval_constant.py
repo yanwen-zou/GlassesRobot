@@ -6,8 +6,8 @@ I2RT_INIT_DURATION = 2.0
 I2RT_INIT_STEPS = 80
 TASK_CHOICES = ("teapot", "book", "sword", "cup", "bread")
 TASK_I2RT_TARGET_RAD = {
-    # "teapot": np.array([-9.9400e-02,  8.9980e-01,  1.7590e+00, -1.4464e+00,  5.9000e-03, -1.0630e-01, 1.2000e-03], dtype=np.float32),
-    "teapot": np.array([-9.9400e-02,  8.9980e-01,  1.7590e+00, -1.1864e+00,  5.9000e-03, -1.0630e-01, 1.2000e-03], dtype=np.float32),
+    "teapot": np.array([-9.9400e-02,  8.9980e-01,  1.7590e+00, -1.4464e+00,  5.9000e-03, -1.0630e-01, 1.2000e-03], dtype=np.float32),
+    # "teapot": np.array([-9.9400e-02,  8.9980e-01,  1.7590e+00, -1.1864e+00,  5.9000e-03, -1.0630e-01, 1.2000e-03], dtype=np.float32),
     "book": np.array([-0.0657, 0.5615, 0.7590, -0.2887, 0.1330, 0.0114, 0.0013], dtype=np.float32),
     "sword": np.array([
         0.0609,
@@ -124,13 +124,13 @@ STEPS_TO_EXECUTE = 7
 STEPS_HEAD_TO_EXECUTE = 7
 GRIP_OPEN_THRESH = {
     "teapot": 0.7,
-    "book": 0.7,
+    "book": 0.8,
     "sword": 0.7,
     "cup": 0.7,
-    "bread": 0.8,
+    "bread": 0.85,
 }
 GRIPPER_OPEN_WIDTH_DEFAULT = 0.085
-LOOP_SLEEP_SEC = 0.05
+LOOP_SLEEP_SEC = 0.2
 
 # ZED + UI defaults.
 ZED_RESOLUTION = "WVGA"

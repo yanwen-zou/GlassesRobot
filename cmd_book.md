@@ -69,6 +69,9 @@ python src/egodata_eval/visualize_scripts/vis_train.py --data-dir src/egodata_ev
 # -- eval
 ./src/egodata_eval/eval.sh --task book --ckpt ckpt/ckpt_0205_book_abs_wo_curr/policy_epoch_600_seed_233.ckpt --enable-headpose-head --obj-pose-mode abs
 
+# eval
+bash src/egodata_eval/eval.sh   --task book   --arm-hardware ur5   --ur5-robot-ip 192.168.2.102   --dh-gripper-port /dev/ttyUSB0   --ckpt ckpt/ckpt_0212_book_abs_wo_curr/policy_epoch_1000_seed_233.ckpt --enable-headpose-head --obj-pose-mode abs
+
 # openpi data processing
 export HF_LEROBOT_HOME=~/yanwen/GlassesRobot/data
 

@@ -14,7 +14,7 @@ import pygame
 from torchvision.transforms import Compose, Resize, CenterCrop
 from torchvision.transforms import InterpolationMode
 
-from my_device.robot import FlexivRobot, FlexivGripper
+from my_device.robot import FlexivRobot, FlexivGripper, compose_global_delta
 from my_device.zed import ZEDCamera
 from my_device.keyboard import Keyboard
 from my_device.sigma import Sigma7
@@ -49,6 +49,7 @@ from egodata_eval.eval_constant import (
     DEFAULT_GLASSES_ZED_TXT, DEFAULT_I2RT_ZED_TXT,
 )
 from glasses_hardware.hardware.my_device.i2rt_robo import I2RTClient, DEFAULT_ROBOT_PORT
+from glasses_hardware.hardware.grasp_test import select_delta_xyz
 
 ZED_RESOLUTION = "WVGA"
 ZED_FPS = 30
@@ -88,6 +89,7 @@ class RobotEnv:
         self.zed = self._init_camera() # use ZED camera
         self.keyboard = Keyboard()
         self.home_pose = self.robot.init_pose
+        self._move_flexiv_to_task_pose(task_name)
         
         # Setup image processors
         BICUBIC = InterpolationMode.BICUBIC
@@ -98,6 +100,46 @@ class RobotEnv:
         
         # Keep track of throttle usage for human intervention
         self.last_throttle = False
+
+    def _move_flexiv_to_task_pose(self, task_name: str) -> None:
+        """Move Flexiv from its init pose to a task-specific start pose."""
+        center_pose = self.robot.init_pose.copy()
+
+        z_rad = np.deg2rad(3.0)
+        rotation = np.array(
+            [
+                [np.cos(z_rad), -np.sin(z_rad), 0.0],
+                [np.sin(z_rad), np.cos(z_rad), 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        if task_name in {"sword", "bread"}:
+            y_rad = np.deg2rad(30.0)
+            rotation = rotation @ np.array(
+                [
+                    [np.cos(y_rad), 0.0, np.sin(y_rad)],
+                    [0.0, 1.0, 0.0],
+                    [-np.sin(y_rad), 0.0, np.cos(y_rad)],
+                ],
+                dtype=np.float32,
+            )
+
+        rot6d = rotation_transform(rotation[None, ...], "matrix", "rotation_6d").squeeze(0)
+        pose_forward = center_pose.copy()
+        delta_x, delta_y, delta_z = select_delta_xyz(task_name)
+        pose_forward[0] += delta_x
+        pose_forward[1] += delta_y
+        pose_forward[2] -= delta_z
+        pose_forward = compose_global_delta(
+            pose_forward,
+            np.concatenate([np.zeros(3, dtype=np.float32), rot6d], axis=0),
+        )
+
+        self.robot.send_tcp_pose(pose_forward)
+        time.sleep(2)
+        self.gripper.move(self.gripper.max_width)
+        time.sleep(0.5)
 
     def _init_camera(self):
         return ZEDCamera(resolution=ZED_RESOLUTION, fps=ZED_FPS)

@@ -210,7 +210,7 @@ def _run_depth_traj(
                     cloud=np.asarray(frame_cloud, dtype=np.float32),
                     frame_idx=np.array([int(state["frame_idx"])], dtype=np.int32),
                 )
-            frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
+            # frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
             pred_state = {
                 "pose_cam_ob": ctx["pose_est"].pose_cam_ob.astype(np.float32),
                 "traj_denorm": traj_pred.last_traj_pred.astype(np.float32), # abs both in delta/abs option
@@ -238,6 +238,21 @@ def main():
     ap.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     ap.add_argument(
+        "--arm-hardware",
+        type=str,
+        choices=["flexiv", "ur5"],
+        default="flexiv",
+        help="Manipulator backend used for evaluation.",
+    )
+    ap.add_argument("--ur5-robot-ip", type=str, default="192.168.2.102", help="UR5 robot IP address.")
+    ap.add_argument("--dh-gripper-port", type=str, default="/dev/ttyUSB0", help="DH gripper serial port.")
+    ap.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Optional output directory. Defaults to src/egodata_eval/eval_output/<timestamp>.",
+    )
+    ap.add_argument(
         "--calib-init-pose",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -248,7 +263,7 @@ def main():
     update_interval = UPDATE_INTERVAL
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Prepare video output
-    out_dir = Path(__file__).resolve().parent / "eval_output" / ts
+    out_dir = Path(args.out_dir) if args.out_dir is not None else Path(__file__).resolve().parent / "eval_output" / ts
     out_dir.mkdir(parents=True, exist_ok=True)
     headpose_topic = DEFAULT_POSE_TOPIC
     video_path = out_dir / "stream.mp4"
@@ -271,7 +286,12 @@ def main():
     calib_dir.mkdir(parents=True, exist_ok=True)
     T_base_cam0 = None
 
-    exec_ctx = EvalHardware(task_name=args.task)
+    exec_ctx = EvalHardware(
+        task_name=args.task,
+        arm_hardware=args.arm_hardware,
+        ur5_robot_ip=args.ur5_robot_ip,
+        dh_gripper_port=args.dh_gripper_port,
+    )
     cam = exec_ctx.camera
     depth_est = DepthEstimator(scale=DEPTH_EST_SCALE, camera=cam)
     K = depth_est.K.astype(np.float32)
@@ -317,10 +337,7 @@ def main():
         print(f"[INFO] Computed T_i2rt_tcp for init pose:\n{T_i2rt_tcp}")
         success, q_sol = exec_ctx.i2rt_kin.ik(T_i2rt_tcp, "grasp_site", verbose=False)
         if not success:
-            exec_ctx.i2rt_robot.close()
-            exec_ctx.i2rt_robot.destroy_node()
-            exec_ctx.i2rt_server_proc.terminate()
-            exec_ctx.i2rt_server_proc.join(timeout=2.0)
+            exec_ctx.close()
             raise RuntimeError(f"[eval] I2RT IK failed for init pose (task={args.task}).")
         q_target = exec_ctx.i2rt_robot.current_joint_pos().astype(np.float32)
         q_target[:exec_ctx.i2rt_arm_dofs] = q_sol[:exec_ctx.i2rt_arm_dofs].astype(np.float32)
@@ -415,6 +432,7 @@ def main():
     headpose_abs_seq_records: list[np.ndarray] = []
     T_base_cam_runtime: list[np.ndarray] = []
     tcp_obj_ready = False
+    inference_started = False
 
     frame_idx = 0
     try:
@@ -481,6 +499,10 @@ def main():
                         T_base_cam_runtime.append(T_base_cam.astype(np.float32))
 
                 if do_update:
+                    if not inference_started:
+                        print("[INFO] Close gripper before starting inference.")
+                        exec_ctx.close_gripper()
+                        inference_started = True
                     # Record the exact stereo pair used for inference/update.
                     frame_name = f"{frame_idx:06d}.png"
                     cv2.imwrite(str(infer_left_dir / frame_name), frame)
@@ -513,6 +535,8 @@ def main():
                         headpose_abs_seq_rec = np.zeros((0, 4, 4), dtype=np.float32)
                         tcp_i2rt_abs_rec = np.zeros((0, 4, 4), dtype=np.float32)
                         headpose_i2rt_abs_rec = np.zeros((0, 4, 4), dtype=np.float32)
+                        tcp_i2rt_abs = np.zeros((0, 4, 4), dtype=np.float32)
+                        T_i2rt_base = np.eye(4, dtype=np.float32)
                         if args.enable_headpose_head and headpose_pred is not None:
                             T_i2rt_tcp = exec_ctx.i2rt_kin.fk(exec_ctx.i2rt_current_q[:exec_ctx.i2rt_arm_dofs])
                             # if pose_mode == "abs": 
@@ -564,16 +588,6 @@ def main():
                             tcp_i2rt_abs_rec = tcp_i2rt_abs.astype(np.float32).copy()
                             print(f"tcp_i2rt_abs: {tcp_i2rt_abs[:5,:3,3]}")
                             
-                            end_idx = min(tcp_i2rt_abs.shape[0], STEPS_HEAD_TO_EXECUTE)
-                            pred_tcp_after_trans_i2rt = exec_ctx.execute_pred_tcp_abs(tcp_i2rt_abs[0:end_idx])
-                            T_base_i2rt = np.linalg.inv(T_i2rt_base).astype(np.float32)
-                            pred_tcp_after_trans = np.einsum(
-                                "ij,njk->nik",
-                                T_base_i2rt,
-                                pred_tcp_after_trans_i2rt.astype(np.float32),
-                            ).astype(np.float32)
-
-
                             # pred_tcp_i2rt_rel = headpose_to_tcp(headpose_i2rt_rel)
                             # print(f"pred_tcp_i2rt_rel: {pred_tcp_i2rt_rel[:3]}")
                             '''
@@ -623,16 +637,25 @@ def main():
                             exec_ctx.T_robot_base.astype(np.float32),
                             pred_obj_seq_base.astype(np.float32),
                         ).astype(np.float32)
-                        pose_robot_ob, tcp_seq_robot, step_poses = exec_ctx.execute_robot_traj(
+                        end_idx = min(tcp_i2rt_abs.shape[0], STEPS_HEAD_TO_EXECUTE)
+                        pred_tcp_after_trans_i2rt, pose_robot_ob, tcp_seq_robot, step_poses = exec_ctx.execute_interleaved_actions(
+                            tcp_i2rt_abs[0:end_idx],
                             traj_denorm,
                             pose_base_ob,
                         )
+                        T_base_i2rt = np.linalg.inv(T_i2rt_base).astype(np.float32)
+                        pred_tcp_after_trans = np.einsum(
+                            "ij,njk->nik",
+                            T_base_i2rt,
+                            pred_tcp_after_trans_i2rt.astype(np.float32),
+                        ).astype(np.float32)
                         # Stop policy if predicted gripper signal exceeds threshold within steps_to_execute.
                         grip_seq = traj_denorm[:, 9].astype(np.float32)
                         steps_to_execute = int(exec_ctx.steps_to_execute)
                         grip_window = grip_seq[1:1 + steps_to_execute]
                         open_thresh = GRIP_OPEN_THRESH[args.task]
                         if grip_window.size > 0 and np.any(grip_window > open_thresh):
+                            print("[INFO] Predicted gripper window: ", grip_window)
                             print("[INFO] Predicted gripper open in steps_to_execute; stopping policy.")
                             break
                         pose_records.append(
@@ -741,11 +764,7 @@ def main():
 
         cam.close()
 
-        if exec_ctx.i2rt_robot is not None:
-            exec_ctx.i2rt_robot.close()
-        if exec_ctx.i2rt_server_proc is not None and exec_ctx.i2rt_server_proc.is_alive():
-            exec_ctx.i2rt_server_proc.terminate()
-            exec_ctx.i2rt_server_proc.join(timeout=2.0)
+        exec_ctx.close()
 
 
 if __name__ == "__main__":

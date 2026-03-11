@@ -55,10 +55,12 @@ from egodata_eval.get_depth import DepthEstimator
 from egodata_eval.get_head import HeadPoseReader
 from egodata_eval.eval_utils import add_relative
 from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
+from glasses_hardware.hardware.ur5_robot import UR5  # type: ignore
 from glasses_hardware.hardware.my_device.i2rt_robo import (
     I2RTClient,
     DEFAULT_ROBOT_PORT,
 )  # type: ignore
+from pyDHgripper import AG95
 from i2rt.robots.kinematics_mj import Kinematics
 from i2rt.robots.utils import YAM_XML_PATH, YAM_GLASS_PATH
 import rclpy
@@ -131,6 +133,84 @@ class FlexivArmCmdNode(Node):
         except Exception:
             pass
 
+    def close_gripper(self) -> None:
+        try:
+            self._gripper.move(0.0)
+        except Exception:
+            pass
+
+
+class UR5ArmCmdNode(Node):
+    def __init__(self, robot_ip: str, gripper_port: str) -> None:
+        super().__init__("ur5_arm_cmd")
+        self._robot = UR5(robot_ip=robot_ip, gui=False, debug=False)
+        self._gripper = AG95(port=gripper_port)
+        self._gripper.set_vel(80)
+        self._gripper.set_force(50)
+        self._gripper_pos = 1000.0
+        # self._gripper_pos = 0.0
+        self.max_width = 1000.0
+        self._gripper.set_pos(int(self._gripper_pos))
+        self._sub = self.create_subscription(Float32MultiArray, "arm_cmd", self._on_arm_cmd, 10)
+
+    @staticmethod
+    def _pose7_to_tcp6(pose7: np.ndarray) -> np.ndarray:
+        xyz = pose7[:3].astype(np.float64)
+        quat_wxyz = pose7[3:7].astype(np.float64)
+        quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float64)
+        rotvec = R.from_quat(quat_xyzw).as_rotvec().astype(np.float64)
+        return np.concatenate([xyz, rotvec], axis=0)
+
+    @staticmethod
+    def _tcp6_to_pose7(tcp6: np.ndarray) -> np.ndarray:
+        xyz = tcp6[:3].astype(np.float64)
+        quat_xyzw = R.from_rotvec(tcp6[3:].astype(np.float64)).as_quat().astype(np.float64)
+        quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float64)
+        return np.concatenate([xyz, quat_wxyz], axis=0)
+
+    def _on_arm_cmd(self, msg: Float32MultiArray) -> None:
+        data = np.asarray(msg.data, dtype=np.float32)
+        if data.size != 8:
+            return
+        pose7 = data[:7]
+        grip_val = float(data[7])
+        self._robot.send_tcp_pose(self._pose7_to_tcp6(pose7))
+        target = int(np.clip(round(grip_val), 0, 1000))
+        self._gripper.set_pos(target)
+        self._gripper_pos = float(target)
+
+    def get_tcp_pose(self) -> np.ndarray:
+        tcp6 = self._robot.get_tcp_pose().astype(np.float64)
+        return self._tcp6_to_pose7(tcp6).astype(np.float32)
+
+    def get_gripper_state(self) -> float:
+        return float(self._gripper_pos)
+
+    def get_state(self) -> dict[str, np.ndarray | float]:
+        tcp_pose = self.get_tcp_pose().astype(np.float32)
+        gripper_width = self.get_gripper_state()
+        return {
+            "tcp_pose": tcp_pose,
+            "gripper_width": float(gripper_width),
+        }
+
+    def close(self) -> None:
+        try:
+            self._robot.close()
+        except Exception:
+            pass
+        try:
+            self._gripper.ser.close()
+        except Exception:
+            pass
+
+    def close_gripper(self) -> None:
+        try:
+            self._gripper.set_pos(0)
+            self._gripper_pos = 0.0
+        except Exception:
+            pass
+
 
 class EvalHardware:
     """
@@ -146,6 +226,9 @@ class EvalHardware:
         i2rt_channel: str = I2RT_SERVER_CHANNEL,
         i2rt_port: int = DEFAULT_ROBOT_PORT,
         task_name: str = "book",
+        arm_hardware: str = "flexiv",
+        ur5_robot_ip: str = "192.168.2.102",
+        dh_gripper_port: str = "/dev/ttyUSB0",
     ) -> None:
         self.T_robot_base = np.eye(4, dtype=np.float32)
         if base_to_robot_txt:
@@ -165,11 +248,17 @@ class EvalHardware:
         self.i2rt_cmd_steps = i2rt_cmd_steps
         self.steps_to_execute = steps_to_execute
         self.task_name = task_name
+        self.arm_hardware = arm_hardware
         self.i2rt_server_proc: Optional[mp.Process] = None
-        print("[INFO] Initializing Flexiv and gripper...") # First initialize Flexiv, or I2RT comm will go error
+        print(f"[INFO] Initializing arm backend: {arm_hardware}")
         if not rclpy.ok():
             rclpy.init(args=None)
-        self.flexiv_robot = FlexivArmCmdNode()
+        if arm_hardware == "flexiv":
+            self.flexiv_robot = FlexivArmCmdNode()
+        elif arm_hardware == "ur5":
+            self.flexiv_robot = UR5ArmCmdNode(robot_ip=ur5_robot_ip, gripper_port=dh_gripper_port)
+        else:
+            raise ValueError(f"Unsupported arm_hardware={arm_hardware}")
         self._arm_cmd_pub = self.flexiv_robot.create_publisher(Float32MultiArray, "arm_cmd", 10)
         self._flexiv_executor = SingleThreadedExecutor()
         self._flexiv_executor.add_node(self.flexiv_robot)
@@ -278,6 +367,126 @@ class EvalHardware:
             time.sleep(0.2)
         return np.stack(new_pose_seq, axis=0).astype(np.float32)
 
+    def _plan_pred_tcp_abs(self, tcp_i2rt_abs: np.ndarray) -> np.ndarray:
+        if tcp_i2rt_abs.ndim != 3 or tcp_i2rt_abs.shape[1:] != (4, 4):
+            raise ValueError(f"tcp_i2rt_abs must be Nx4x4, got {tcp_i2rt_abs.shape}")
+        if tcp_i2rt_abs.shape[0] == 0:
+            return np.zeros((0, 4, 4), dtype=np.float32)
+
+        new_pose_seq: list[np.ndarray] = []
+        new_pose_base = tcp_i2rt_abs[0].astype(np.float32)
+        self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
+        current_pose = self.i2rt_kin.fk(self.i2rt_current_q[:self.i2rt_arm_dofs]).astype(np.float32)
+        for idx in range(tcp_i2rt_abs.shape[0]):
+            new_pose_delta = tcp_i2rt_abs[idx].astype(np.float32) @ np.linalg.inv(new_pose_base)
+            new_pose = (new_pose_delta @ current_pose).astype(np.float32)
+            new_pose_seq.append(new_pose)
+        return np.stack(new_pose_seq, axis=0).astype(np.float32)
+
+    def _execute_i2rt_tcp_pose(self, target_pose: np.ndarray) -> bool:
+        success, _ = self.i2rt_kin.ik(target_pose, "grasp_site", verbose=False)
+        if not success:
+            print("[WARN] I2RT IK failed for absolute tcp pose.")
+            return False
+        self.i2rt_target_pose = target_pose.astype(np.float32)
+        target_rot6d = rotation_transform(
+            target_pose[:3, :3][None, ...],
+            "matrix",
+            "rotation_6d",
+        ).squeeze(0)
+        target_xyz_rot6d = np.concatenate([target_pose[:3, 3], target_rot6d], axis=0).astype(np.float32)
+        self._publish_head_cmd(target_xyz_rot6d)
+        return True
+
+    def _plan_robot_traj(
+        self,
+        traj_denorm: np.ndarray,
+        pose_base_ob: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], list[float]]:
+        grip_seq = traj_denorm[:, 9].astype(np.float32)
+        pose_robot_ob = (self.T_robot_base @ pose_base_ob).astype(np.float32)
+        pose_seq_base = _build_pose_mats(
+            traj_denorm[:, :3],
+            traj_denorm[:, 3:3+6],
+        )
+        pose_seq_robot = np.einsum(
+            "ij,njk->nik",
+            self.T_robot_base.astype(np.float32),
+            pose_seq_base.astype(np.float32),
+        ).astype(np.float32)
+        T_tcp_object = TASK_TCP_TO_OBJECT_SE3.get(self.task_name, np.eye(4, dtype=np.float32)).astype(np.float32)
+        T_object_tcp = np.linalg.inv(T_tcp_object).astype(np.float32)
+        pose_robot_tcp = (pose_robot_ob @ T_object_tcp).astype(np.float32)
+        tcp_seq_robot = np.einsum(
+            "nij,jk->nik",
+            pose_seq_robot.astype(np.float32),
+            T_object_tcp,
+        ).astype(np.float32)
+
+        planned_pose7: list[np.ndarray] = []
+        planned_grip: list[float] = []
+        if tcp_seq_robot.size == 0:
+            return pose_robot_ob, tcp_seq_robot, planned_pose7, planned_grip
+
+        steps_to_execute = int(self.steps_to_execute)
+        robot_rel_pts = tcp_seq_robot[1:1 + steps_to_execute, :3, 3] - pose_robot_tcp[:3, 3][None, :]
+        curr_pose7 = self.flexiv_robot.get_tcp_pose().astype(np.float32)
+        start_xyz = curr_pose7[:3].astype(np.float32)
+        start_quat = curr_pose7[3:7].astype(np.float32)
+        start_rot = rotation_transform(start_quat[None, :], "quaternion", "matrix").squeeze(0)
+        base_obj_rot = pose_robot_tcp[:3, :3].astype(np.float32)
+        open_width = getattr(self.flexiv_robot, "max_width", GRIPPER_OPEN_WIDTH_DEFAULT)
+        open_thresh = GRIP_OPEN_THRESH.get(self.task_name, GRIP_OPEN_THRESH["book"])
+        steps_grip = grip_seq[1:1 + steps_to_execute]
+
+        for i in range(robot_rel_pts.shape[0]):
+            xyz = start_xyz + robot_rel_pts[i]
+            step_rot = tcp_seq_robot[1 + i, :3, :3].astype(np.float32)
+            rel_rot = step_rot @ base_obj_rot.T
+            target_rot = rel_rot @ start_rot
+            target_quat = rotation_transform(target_rot[None, ...], "matrix", "quaternion").squeeze(0)
+            pose7 = np.concatenate([xyz, target_quat], axis=0).astype(np.float32)
+
+            width_cmd = 0.0
+            if i < len(steps_grip):
+                grip_val = float(steps_grip[i])
+                if grip_val > open_thresh:
+                    if self.task_name == "teapot":
+                        print("[INFO] Teapot grip > threshold; stopping arm without opening gripper.")
+                        break
+                    width_cmd = open_width
+            planned_pose7.append(pose7)
+            planned_grip.append(float(width_cmd))
+
+        return pose_robot_ob, tcp_seq_robot, planned_pose7, planned_grip
+
+    def execute_interleaved_actions(
+        self,
+        tcp_i2rt_abs: np.ndarray,
+        traj_denorm: np.ndarray,
+        pose_base_ob: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]:
+        pred_tcp_after_trans_i2rt = self._plan_pred_tcp_abs(tcp_i2rt_abs)
+        pose_robot_ob, tcp_seq_robot, planned_pose7, planned_grip = self._plan_robot_traj(traj_denorm, pose_base_ob)
+
+        executed_poses: list[np.ndarray] = []
+        num_steps = max(pred_tcp_after_trans_i2rt.shape[0], len(planned_pose7))
+        for idx in range(num_steps):
+            if idx < pred_tcp_after_trans_i2rt.shape[0]:
+                self._execute_i2rt_tcp_pose(pred_tcp_after_trans_i2rt[idx])
+            if idx < len(planned_pose7):
+                self._publish_arm_cmd(planned_pose7[idx], planned_grip[idx])
+                executed_poses.append(planned_pose7[idx].copy())
+                self.idx += 1
+            time.sleep(LOOP_SLEEP_SEC)
+
+        return (
+            pred_tcp_after_trans_i2rt.astype(np.float32),
+            pose_robot_ob.astype(np.float32),
+            tcp_seq_robot.astype(np.float32),
+            executed_poses,
+        )
+
     def execute_robot_traj(
         self,
         traj_denorm: np.ndarray,
@@ -367,6 +576,9 @@ class EvalHardware:
             self._flexiv_thread.join(timeout=1.0)
             self.flexiv_robot.destroy_node()
             self.flexiv_robot.close()
+            if self.i2rt_server_proc is not None and self.i2rt_server_proc.is_alive():
+                self.i2rt_server_proc.terminate()
+                self.i2rt_server_proc.join(timeout=2.0)
 
     @staticmethod
     def _spin_executor(executor: SingleThreadedExecutor) -> None:
@@ -385,6 +597,11 @@ class EvalHardware:
         payload = np.concatenate([pose7.astype(np.float32), np.array([grip_val], dtype=np.float32)], axis=0)
         msg.data = payload.ravel().tolist()
         self._arm_cmd_pub.publish(msg)
+
+    def close_gripper(self, settle_sec: float = 0.5) -> None:
+        curr_pose7 = self.flexiv_robot.get_tcp_pose().astype(np.float32)
+        self._publish_arm_cmd(curr_pose7, 0.0)
+        time.sleep(settle_sec)
 
 
 def main() -> None:
