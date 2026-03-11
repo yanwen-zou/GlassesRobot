@@ -39,6 +39,8 @@ src/FoundationStereo/test_outputs/
 src/egodata_eval/eval_output/
 *.ipynb_checkpoints/
 .TimeRecord
+eval_output/
+ur_description/
 
 
 # Model checkpoints and weights
