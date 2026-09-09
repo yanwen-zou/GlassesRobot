@@ -210,7 +210,7 @@ def _run_depth_traj(
                     cloud=np.asarray(frame_cloud, dtype=np.float32),
                     frame_idx=np.array([int(state["frame_idx"])], dtype=np.int32),
                 )
-            frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
+            # frame_overlay = ctx["pose_est"].draw_overlay(frame_overlay, ctx["K"]) # overlay pose
             pred_state = {
                 "pose_cam_ob": ctx["pose_est"].pose_cam_ob.astype(np.float32),
                 "traj_denorm": traj_pred.last_traj_pred.astype(np.float32), # abs both in delta/abs option
@@ -238,6 +238,12 @@ def main():
     ap.add_argument('--add_curr_cond', action = 'store_true', help = 'add curr obj pose as extra cond for diffusion head')
     ap.add_argument("--glass-zed", type=str, default=DEFAULT_GLASSES_ZED_TXT, help="Path to T_tcp_zed (4x4 SE3).")
     ap.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Optional output directory. Defaults to src/egodata_eval/eval_output/<timestamp>.",
+    )
+    ap.add_argument(
         "--calib-init-pose",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -248,8 +254,9 @@ def main():
     update_interval = UPDATE_INTERVAL
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Prepare video output
-    out_dir = Path(__file__).resolve().parent / "eval_output" / ts
+    out_dir = args.out_dir.resolve() if args.out_dir is not None else (Path(__file__).resolve().parent / "eval_output" / ts)
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] Eval output directory: {out_dir}")
     headpose_topic = DEFAULT_POSE_TOPIC
     video_path = out_dir / "stream.mp4"
     infer_left_dir = out_dir / "zed_left"
@@ -586,6 +593,7 @@ def main():
                             )
                             pred_tcp_after_trans = exec_ctx.execute_pred_tcp_rel(headpose_i2rt_rel[0:end_idx])
                             '''
+                            time.sleep(0.4)
                             # time.sleep(1.0)  # wait for motion to finish
 
                         if not tcp_obj_ready:

@@ -94,7 +94,7 @@ class ConversionConfig:
     output_path: Optional[str] = None
     push_to_hub: bool = False
     num_workers: int = 4
-    headpose_mode: str = "abs"  # "abs" for absolute, "delta" for relative to previous headpose
+    headpose_mode: str = "abs"  # Controls how headpose is stored in actions; state headpose is always relative-to-first.
     append_to_existing: bool = False
 
 
@@ -135,6 +135,38 @@ def _resolve_hdf5_paths(path: str) -> List[str]:
     return files
 
 
+def _relative_headpose_to_kept_first(headpose_data: np.ndarray, first_kept_step: int) -> np.ndarray:
+    """Convert absolute head pose to relative pose using the first kept frame as reference."""
+    if first_kept_step < 0 or first_kept_step >= headpose_data.shape[0]:
+        raise ValueError(
+            f"first_kept_step must be in [0, {headpose_data.shape[0] - 1}], got {first_kept_step}"
+        )
+    ref = headpose_data[first_kept_step:]
+    rel_kept = _relative_headpose_to_first(ref)
+
+    rel = np.empty_like(headpose_data, dtype=np.float32)
+    rel[:first_kept_step, :3] = 0.0
+    rel[:first_kept_step, 3:7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    rel[first_kept_step:] = rel_kept
+    return rel
+
+
+def _infer_state_dim(hdf5_paths: List[str]) -> int:
+    has_headpose_flags: List[bool] = []
+    for hdf5_path in hdf5_paths:
+        with h5py.File(hdf5_path, "r") as h5_file:
+            episode_keys = _get_episode_keys(h5_file)
+            if not episode_keys:
+                raise ValueError(f"No episodes found in {hdf5_path}")
+            first_episode = _get_episode_group(h5_file, episode_keys[0])
+            has_headpose_flags.append("headpose" in first_episode)
+
+    if any(has_headpose_flags) and not all(has_headpose_flags):
+        raise ValueError("Mixed datasets with and without headpose are not supported in one conversion run.")
+
+    return 15 if any(has_headpose_flags) else 8
+
+
 def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, headpose_mode: str = "abs") -> List[Dict[str, np.ndarray]]:
     LOGGER.debug("Loading episode %s on %s", episode_key, threading.current_thread().name)
     with h5py.File(hdf5_path, "r") as h5_file:
@@ -155,20 +187,23 @@ def _load_episode_frames(hdf5_path: str, episode_key: str, max_duration: int, he
         
         headpose = episode.get("headpose")
         if headpose is not None:
-            headpose_data = headpose[:].astype(np.float32)
+            headpose_data_abs = headpose[:].astype(np.float32)
+            headpose_state_data = _relative_headpose_to_kept_first(headpose_data_abs, FRAMES_TO_DROP)
+            headpose_action_data = headpose_data_abs
             if headpose_mode == "delta":
-                headpose_data = _relative_headpose_to_first(headpose_data)
-                # print(f"Episode {episode_key} headpose converted to relative-to-first frame:\n{headpose_data}")
-                LOGGER.debug("Episode %s: Converted headpose to relative-to-first frame", episode_key)
+                headpose_action_data = _relative_headpose_to_kept_first(headpose_data_abs, FRAMES_TO_DROP)
+                LOGGER.debug("Episode %s: Converted action headpose to kept-first relative frame", episode_key)
+            LOGGER.debug("Episode %s: Converted state headpose to kept-first relative frame", episode_key)
         
         # Drop the first several frames of each episode before conversion.
         for out_step, step in enumerate(range(FRAMES_TO_DROP, num_steps)):
             robot_state = episode["robot_state"][step].astype(np.float32)
             action = episode["action"][step].astype(np.float32)
             if headpose is not None:
-                headpose_step = headpose_data[step]
-                state = np.concatenate([robot_state, headpose_step], axis=0)
-                actions = np.concatenate([action, headpose_step], axis=0)
+                state_headpose_step = headpose_state_data[step]
+                action_headpose_step = headpose_action_data[step]
+                state = np.concatenate([robot_state, state_headpose_step], axis=0)
+                actions = np.concatenate([action, action_headpose_step], axis=0)
             else:
                 state = robot_state
                 actions = action
@@ -195,7 +230,10 @@ def main(config: ConversionConfig) -> None:
     logging.info("Output dataset path: %s", output_path)
     logging.info("Target repo id: %s", config.repo_name)
 
-    state_dim = 8 if config.headpose_mode == "delta" else 15
+    hdf5_paths = _resolve_hdf5_paths(config.data_dir)
+    logging.info("Found %d hdf5 files to process.", len(hdf5_paths))
+
+    state_dim = _infer_state_dim(hdf5_paths)
     features = {
         "image": {
             "dtype": "image",
@@ -240,9 +278,6 @@ def main(config: ConversionConfig) -> None:
             image_writer_threads=10,
             image_writer_processes=5,
         )
-
-    hdf5_paths = _resolve_hdf5_paths(config.data_dir)
-    logging.info("Found %d hdf5 files to process.", len(hdf5_paths))
 
     max_duration = max(_compute_max_duration(path) for path in hdf5_paths)
     logging.info("Max duration across all files: %s", max_duration)

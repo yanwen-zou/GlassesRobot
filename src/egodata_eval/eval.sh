@@ -7,6 +7,11 @@ set -u
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUT_DIR="${SCRIPT_DIR}/eval_output/${TIMESTAMP}"
+mkdir -p "${OUT_DIR}"
+
 TASK="book"
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -46,4 +51,4 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python -u src/egodata_eval/eval.py --task "$TASK" "${EXTRA_ARGS[@]}"
+python -u src/egodata_eval/eval.py --task "$TASK" --out-dir "$OUT_DIR" "${EXTRA_ARGS[@]}"

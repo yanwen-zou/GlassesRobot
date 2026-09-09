@@ -28,6 +28,28 @@ def _to_numpy(value):
     return np.asarray(value)
 
 
+def _resolve_dataset_root_and_episode(data_dir: Path, episode_idx: int | None) -> tuple[Path, int | None]:
+    """Allow passing either a dataset root or a single episode directory."""
+    if (data_dir / "rgb").is_dir() and (data_dir / "depth").is_dir():
+        parent = data_dir.parent
+        episode_name = data_dir.name
+        siblings = sorted(
+            d.name for d in parent.iterdir()
+            if d.is_dir() and (d / "rgb").is_dir() and (d / "depth").is_dir()
+        )
+        if episode_name not in siblings:
+            raise RuntimeError(f"Episode {episode_name} not found under {parent}")
+        inferred_idx = siblings.index(episode_name)
+        if episode_idx is not None and episode_idx != inferred_idx:
+            raise ValueError(
+                f"episode-idx {episode_idx} conflicts with selected episode {episode_name} "
+                f"(expected {inferred_idx})"
+            )
+        print(f"[INFO] Treating {data_dir} as a single episode under dataset root {parent}")
+        return parent, inferred_idx
+    return data_dir, episode_idx
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cache dataset samples for visualization.")
     parser.add_argument("--data-dir", type=Path, required=True, help="Dataset root directory.")
@@ -50,13 +72,14 @@ def main() -> None:
     args = parser.parse_args()
 
     data_dir = args.data_dir.resolve()
+    dataset_root, episode_idx = _resolve_dataset_root_and_episode(data_dir, args.episode_idx)
     tmp_dir = args.tmp_dir
     if tmp_dir is None:
         tmp_dir = here.parent / "tmp" / data_dir.name
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = RealWorldDataset(
-        path=str(data_dir),
+        path=str(dataset_root),
         split=args.split,
         num_obs=args.num_obs,
         num_action=args.num_action,
@@ -65,12 +88,12 @@ def main() -> None:
         with_headpose=True,
     )
 
-    if args.episode_idx is not None:
-        if args.episode_idx < 0 or args.episode_idx >= dataset.num_demos:
+    if episode_idx is not None:
+        if episode_idx < 0 or episode_idx >= dataset.num_demos:
             raise ValueError(
-                f"episode-idx {args.episode_idx} out of range [0, {dataset.num_demos - 1}]"
+                f"episode-idx {episode_idx} out of range [0, {dataset.num_demos - 1}]"
             )
-        target_seq = dataset.all_demos[args.episode_idx]
+        target_seq = dataset.all_demos[episode_idx]
         keep = [i for i, seq in enumerate(dataset.seq_ids) if seq == target_seq]
         dataset.data_paths = [dataset.data_paths[i] for i in keep]
         dataset.obs_frame_ids = [dataset.obs_frame_ids[i] for i in keep]

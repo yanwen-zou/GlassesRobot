@@ -217,11 +217,11 @@ class TrajectoryPredictor:
         t = T_cam_base[:3, 3].astype(np.float32)
         points_cam = (R @ predicted_points.T).T + t
         # print(f"Predicted points in cam frame: {points_cam}")
-
-        self._cached_points_cam = points_cam.copy()
-        overlay = _project_points_with_gradient(image_bgr, K, points_cam,
-                                                color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
-        return overlay, cloud
+        return image_bgr, cloud
+        # self._cached_points_cam = points_cam.copy()
+        # overlay = _project_points_with_gradient(image_bgr, K, points_cam,
+        #                                         color_start=(255, 0, 0), color_end=(0, 255, 255), radius=4, thickness=-1)
+        # return overlay, cloud
 
     def overlay_cached(self, image_bgr: np.ndarray, K: np.ndarray) -> np.ndarray:
         if self._cached_points_cam is None:

@@ -27,6 +27,23 @@ vis_flag_no_value() {
   esac
 }
 
+arg_value_from_list() {
+  local target_flag="$1"
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$target_flag" ]; then
+      if [ $# -lt 2 ]; then
+        echo "Missing value for ${target_flag}" >&2
+        exit 1
+      fi
+      echo "$2"
+      return 0
+    fi
+    shift
+  done
+  return 1
+}
+
 if [ $# -gt 0 ]; then
   if [[ " $* " == *" -- "* ]]; then
     while [ $# -gt 0 ]; do
@@ -62,6 +79,23 @@ if [ $# -gt 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP_DIR="$(arg_value_from_list --tmp-dir "${VIS_ARGS[@]}" || true)"
+if [ -z "${TMP_DIR}" ]; then
+  TMP_DIR="$(arg_value_from_list --tmp-dir "${LOAD_ARGS[@]}" || true)"
+fi
+if [ -z "${TMP_DIR}" ]; then
+  TMP_DIR="${SCRIPT_DIR}/tmp/$(basename "${DATA_DIR%/}")"
+fi
+
+mkdir -p "${TMP_DIR}"
+find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
+if ! arg_value_from_list --tmp-dir "${LOAD_ARGS[@]}" >/dev/null 2>&1; then
+  LOAD_ARGS+=(--tmp-dir "${TMP_DIR}")
+fi
+if ! arg_value_from_list --tmp-dir "${VIS_ARGS[@]}" >/dev/null 2>&1; then
+  VIS_ARGS+=(--tmp-dir "${TMP_DIR}")
+fi
 
 conda run -n glasses python "${SCRIPT_DIR}/load_dataset.py" --data-dir "${DATA_DIR}" "${LOAD_ARGS[@]}"
 conda run -n vis python "${SCRIPT_DIR}/vis_dataset.py" --data-dir "${DATA_DIR}" "${VIS_ARGS[@]}"

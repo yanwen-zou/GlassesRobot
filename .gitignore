@@ -9,6 +9,7 @@ __pycache__/
 *.pyd
 *.pdb
 .pytest_cache/
+.uv_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
@@ -22,6 +23,9 @@ dist/
 *.so
 
 # Project data and generated assets
+.env
+.codex
+.TimeRecord
 data/
 data_*/
 data-*/
@@ -83,6 +87,7 @@ glasses_hardware/calib/ball_centroids_*
 *.jpg
 *.png
 *.hdf5
+*.xvcd
 
 # Vendor SDKs / binaries
 glasses_hardware/anygrasp_sdk/

@@ -349,19 +349,21 @@ def main(args: Args) -> None:
             logging.info("[step %d]", step)
 
             # Execute actions.
-            # Robot action: absolute TCP pose (xyz + quat wxyz) + gripper
-            # Headpose: relative-to-first-frame target (xyz + quat xyzw)
-            robot_env.update_current_pose()  # Ensure we have the latest current pose before each execution step.
+            # Robot action: absolute TCP pose (xyz + quat wxyz) + gripper.
+            # Headpose action chunk is interpreted relative to the chunk-base pose cached here.
+            robot_env.update_current_pose()  # Cache the I2RT chunk-base pose once before executing the chunk.
             for action_idx_in_chunk, action_abs in enumerate(action_chunk_abs[:]):
                 print("[INFO] Executing robot ABS action:", action_abs[:])
                 # Robot TCP pose (7) + gripper (1)
                 robot_env.deploy_action(action_abs[:7], float(action_abs[7]))
-                # Headpose: action[8:15] is delta from current headpose
-                # [x,y,z,qx,qy,qz,qw] in glasses frame.
+                # Headpose: action[8:15] is a delta from the cached chunk-base head/TCP pose,
+                # not a live per-step current-pose delta. Layout: [x,y,z,qx,qy,qz,qw].
                 if args.enable_headpose and headpose_sub is not None:
-                    headpose_action_rel = np.asarray(action_chunk_rel[action_idx_in_chunk, 8:15], dtype=np.float32).copy()
-                    print("[DEBUG] Headpose action relative xyz: ", headpose_action_rel[:3])
-                    robot_env.execute_headpose_from_current_delta(headpose_action_rel)
+                    headpose_action_chunk_delta = np.asarray(
+                        action_chunk_rel[action_idx_in_chunk, 8:15], dtype=np.float32
+                    ).copy()
+                    print("[DEBUG] Headpose action chunk-base delta xyz: ", headpose_action_chunk_delta[:3])
+                    robot_env.execute_headpose_from_chunk_base_delta(headpose_action_chunk_delta)
 
     finally:
         log_dir = Path(args.headpose_log_dir)

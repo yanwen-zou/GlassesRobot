@@ -30,11 +30,11 @@ RDF_TO_ROBOT = np.array(
     dtype=np.float32,
 )
 
-from scripts_calib_balls.calculate_ball_centers import (
+from scripts.calib.balls.calculate_ball_centers import (
     calculate_ball_centroid,
     DEFAULT_MAX_RADIUS_STD_RATIO,
 )
-from scripts_calib_balls.compute_base_from_ball_centers import compute_base_from_three_points
+from scripts.calib.balls.compute_base_from_ball_centers import compute_base_from_three_points
 
 here = Path(__file__).resolve()
 project_root = here.parents[2]

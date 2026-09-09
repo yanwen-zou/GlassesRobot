@@ -47,7 +47,7 @@ def wait_for_command() -> Literal["p", "q"]:
 def _select_delta_xyz(task_name: str) -> tuple[float, float, float]:
     # Placeholder values per task (update later as needed).
     task_to_delta = {
-        "teapot": (-0.11, -0.14, 0.09),
+        "teapot": (-0.07, -0.15, 0.09),
         "book": (-0.03, 0.03, 0),
         "sword": (0.08, -0.10, 0.08),
         "cup": (-0.3, -0.1, 0),

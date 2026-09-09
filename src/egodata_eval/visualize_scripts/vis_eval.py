@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visualize evaluation logs (object pose records, executed poses, TCP history) using rerun.
+Visualize evaluation logs (object pose records and point clouds) using rerun.
 """
 from __future__ import annotations
 
@@ -95,9 +95,7 @@ def main():
 
     data_dir = args.data_dir.resolve()
     pose_records = load_records(data_dir / "robot_pose_records.npy")
-    executed = load_array(data_dir / "robot_executed_poses.npy")
     tcp_hist = None
-    headpose_abs_seqs = load_array(data_dir / "headpose_abs_seq.npy")
 
     T_robot_base = np.loadtxt(args.T_robot_base, dtype=np.float32)
     runtime_cam_path = data_dir / "T_base_cam_runtime.npy"
@@ -250,13 +248,20 @@ def main():
             f"(video_frames={video_frame_count}, max_frame_idx={max_logged_frame_idx})"
         )
 
+    def _log_video_frame(video_idx: int) -> None:
+        video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
+        ok, frame = video_cap.read()
+        if not ok:
+            raise RuntimeError(f"Failed to read frame {video_idx} from video.")
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rr.log("video/stream", rr.Image(frame_rgb))
+
     pred_window = 5
     for rec_idx, rec in enumerate(pose_records):
         pose_robot = rec["object_pose_robot"]
-        pred_seq = rec["pred_obj_seq_robot"]
-        pred_tcp_seq = rec.get("pred_tcp_after_trans")
-        headpose_i2rt_abs = rec.get("headpose_i2rt_abs")
-        tcp_i2rt_abs = rec.get("tcp_i2rt_abs")
+        pred_seq = rec.get("pred_obj_seq_robot")
+        if pred_seq is None:
+            pred_seq = rec.get("pred_seq_robot")
         frame_idx = int(rec["frame_idx"])
         rr.set_time_sequence("frame", frame_idx)
 
@@ -294,12 +299,7 @@ def main():
             else:
                 video_idx = int(round((frame_idx / max_logged_frame_idx) * (video_frame_count - 1)))
                 video_idx = min(max(video_idx, 0), video_frame_count - 1)
-        video_cap.set(cv2.CAP_PROP_POS_FRAMES, video_idx)
-        ok, frame = video_cap.read()
-        if not ok:
-            raise RuntimeError(f"Failed to read frame {video_idx} from video.")
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rr.log("video/stream", rr.Image(frame_rgb))
+        _log_video_frame(video_idx)
 
         pose_robot = np.asarray(pose_robot, dtype=np.float32).reshape(4, 4)
         obj_position = pose_robot[:3, 3]
@@ -311,106 +311,36 @@ def main():
                 radii=args.axis_len * 0.05,
             ),
         )
-        pred_seq = np.asarray(pred_seq, dtype=np.float32)
-        rr.log(
-            f"frames/frame_{frame_idx}/pred_points",
-            rr.Points3D(
-                positions=pred_seq[:, :3, 3],
-                colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
-                radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
-            ),
-        )
-        expired_idx = frame_idx - pred_window
-        if expired_idx >= 0:
-            rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
+        if pred_seq is not None:
+            pred_seq = np.asarray(pred_seq, dtype=np.float32)
+            rr.log(
+                f"frames/frame_{frame_idx}/pred_points",
+                rr.Points3D(
+                    positions=pred_seq[:, :3, 3],
+                    colors=np.array([[255, 255, 0, 255]], dtype=np.uint8),
+                    radii=np.full(pred_seq.shape[0], args.axis_len * 0.03, dtype=np.float32),
+                ),
+            )
+            expired_idx = frame_idx - pred_window
+            if expired_idx >= 0:
+                rr.log(f"frames/frame_{expired_idx}/pred_points", rr.Clear(recursive=True))
 
-        # if pred_tcp_seq is not None:
-        #     pred_tcp_seq = np.asarray(pred_tcp_seq, dtype=np.float32)
-
-        #     rr.log(
-        #         f"frames/frame_{frame_idx}/pred_tcp_points",
-        #         rr.Points3D(
-        #             positions=_transform_points_base_to_robot(pred_tcp_seq[:, :3, 3]),
-        #             colors=np.array([[0, 255, 255, 255]], dtype=np.uint8),
-        #             radii=np.full(pred_tcp_seq.shape[0], args.axis_len * 0.035, dtype=np.float32),
-        #         ),
-        #     )
-        #     expired_idx = frame_idx - pred_window
-        #     if expired_idx >= 0:
-        #         rr.log(f"frames/frame_{expired_idx}/pred_tcp_points", rr.Clear(recursive=True))
-        # if tcp_i2rt_abs is not None:
-        #     tcp_i2rt_abs = np.asarray(tcp_i2rt_abs, dtype=np.float32)
-        #     rr.log(
-        #         f"frames/frame_{frame_idx}/tcp_i2rt_abs_points",
-        #         rr.Points3D(
-        #             positions=tcp_i2rt_abs[:, :3, 3],
-        #             colors=np.array([[255, 0, 0, 255]], dtype=np.uint8),
-        #             radii=np.full(tcp_i2rt_abs.shape[0], args.axis_len * 0.03, dtype=np.float32),
-        #         ),
-        #     )
-        #     expired_idx = frame_idx - pred_window
-        #     if expired_idx >= 0:
-        #         rr.log(f"frames/frame_{expired_idx}/tcp_i2rt_abs_points", rr.Clear(recursive=True))
         # Prefer aligning camera transforms to the record index (they are saved per update step).
         cam_tf = _cam_transform_for_frame(rec_idx)
 
-        if rec_idx >= headpose_abs_seqs.shape[0]:
-            raise RuntimeError(
-                f"headpose_abs_seq length mismatch: rec_idx={rec_idx}, headpose_len={headpose_abs_seqs.shape[0]}"
-            )
-        headpose_mats = np.asarray(headpose_abs_seqs[rec_idx], dtype=np.float32)
-        if headpose_mats.ndim != 3 or headpose_mats.shape[1:] != (4, 4):
-            raise RuntimeError(f"Invalid headpose_abs_seq shape at rec_idx={rec_idx}: {headpose_mats.shape}")
-        headpose_robot_seq = [(T_robot_base @ headpose_base).astype(np.float32) for headpose_base in headpose_mats]
-        axis_scale = args.axis_len * 0.12
-        axis_origins = []
-        axis_vectors = []
-        axis_colors = []
-        for headpose_robot in headpose_robot_seq:
-            origin = headpose_robot[:3, 3]
-            rot = headpose_robot[:3, :3]
-            axis_origins.extend([origin, origin, origin])
-            axis_vectors.extend(
-                [
-                    rot[:, 0] * axis_scale,  # X axis
-                    rot[:, 1] * axis_scale,  # Y axis
-                    rot[:, 2] * axis_scale,  # Z axis
-                ]
-            )
-            axis_colors.extend(
-                [
-                    [255, 0, 0, 255],
-                    [0, 255, 0, 255],
-                    [0, 0, 255, 255],
-                ]
-            )
-        rr.log(
-            f"frames/frame_{frame_idx}/headpose_abs_seq/axes",
-            rr.Arrows3D(
-                origins=np.asarray(axis_origins, dtype=np.float32),
-                vectors=np.asarray(axis_vectors, dtype=np.float32),
-                colors=np.asarray(axis_colors, dtype=np.uint8),
-                radii=np.full(len(axis_vectors), args.axis_len * 0.01, dtype=np.float32),
-            ),
-        )
-        expired_idx = frame_idx - pred_window
-        if expired_idx >= 0:
-            rr.log(f"frames/frame_{expired_idx}/headpose_abs_seq/axes", rr.Clear(recursive=True))
         log_axis(f"frames/frame_{frame_idx}/robot_base", T_robot_base, args.axis_len * 0.5)
         cam_robot = T_robot_base @ cam_tf
         log_axis(f"frames/frame_{frame_idx}/robot_cam", cam_robot, args.axis_len * 0.4)
 
+    # Eval logs can stop before the source video ends. Keep advancing the video
+    # timeline so the final tail frames are still visible in playback.
+    if use_direct_video_index and max_logged_frame_idx < (video_frame_count - 1):
+        for video_idx in range(max_logged_frame_idx + 1, video_frame_count):
+            rr.set_time_sequence("frame", video_idx)
+            _log_video_frame(video_idx)
+
     video_cap.release()
 
-    if executed.size > 0:
-        rr.log(
-            "executed/points",
-            rr.Points3D(
-                positions=executed[:, :3],
-                colors=np.array([[0, 200, 255, 255]], dtype=np.uint8),
-                radii=np.full(executed.shape[0], args.axis_len * 0.04, dtype=np.float32),
-            ),
-        )
     if tcp_hist is not None and tcp_hist.size > 0:
         rr.log(
             "tcp_history/points",

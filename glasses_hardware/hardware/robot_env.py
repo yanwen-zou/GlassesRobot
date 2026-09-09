@@ -336,12 +336,15 @@ class RobotEnv:
         T_delta_glasses = np.linalg.inv(T_current).astype(np.float32) @ T_target
         self.deploy_i2rt_action(T_delta_glasses)
 
-    def execute_headpose_from_current_delta(self, headpose_action_delta: np.ndarray) -> None:
-        """Execute a headpose action expressed as delta from current headpose.
+    def execute_headpose_from_chunk_base_delta(self, headpose_action_delta: np.ndarray) -> None:
+        """Execute a headpose action expressed as delta from the cached chunk-base pose.
 
         Args:
             headpose_action_delta: 7-dim [x,y,z,qx,qy,qz,qw] SE3 delta in glasses frame.
-                                   It is interpreted as: T_target = T_current @ T_delta.
+                                   It is interpreted as:
+                                   T_target = T_chunk_base @ T_delta,
+                                   where T_chunk_base is the pose last cached by
+                                   update_current_pose() before chunk execution.
         """
         if self.i2rt_robot is None:
             return
@@ -356,12 +359,17 @@ class RobotEnv:
         T_delta_glasses = _headpose_7d_to_se3(hp)
         self.deploy_i2rt_action(T_delta_glasses)
 
+    def execute_headpose_from_current_delta(self, headpose_action_delta: np.ndarray) -> None:
+        """Backward-compatible alias for execute_headpose_from_chunk_base_delta()."""
+        self.execute_headpose_from_chunk_base_delta(headpose_action_delta)
+
     def deploy_action(self, tcp_action, gripper_action):
         self.robot.send_tcp_pose(tcp_action)
         self.gripper.move(gripper_action)
         time.sleep(0.2)
 
     def update_current_pose(self): 
+        """Cache the current I2RT pose to serve as the chunk base pose."""
         if self.i2rt_robot is None:
             return
         self.i2rt_current_q = self.i2rt_robot.current_joint_pos()
