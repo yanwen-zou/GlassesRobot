@@ -26,7 +26,6 @@ _import_zed_class   # type: ignore
 
 from egodata_eval.get_depth import DepthEstimator, colorize_depth  # type: ignore
 from egodata_eval.get_pose import PoseEstimatorFP  # type: ignore
-from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
 from egodata_eval.eval_utils import _build_pose_mats  # type: ignore
 from egodata_eval.eval_utils import _import_zed_class  # already imported below; keep for clarity
 
@@ -219,9 +218,17 @@ def run():
     ap = argparse.ArgumentParser(description="Online evaluation with manual ckpt path")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to RISE policy checkpoint (.ckpt)")
     ap.add_argument("--base-to-robot-npy", type=str, default='glasses_hardware/calib/T_robot_base.npy', help="Path to T_robot_base.npy (maps base->robot). Default: identity.")
+    ap.add_argument("--stereo-checkpoint", type=Path, default=None, help="Fast-FoundationStereo serialized checkpoint")
+    ap.add_argument("--stereo-iters", type=int, default=4, help="Fast-FoundationStereo refinement iterations")
+    ap.add_argument("--stereo-max-disp", type=int, default=192, help="Maximum stereo disparity")
+    ap.add_argument("--stereo-volume-backend", choices=("triton", "pytorch1"), default="triton", help="Cost-volume implementation")
+    ap.add_argument("--depth-interval", type=int, default=1, help="Run stereo depth every N frames")
+    ap.add_argument("--pose-interval", type=int, default=1, help="Run FoundationPose tracking every N frames with fresh depth")
+    ap.add_argument("--policy-interval", type=int, default=10, help="Run policy/robot update every N frames")
     args = ap.parse_args()
-    # Shared interval controlling how often heavy ops run
-    update_interval = 10
+    for name in ("depth_interval", "pose_interval", "policy_interval"):
+        if getattr(args, name) < 1:
+            ap.error(f"--{name.replace('_', '-')} must be >= 1")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Prepare video output
     out_dir = Path(__file__).resolve().parent / "eval_output" / ts
@@ -230,8 +237,13 @@ def run():
     ZEDCamera = _import_zed_class()
     cam = ZEDCamera(resolution="WVGA", fps=30)
     # Initialize depth estimator and load model at start
-    print("[INFO] Loading FoundationStereo depth model...")
-    depth_est = DepthEstimator()
+    print("[INFO] Loading Fast-FoundationStereo depth model...")
+    depth_est = DepthEstimator(
+        ckpt_path=args.stereo_checkpoint,
+        valid_iters=args.stereo_iters,
+        max_disp=args.stereo_max_disp,
+        volume_backend=args.stereo_volume_backend,
+    )
     
     # One-time calibration to compute T_base_cam
     project_root = Path(__file__).resolve().parents[2]
@@ -270,8 +282,11 @@ def run():
             print(f"[INFO] Moved Piper joints to deg {target_deg}")
         except Exception as exc:
             print(f"[WARN] Piper init move failed: {exc}")
-        # Initialize robot and gripper
+    # Initialize robot and gripper
     print("[INFO] Initializing robot and gripper...")
+    # Keep the hardware SDK out of import-time so camera-only profiling can
+    # reuse TrajectoryPredictor without flexivrdk or a connected arm.
+    from glasses_hardware.hardware.my_device.robot import FlexivRobot, FlexivGripper  # type: ignore
     robot = FlexivRobot(home=False)
     gripper = FlexivGripper(robot)
 
@@ -458,15 +473,17 @@ def run():
                     
 
             if depth_enabled:
-                do_update = (frame_idx % update_interval == 0)
-                print(f"[INFO] Frame {frame_idx}: depth/pred update={do_update}")
-                if do_update:
-                    with torch.no_grad():
-                        # Depth on resized stereo
-                        last_depth_m = depth_est.depth(frame, frame_right)
+                do_depth_update = frame_idx % args.depth_interval == 0
+                do_pose_update = (
+                    do_depth_update and frame_idx % args.pose_interval == 0
+                )
+                do_policy_update = frame_idx % args.policy_interval == 0
+                if do_depth_update:
+                    last_depth_m = depth_est.depth(frame, frame_right)
                 depth_m = last_depth_m
                 if depth_m is None:
                     continue
+                pose_initialized_this_frame = False
                 # Initialize FoundationPose once we have a mask and depth
                 if (not pose_ready) and (last_mask is not None) and (depth_m is not None):
 
@@ -475,17 +492,17 @@ def run():
                         pose_est = PoseEstimatorFP(mesh_path)
                     pose = pose_est.initialize(frame, depth_m, last_mask, K_rs)
                     pose_ready = pose is not None
+                    pose_initialized_this_frame = pose_ready
 
-                # Track every 10 frames; overlay every frame using last pose
+                # Tracking uses fresh depth; overlay reuses the latest pose.
                 if pose_ready and pose_est is not None:
-                    # Use the same `update_interval` for pose tracking
-                    if do_update:
+                    if do_pose_update and not pose_initialized_this_frame:
                         pose_est.track(frame, depth_m, K_rs)
                     frame = pose_est.draw_overlay(frame, K_rs)
 
                     # Overlay trajectory prediction; then execute a few steps on robot
                     if traj_pred is not None and pose_est.pose_cam_ob is not None:
-                        if do_update:
+                        if do_policy_update:
                             print("[INFO] Running trajectory prediction...")
                             frame = traj_pred.predict_and_overlay(
                                 frame,
@@ -569,7 +586,6 @@ def run():
                 break
             
             del frame, frame_right
-            torch.cuda.empty_cache()
     finally:
         # Release resources and save video
 

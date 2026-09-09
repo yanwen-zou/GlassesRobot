@@ -40,8 +40,16 @@ def _ensure_rgb_uint8(image: np.ndarray) -> np.ndarray:
 class PoseEstimatorFP:
     """Thin wrapper around FoundationPose for real-time usage."""
 
-    def __init__(self, mesh_path: Path, device: Optional[str] = None):
+    def __init__(
+        self,
+        mesh_path: Path,
+        device: Optional[str] = None,
+        register_iterations: int = 5,
+        track_iterations: int = 2,
+    ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.register_iterations = int(register_iterations)
+        self.track_iterations = int(track_iterations)
         # Load mesh
         mesh = trimesh.load_mesh(str(mesh_path), force='mesh')
         if not isinstance(mesh, trimesh.Trimesh):
@@ -72,7 +80,13 @@ class PoseEstimatorFP:
         rgb = cv2.cvtColor(_ensure_rgb_uint8(rgb_bgr), cv2.COLOR_BGR2RGB)
         mask_bin = (mask > 0).astype(np.uint8)
         
-        pose = self.est.register(K=K.astype(np.float32), rgb=rgb, depth=depth_m.astype(np.float32), ob_mask=mask_bin, iteration=5)
+        pose = self.est.register(
+            K=K.astype(np.float32),
+            rgb=rgb,
+            depth=depth_m.astype(np.float32),
+            ob_mask=mask_bin,
+            iteration=self.register_iterations,
+        )
         self.pose_cam_ob = pose
         return pose
 
@@ -82,7 +96,12 @@ class PoseEstimatorFP:
             return None
         rgb = cv2.cvtColor(_ensure_rgb_uint8(rgb_bgr), cv2.COLOR_BGR2RGB)
         try:
-            pose = self.est.track_one(rgb=rgb, depth=depth_m.astype(np.float32), K=K.astype(np.float32), iteration=2)
+            pose = self.est.track_one(
+                rgb=rgb,
+                depth=depth_m.astype(np.float32),
+                K=K.astype(np.float32),
+                iteration=self.track_iterations,
+            )
             self.pose_cam_ob = pose
             return pose
         except Exception:

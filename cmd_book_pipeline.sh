@@ -4,7 +4,7 @@ set -euo pipefail
 # Automates the post-recording steps from cmd_book.md:
 # 1. Extract RGB frames (left eye) and convert PNG -> JPG for SAM.
 # 2. Launch SAM-based mask generation.
-# 3. Run FoundationStereo depth generation.
+# 3. Run Fast-FoundationStereo depth generation.
 # 4. Save the 3x3 camera intrinsic matrix into each episode directory.
 # 5. Run FoundationPose to estimate object poses per episode, using book as mesh.
 
@@ -383,7 +383,7 @@ done
 
 for episode in "${READY_EPISODES[@]}"; do
   echo "=============================="
-  echo "🔄 Generating depth with FoundationStereo for $episode..."
+  echo "🔄 Generating depth with Fast-FoundationStereo for $episode..."
 
   episode_dir="${DATA_ROOT}/${episode}"
   depth_dir="${episode_dir}/depth"

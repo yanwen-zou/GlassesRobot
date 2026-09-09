@@ -50,6 +50,7 @@ src/egodata_eval/eval_output/
 *.tflite
 *.weights
 src/FoundationStereo/pretrained_models/
+src/FastFoundationStereo/weights/*/
 src/FoundationStereo/sam2_root/checkpoints/
 foundationpose/FoundationPose/demo_data/
 install/
